@@ -1,0 +1,43 @@
+{
+	"name": "@isopodlabs/compiler",
+	"version": "0.0.0",
+	"description": "Compiler infrastructure built on tison: TypeScript, JavaScript, C/C++ and Python front ends, a language-neutral VSDG middle end, and a WebAssembly back end.",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/adrianstephens/ts-compiler.git"
+	},
+	"main": "dist/transpile.js",
+	"bin": {
+		"tsw": "dist/ts/tsw.js"
+	},
+	"files": [
+		"dist/**/*.{js,d.ts}",
+		"README.md"
+	],
+	"scripts": {
+		"build": "tsc && npm run postbuild",
+		"build:emit": "tsc; npm run postbuild",
+		"watch": "tsc -watch -p ./",
+		"postbuild": "npm run copylib && node -e \"const f='dist/ts/tsw.js',fs=require('fs'),c=fs.readFileSync(f,'utf8');if(!c.startsWith('#!'))fs.writeFileSync(f,'#!/usr/bin/env node\\n'+c);fs.chmodSync(f,0o755);\"",
+		"copylib": "rm -rf dist/ts/lib && cp -r src/ts/lib dist/ts/lib",
+		"lint": "eslint \"src/**/*.ts\"",
+		"gate": "npm run build:emit && ts-node -T test/test-ts-corpus-gate.ts",
+		"checker": "npm run build:emit && ts-node -T test/test-checker.ts",
+		"libdecls": "npm run build:emit && ts-node -T test/test-lib-decls.ts",
+		"libdecls:update": "npm run build:emit && ts-node -T test/test-lib-decls.ts --update",
+		"gate:list": "ts-node -T test/test-ts-corpus-gate.ts --list",
+		"gate:update": "ts-node -T test/test-ts-corpus-gate.ts --update"
+	},
+	"keywords": [
+		"compiler",
+		"typescript",
+		"webassembly",
+		"parser"
+	],
+	"author": "Adrian Stephens",
+	"license": "MIT",
+	"dependencies": {
+		"@isopodlabs/binary_libs": "^1.10.0",
+		"@isopodlabs/tison": "^0.1.0"
+	}
+}

@@ -1,0 +1,8 @@
+node_modules
+hidden
+assistant
+dist
+*.tgz
+*.tsbuildinfo
+PROGRESS.md
+.tables-cache

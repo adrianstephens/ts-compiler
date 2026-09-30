@@ -1,0 +1,132 @@
+import assert from 'assert';
+import { parseWat, toWasm, parseAsmBody, TYPE_EXPR } from '../dist/wasm/wat-parser';
+
+function testWat(name: string, wat: string) {
+	console.log(`=== Test: ${name} ===`);
+	try {
+		const mod = parseWat(wat);
+		console.log('parsed successfully.');
+		const wmod = toWasm(mod);
+		const bytes = wmod.toBytes();
+		console.log(`Successfully parsed and encoded to ${bytes.length} bytes.`);
+		console.log('toWAT output:');
+		console.log(wmod.toWAT());
+		console.log('PASSED\n');
+	} catch (e) {
+		console.error(`FAILED: ${(e as Error).message}\n`);
+		if (e instanceof Error && e.stack)
+			console.error(e.stack);
+		process.exitCode = 1;
+	}
+}
+
+testWat('Simple Add', `
+(module
+  (func $add (param $x i32) (param $y i32) (result i32)
+    local.get $x
+    local.get $y
+    i32.add
+  )
+  (export "add" (func $add))
+)
+`);
+
+testWat('Factorial with Loop & Branching', `
+(module
+  (func $factorial (export "factorial") (param $n i32) (result i32)
+    ;;(local $acc i32)
+    i32.const 1
+    ;;local.set $acc
+    let $acc i32
+    block $done
+      loop $top
+        local.get $n
+        i32.const 1
+        i32.le_s
+        br_if $done
+        ;;local.get $acc
+        ;;local.get $n
+        (i32.mul $acc $n)
+        local.set $acc
+        local.get $n
+        i32.const 1
+        i32.sub
+        local.set $n
+        br $top
+      end
+    end
+    local.get $acc
+  )
+)
+`);
+
+testWat('Imports, Memory, Table, Globals, Data & Elem', `
+(module
+  (import "env" "print" (func $print (param i32)))
+  (memory $mem 1 2)
+  (table $tab 10 funcref)
+  (global $g (mut i32) (i32.const 42))
+  (func $main (export "main")
+    i32.const 0
+    global.get $g
+    i32.store
+    i32.const 0
+    i32.load
+    call $print
+  )
+  (data (i32.const 0) "Hello Wasm")
+  (elem (i32.const 0) $main)
+)
+`);
+
+testWat('Unnamed Import and Unnamed Data', `
+(module
+  (import "env" "log" (func (param i32)))
+  (func $foo
+    i32.const 42
+    call $foo
+  )
+  (data "unnamed segment")
+  (data $namedSeg "named segment")
+  (func $test
+    data.drop $namedSeg
+  )
+)
+`);
+
+// A one-armed if (no else) has no `else` field on its AST node at all -- toWasm's resolution
+// pass must not unconditionally try to resolve one.
+testWat('If with no else branch', `
+(module
+  (global $hit (mut i32) (i32.const 0))
+  (func $f (export "f") (param $x i32)
+    local.get $x
+    if
+      i32.const 1
+      global.set $hit
+    end
+  )
+)
+`);
+
+// `TYPEINDEX("T[]")` -- a type index named by a TYPE. The assembler must carry the text through
+// OPAQUELY: it knows nothing of TypeScript types, and the embedder resolves the sentinel afterwards,
+// exactly as `$name`s are resolved afterwards. `ID` always starts with `$`, so a `type:`-prefixed
+// string can never collide with a real name.
+{
+	const one = parseAsmBody('array.new_default TYPEINDEX("T[]")', {}).body[0] as { op: string; typeIndex: unknown };
+	assert.strictEqual(one.op, 'array.new_default');
+	assert.strictEqual(one.typeIndex, TYPE_EXPR + 'T[]');
+
+	// `array.copy` carries TWO type operands, and they are `dst`/`src` rather than `typeIndex` --
+	// resolving only `typeIndex` left these sentinels in place to fail much later.
+	const two = parseAsmBody('array.copy TYPEINDEX("T[]") TYPEINDEX("U[][]")', {}).body[0] as { op: string; dst: unknown; src: unknown };
+	assert.strictEqual(two.op, 'array.copy');
+	assert.strictEqual(two.dst, TYPE_EXPR + 'T[]');
+	assert.strictEqual(two.src, TYPE_EXPR + 'U[][]');
+
+	// A `$name` and a literal index still mean what they always did in the same position.
+	assert.strictEqual((parseAsmBody('array.new_default $this', { this: 7 }).body[0] as { typeIndex: unknown }).typeIndex, 7);
+	assert.strictEqual((parseAsmBody('array.new_default 3', {}).body[0] as { typeIndex: unknown }).typeIndex, 3);
+	console.log('ok    TYPEINDEX("...") lowers to an opaque sentinel');
+}

@@ -1,0 +1,244 @@
+/// <reference path="./lib.d.ts" />
+
+//-----------------------------------------------------------------------------
+//	Map -- linear-scan implementation
+//-----------------------------------------------------------------------------
+
+// O(n) get/set/has/delete over a parallel keys_/values_ pair -- real `===` for key equality, which
+// is already correct per-type in this compiler (content-based for `string`, reference-based for a
+// class instance), matching real Map's own key semantics for both without any special-casing here.
+// A real hash table (O(1) for string keys, the common case) is a legitimate later optimization, not
+// attempted yet -- this project's own actual Map usage (checker.ts/type-utils.ts/etc, the reason
+// this file exists) isn't at a scale where O(n) lookup matters.
+class Map<K, V> {
+	private keys_: K[] = [];
+	private values_: V[] = [];
+
+	// @ts-expect-error - tison extension: multiple constructor implementations
+	constructor(entries: readonly (readonly [K, V])[] = []) {
+		const n = entries.length;
+		for (let i = 0; i < n; i++)
+			this.set(entries[i][0], entries[i][1]);
+	}
+	// @ts-expect-error - tison extension: multiple constructor implementations
+	constructor(other: ReadonlyMap<K, V> | null | undefined) {
+		if (other) {
+			const keys = other.keys(), values = other.values();
+			for (let i = 0; i < keys.length; i++)
+				this.set(keys[i], values[i]);
+		}
+	}
+	// TS's own constructor; the two above are fast paths for the commonest arguments.
+	// @ts-expect-error - tison extension: multiple constructor implementations
+	constructor(entries: Iterable<readonly [K, V]> | null | undefined) {
+		if (entries)
+			for (const [k, v] of entries)
+				this.set(k, v);
+	}
+	get size(): number { return this.keys_.length; }
+
+	private indexOf(key: K): i32 {
+		const n = this.keys_.length;
+		for (let i = 0; i < n; i++) {
+			if (this.keys_[i] === key)
+				return i;
+		}
+		return -1;
+	}
+
+	get(key: K): V | undefined {
+		const i = this.indexOf(key);
+		return i === -1 ? undefined : this.values_[i];
+	}
+	has(key: K): boolean {
+		return this.indexOf(key) !== -1;
+	}
+	set(key: K, value: V): this {
+		const i = this.indexOf(key);
+		if (i === -1) {
+			this.keys_.push(key);
+			this.values_.push(value);
+		} else {
+			this.values_[i] = value;
+		}
+		return this;
+	}
+	// Shifts every later entry down one slot -- O(n), same as the scan that found `key`, and keeps
+	// the remaining entries in their original relative (insertion) order, matching real Map.
+	delete(key: K): boolean {
+		const i = this.indexOf(key);
+		if (i === -1)
+			return false;
+		const n = this.keys_.length;
+		for (let j = i; j < n - 1; j++) {
+			this.keys_[j] = this.keys_[j + 1];
+			this.values_[j] = this.values_[j + 1];
+		}
+		this.keys_.pop();
+		this.values_.pop();
+		return true;
+	}
+	clear(): void {
+		this.keys_ = [];
+		this.values_ = [];
+	}
+
+	// Snapshots (plain arrays), not live iterators; iterating the Map itself (`[Symbol.iterator]`) is the live path.
+	keys(): K[]			{ return this.keys_.slice(); }
+	values(): V[]		{ return this.values_.slice(); }
+	entries(): [K, V][]	{ return this.keys_.map((k, i) => [k, this.values_[i]]); }
+	[Symbol.iterator](): Generator<[K, V], void, unknown> {
+		return __towasm_indexed<[K, V]>(() => this.keys_.length, i => [this.keys_[i], this.values_[i]]);
+	}
+
+	// `thisArg` is ignored (not needed for the few real call sites this project has, and not supported by the `for...of` loop either).
+	forEach(callbackfn: (value: V, key: K, map: Map<K, V>) => void, thisArg?: any): void {
+		const n = this.keys_.length;
+		for (let i = 0; i < n; i++)
+			callbackfn(this.values_[i], this.keys_[i], this);
+	}
+}
+
+//-----------------------------------------------------------------------------
+//	DynamicObject -- a plain object with no fixed layout
+//-----------------------------------------------------------------------------
+
+// What `{[k: string]: V}` compiles to. A struct of its own, not a `Map`: through `any` it must read as its keys, never as a Map's members.
+class DynamicObject<V> {
+	private map_ = new Map<string, V>();
+
+	get(key: string): V | undefined		{ return this.map_.get(key); }
+	has(key: string): boolean			{ return this.map_.has(key); }
+	set(key: string, value: V): this	{ this.map_.set(key, value); return this; }
+	delete(key: string): boolean		{ return this.map_.delete(key); }
+	keys(): string[]					{ return this.map_.keys(); }
+	values(): V[]						{ return this.map_.values(); }
+	entries(): [string, V][]			{ return this.map_.entries(); }
+
+	// `Object.keys/values/entries` of an erased receiver: the raw `any[]` every representation answers with.
+	anyEntries(which: string): RawArray<any> {
+		const keys	= this.map_.keys();
+		const out	= new RawArray<any>(keys.length);
+		for (let i = 0; i < keys.length; i++)
+			out[i] = which === 'keys' ? keys[i] : which === 'values' ? this.map_.get(keys[i]) : [keys[i], this.map_.get(keys[i])];
+		return out;
+	}
+}
+
+//-----------------------------------------------------------------------------
+//	Set -- linear-scan implementation (see lib/map.ts's header comment for the tradeoff)
+//-----------------------------------------------------------------------------
+
+class Set<T> {
+	private items_: T[] = [];
+
+	// @ts-expect-error - tison extension: multiple constructor implementations
+	constructor(values: readonly T[] = []) {
+		const n = values.length;
+		for (let i = 0; i < n; i++)
+			this.add(values[i]);
+	}
+	// @ts-expect-error - tison extension: multiple constructor implementations
+	constructor(other: ReadonlySet<T> | null | undefined) {
+		if (other) {
+			const values = other.values();
+			for (let i = 0; i < values.length; i++)
+				this.add(values[i]);
+		}
+	}
+	// As `Map`'s: TS's own constructor, after the fast paths.
+	// @ts-expect-error - tison extension: multiple constructor implementations
+	constructor(values: Iterable<T> | null | undefined) {
+		if (values)
+			for (const v of values)
+				this.add(v);
+	}
+
+	get size(): number { return this.items_.length; }
+
+	private indexOf(value: T): i32 {
+		const n = this.items_.length;
+		for (let i = 0; i < n; i++) {
+			if (this.items_[i] === value)
+				return i;
+		}
+		return -1;
+	}
+
+	has(value: T): boolean {
+		return this.indexOf(value) !== -1;
+	}
+	add(value: T): this {
+		if (this.indexOf(value) === -1)
+			this.items_.push(value);
+		return this;
+	}
+	// See Map.delete's own comment -- same shift-down-then-pop, same order guarantee.
+	delete(value: T): boolean {
+		const i = this.indexOf(value);
+		if (i === -1)
+			return false;
+		const n = this.items_.length;
+		for (let j = i; j < n - 1; j++)
+			this.items_[j] = this.items_[j + 1];
+		this.items_.pop();
+		return true;
+	}
+	clear(): void {
+		this.items_ = [];
+	}
+
+	// A snapshot (plain array), not a live iterator -- see Map.keys's own comment.
+	values(): T[]		{ return this.items_.slice(); }
+	keys()				{ return this.values(); }
+	entries(): [T, T][] { return this.items_.map(k => [k, k]); }
+	[Symbol.iterator](): Generator<T, void, unknown> {
+		return __towasm_indexed<T>(() => this.items_.length, i => this.items_[i]);
+	}
+
+	forEach(callbackfn: (value: T, value2: T, set: Set<T>) => void, thisArg?: any): void {
+		const n = this.items_.length;
+		for (let i = 0; i < n; i++)
+			callbackfn(this.items_[i], this.items_[i], this);
+	}
+
+}
+
+//-----------------------------------------------------------------------------
+//	WeakMap -- backed by Map, and not actually weak
+//-----------------------------------------------------------------------------
+
+// Nothing is collected: an entry lives as long as the WeakMap does, since there's no finalization to
+// hook. Every use in this project is a cache keyed by an immutable Type/AST node, so it costs only
+// retention, never correctness.
+class WeakMap<K, V> {
+	private map_: Map<K, V>;
+
+	constructor(entries: readonly (readonly [K, V])[] = []) {
+		this.map_ = new Map<K, V>(entries);
+	}
+
+	get(key: K): V | undefined		{ return this.map_.get(key); }
+	has(key: K): boolean			{ return this.map_.has(key); }
+	set(key: K, value: V): this		{ this.map_.set(key, value); return this; }
+	delete(key: K): boolean			{ return this.map_.delete(key); }
+}
+
+// Backed by `Set`, and not weak either -- same reasoning as `WeakMap` above.
+class WeakSet<T> {
+	private set_: Set<T>;
+
+	constructor(values: readonly T[] = []) {
+		this.set_ = new Set<T>(values);
+	}
+
+	has(value: T): boolean			{ return this.set_.has(value); }
+	add(value: T): this				{ this.set_.add(value); return this; }
+	delete(value: T): boolean		{ return this.set_.delete(value); }
+}
+
+// `at(i)` while `i < size()`, both read on every step: how `Map`/`Set` iterate their own backing arrays live.
+export function* __towasm_indexed<T>(size: () => number, at: (i: number) => T): Generator<T, void, unknown> {
+	for (let i = 0; i < size(); i++)
+		yield at(i);
+}

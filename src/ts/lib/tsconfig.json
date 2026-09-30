@@ -1,0 +1,13 @@
+{
+	"compilerOptions": {
+		"target": "ES2023",
+		"noLib": true,
+		"types": []
+	},
+	"files": [
+		"lib.d.ts",
+	],
+	"include": [
+		"**/*.ts"
+	]
+}

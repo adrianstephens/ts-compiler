@@ -1,0 +1,7 @@
+[
+	"TypedArray.reduce",
+	"TypedArray.reduceRight",
+	"TypedArray.toLocaleString",
+	"TypedArray.toString",
+	"TypedArray.valueOf"
+]
