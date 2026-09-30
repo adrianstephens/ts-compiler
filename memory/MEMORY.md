@@ -21,12 +21,13 @@ no longer exist in the tree — run it after a rename and fix what is LIVE; hist
 | `containsInfer`/`containsThis` | `containsKind(t, kind)` | type-utils regroup, 2026-09-18 |
 | backend-only helpers in type-utils (`substituteClassTypeParam` … `arrayPartOf`) | unexported functions in `backend.ts` | type-utils regroup, 2026-09-18 |
 | most of `type-utils.ts` | `TS/type-core.ts` (type-utils re-exports it); `arrayMember`/`objectPrototypeMember`/`callablePrototypeMember` → `TS_SEMANTICS` | type-core split, 2026-09-18 |
-| the whole `tison/src/examples/` tree | the `compiler` package (`compiler/src/`): `common`/`walker`/`vsdg`/`transpile` at the root, `wasm/` (`codegen`, `wat-parser`), `ts/`, `cpp/`, `py/`, `cg/` | split out of tison, 2026-09-30 |
+| the whole `tison/src/examples/` tree | the `compiler` package (`compiler/src/`): `vsdg`/`transpile` at the root (`common`/`walker` moved to tison, see below), `wasm/` (`codegen`, `wat-parser`), `ts/`, `cpp/`, `py/`, `cg/` | split out of tison, 2026-09-30 |
 | `examples/TS/backend.ts`, `CPP/backend.ts`, `PY/backend.ts` | `ts/wasm-backend.ts`, `cpp/wasm-backend.ts`, `py/wasm-backend.ts` | same |
 | `wasm-codegen.ts`, `wat-parser.ts`, `cg-grammar.ts` | `wasm/codegen.ts`, `wasm/wat-parser.ts`, `cg/grammar.ts` | same |
 | `TS/`, `CPP/`, `PY/` dirs | `ts/`, `cpp/`, `py/` | same |
 | `dist/examples/...`, `npm run examples`, `cd src/examples && tsc -p .` | `dist/...`, `npm run build:emit` (one tsconfig now, so the "needs its own tsconfig" trap is gone) | same |
 | `tison/test`, `tison/assistant`, `tison/memory` (compiler-side) | `compiler/test`, `compiler/assistant`, `compiler/memory`; engine memories stay in `tison/memory` | same |
+| `tison/src/examples/common.ts`, `walker.ts` (the shared AST shapes / walker types) | `tison/src/ast.ts`, `tison/src/walker.ts`, imported as `@isopodlabs/tison/ast` and `@isopodlabs/tison/walker` | moved into tison so parser-only consumers need not pull in the compiler, 2026-09-30 |
 | `scad_parser.ts` | deleted from tison by the user, not moved; `test-scad-parser.ts` still in `tison/test` and dangling | 2026-09-30 |
 
 The module dropped its `wasm`/`Wasm` prefixes throughout: the file is already named `wasm-codegen.ts` and

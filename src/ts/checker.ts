@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-expressions */
 import * as TS from './ts-parser';
 import * as JS from './js-parser';
-import { Literal, Binary, hasMod, Location, getPos } from '../common';
+import { Literal, Binary, hasMod, Location, getPos } from '@isopodlabs/tison/ast';
 import { isTsDeclaration, walker, walkerB } from './walker';
 import * as T from './type-utils';
 import { printer } from './printer';

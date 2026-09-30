@@ -1,6 +1,6 @@
 import { Rules, Forward, MaybeList, terminal, ForceFork } from '@isopodlabs/tison';
 import * as JS from './js-parser';
-import { Module, Literal, Identifier } from '../common';
+import { Module, Literal, Identifier } from '@isopodlabs/tison/ast';
 import { walker } from './walker';
 
 const Rule = JS.Rule;

@@ -15,7 +15,7 @@
 
 import * as wasm from '@isopodlabs/binary_libs/wasm';
 import * as WAT from './wat-parser';
-import { Location } from '../common';
+import { Location } from '@isopodlabs/tison/ast';
 
 const I				= wasm.I;
 

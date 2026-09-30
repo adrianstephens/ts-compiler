@@ -1,8 +1,8 @@
 import * as path from 'path';
 import { type RecoveryCallback, type MergeValues, type Token, type LALRParser, type TermLike, makeRule, Rules, terminal, Manual, makeParser, Forward, List, Maybe, OneOf, ForceFork, WithPrec } from '@isopodlabs/tison';
 import { makeCachedParser } from '@isopodlabs/tison/tableCache';
-import { Literal, Identifier, Unary, UnaryPost, Binary, Assign, Await } from '../common';
-import * as Common from '../common';
+import { Literal, Identifier, Unary, UnaryPost, Binary, Assign, Await } from '@isopodlabs/tison/ast';
+import * as Common from '@isopodlabs/tison/ast';
 
 // ===================================================================
 //  JavaScript Parser using tison

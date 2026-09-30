@@ -1,7 +1,7 @@
 import * as PY from './py-parser';
-import { Module } from '../common';
-import * as W from '../walker';
-import {mapObject, mapArrayA, mapDefined, makeProcess, makeProcessB} from '../walker';
+import { Module } from '@isopodlabs/tison/ast';
+import * as W from '@isopodlabs/tison/walker';
+import {mapObject, mapArrayA, mapDefined, makeProcess, makeProcessB} from '@isopodlabs/tison/walker';
 
 // Python's AST has only two node domains -- statements and expressions -- so this walker is a
 // trimmed-down version of ts/walker.ts (no separate Type / declarator domains).

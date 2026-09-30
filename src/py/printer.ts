@@ -1,5 +1,5 @@
 import * as PY from './py-parser';
-import { Module } from '../common';
+import { Module } from '@isopodlabs/tison/ast';
 
 type Expr = PY.Expr;
 type Stmt = PY.Stmt;

@@ -1,7 +1,7 @@
 import * as TS from './ts-parser';
 import * as JS from './js-parser';
 import * as T from './type-utils';
-import { Module, Location, Identifier, Literal, Binary, Conditional, Assign, Await, Member, ExprStmt, hasMod, dropMod, If, While } from '../common';
+import { Module, Location, Identifier, Literal, Binary, Conditional, Assign, Await, Member, ExprStmt, hasMod, dropMod, If, While } from '@isopodlabs/tison/ast';
 import { walker, walkerB, calcUnary, calcBinary } from './walker';
 import { SEVERITY, Err, checkBlock, checkStmt1, exportScope, markAbsenceTests, literalSpecifier, unknownTypeNames, typeOf, typeOf1, inferReturn } from './checker';
 import { LoadedModule, ModuleLoader } from './module-loader';

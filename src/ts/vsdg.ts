@@ -17,7 +17,7 @@
 
 import * as JS from './js-parser';
 import * as TS from './ts-parser';
-import { Identifier, Literal, Binary, Assign, If, ExprStmt, Block } from '../common';
+import { Identifier, Literal, Binary, Assign, If, ExprStmt, Block } from '@isopodlabs/tison/ast';
 import { walkerB, calcUnary, calcBinary, isJsStatement, isTsDeclaration } from './walker';
 import { patternBindings as buildPatternBindings } from './transform';
 import { tocode } from './type-utils';

@@ -10,7 +10,7 @@ import { printer as PYprinter, Options as PYOptions } from './py/printer';
 import { printer as TSprinter, Options as TSOptions } from './ts/printer';
 import { printer as CPPprinter, Options as CPPOptions } from './cpp/printer';
 import { isExpr as isCppExprNode, isPackParameter as isCppPackParameter } from './cpp/walker';
-import { Module, bodyOf, Identifier, Literal, Unary, UnaryPost, Binary, Call, Member, Index, Conditional, Spread, Sequence, Assign, Await, Yield, ExprStmt, Return, Throw, If, While, DoWhile } from './common';
+import { Module, bodyOf, Identifier, Literal, Unary, UnaryPost, Binary, Call, Member, Index, Conditional, Spread, Sequence, Assign, Await, Yield, ExprStmt, Return, Throw, If, While, DoWhile } from '@isopodlabs/tison/ast';
 
 const pyUnsupported		= (what: string): never => { throw new Error(`transpile: ${what} has no Python equivalent`); };
 const tsUnsupported		= (what: string): never => { throw new Error(`transpile: ${what} has no TypeScript equivalent`); };

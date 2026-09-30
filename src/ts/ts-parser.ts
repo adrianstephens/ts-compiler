@@ -3,7 +3,7 @@ import { Rules, Forward, Maybe, List, MaybeList, OneOf, terminal, ForceFork } fr
 import { makeCachedParser, siblingSource } from '@isopodlabs/tison/tableCache';
 import * as JS from './js-parser';
 import { IDENT, NUM, STR, EXPORT_KW, unquoteString, numberValue, numberKey, Rule } from './js-parser';
-import * as Common from '../common';
+import * as Common from '@isopodlabs/tison/ast';
 
 // ===================================================================
 //  TypeScript Parser -- an extension of js-parser

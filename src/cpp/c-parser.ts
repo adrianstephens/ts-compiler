@@ -2,8 +2,8 @@ import * as path from 'path';
 import { makeRule, Rules, terminal, OneOf, List, Forward, WithPrec } from '@isopodlabs/tison';
 import { makeCachedParser } from '@isopodlabs/tison/tableCache';
 import { preprocess, PreprocessOptions } from './preprocessor';
-import { Module, Literal, Identifier, Unary, UnaryPost, Binary, Assign, stampPos } from '../common';
-import type * as Common from '../common';
+import { Module, Literal, Identifier, Unary, UnaryPost, Binary, Assign, stampPos } from '@isopodlabs/tison/ast';
+import type * as Common from '@isopodlabs/tison/ast';
 
 // ===================================================================
 //  C Parser Grammar using tison

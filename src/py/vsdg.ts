@@ -25,7 +25,7 @@
 
 import * as PY from './py-parser';
 import { printer as PYPrinter } from './printer';
-import { Identifier, Literal, Assign, If, Throw } from '../common';
+import { Identifier, Literal, Assign, If, Throw } from '@isopodlabs/tison/ast';
 import { walkerB, calcUnary, calcBinary, calcCompare } from './walker';
 import {
 	Dialect, VSDGBuilder, Emitter, Recurse, ParamSlot,

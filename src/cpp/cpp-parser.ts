@@ -2,8 +2,8 @@ import * as path from 'path';
 import { makeRule, Rules, List, OneOf, termOneOf, terminal, WithPrec, removeRules, ForceFork} from '@isopodlabs/tison';
 import { makeCachedParser, siblingSource } from '@isopodlabs/tison/tableCache';
 import { preprocess, PreprocessOptions } from './preprocessor';
-import { Module, Literal, Identifier, stampPos } from '../common';
-import type * as Common from '../common';
+import { Module, Literal, Identifier, stampPos } from '@isopodlabs/tison/ast';
+import type * as Common from '@isopodlabs/tison/ast';
 import * as C from './c-parser';
 
 // ===================================================================

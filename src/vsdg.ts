@@ -43,7 +43,7 @@
 // Generics: E = expression, S = statement, T = type annotation. `B` (a fourth parameter every node
 // and scope still carries) is now unused -- see ParamSlot for where its destructuring job went.
 
-import { Literal, Unary, Conditional, If, While, DoWhile, Return, ExprStmt, ConstantFolder } from './common';
+import { Literal, Unary, Conditional, If, While, DoWhile, Return, ExprStmt, ConstantFolder } from '@isopodlabs/tison/ast';
 
 // ===================================================================
 //  Node model

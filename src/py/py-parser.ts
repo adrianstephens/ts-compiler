@@ -1,8 +1,8 @@
 import * as path from 'path';
 import { terminal, OneOf, List, MaybeList, Forward, Rules, makeRule, Terminal, type RecoveryCallback } from '@isopodlabs/tison';
 import { makeCachedParser } from '@isopodlabs/tison/tableCache';
-import { Module, Literal, Identifier, Unary, Binary, stampPos } from '../common';
-import type * as Common from '../common';
+import { Module, Literal, Identifier, Unary, Binary, stampPos } from '@isopodlabs/tison/ast';
+import type * as Common from '@isopodlabs/tison/ast';
 
 // ===================================================================
 //  Python 3 parser using tison

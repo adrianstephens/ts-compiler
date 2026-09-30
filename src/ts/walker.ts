@@ -1,8 +1,8 @@
 import * as TS from './ts-parser';
 import * as JS from './js-parser';
-import { Literal, Module } from '../common';
-import * as W from '../walker';
-import {mapObject, mapArray, mapArrayA, mapDefined, makeProcess, makeProcessB} from '../walker';
+import { Literal, Module } from '@isopodlabs/tison/ast';
+import * as W from '@isopodlabs/tison/walker';
+import {mapObject, mapArray, mapArrayA, mapDefined, makeProcess, makeProcessB} from '@isopodlabs/tison/walker';
 
 // ===================================================================
 //  Type Guards

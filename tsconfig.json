@@ -16,6 +16,8 @@
 		"paths": {
 			"@isopodlabs/tison/tableCache": ["../tison/dist/tableCache"],
 			"@isopodlabs/tison/rrule": ["../tison/dist/rrule"],
+			"@isopodlabs/tison/ast": ["../tison/dist/ast"],
+			"@isopodlabs/tison/walker": ["../tison/dist/walker"],
 			"@isopodlabs/binary_libs/wasm": ["../binary-libs/dist/wasm"]
 		}
 	},

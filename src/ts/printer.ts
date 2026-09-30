@@ -1,6 +1,6 @@
 import * as TS from './ts-parser';
 import * as JS from './js-parser';
-import { Module, Literal, hasMod } from '../common';
+import { Module, Literal, hasMod } from '@isopodlabs/tison/ast';
 import { isJsStatement, isTsDeclaration } from './walker';
 
 type Type	= TS.Type;

@@ -4,7 +4,7 @@ import * as TS from './ts-parser';
 import * as JS from './js-parser';
 import * as T from './type-utils';
 import * as W from '../wasm/codegen';
-import { Literal, Identifier, Binary, Assign, Conditional, Member, hasMod, Module as CModule } from '../common';
+import { Literal, Identifier, Binary, Assign, Conditional, Member, hasMod, Module as CModule } from '@isopodlabs/tison/ast';
 import { checkHoisted, checkImported, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, checkedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals } from './checker';
 import { Walker, walker, walkerB } from './walker';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';

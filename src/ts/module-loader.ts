@@ -1,6 +1,6 @@
 import * as TS from './ts-parser';
 import * as fs from 'fs/promises';
-import {Module} from '../common';
+import {Module} from '@isopodlabs/tison/ast';
 import * as path from 'path';
 
 export const OptionsDefault = {

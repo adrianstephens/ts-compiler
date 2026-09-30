@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-this-alias */
 import * as TS from './ts-parser';
 import * as JS from './js-parser';
-import { Literal, hasMod } from '../common';
+import { Literal, hasMod } from '@isopodlabs/tison/ast';
 import { Expr, BindingTarget } from './js-parser';
 import { Type } from './ts-parser';
 import { walker, walkerB, WalkerB } from './walker';

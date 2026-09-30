@@ -1,8 +1,8 @@
 import * as C from './c-parser';
 import * as CPP from './cpp-parser';
-import { Module } from '../common';
-import * as W from '../walker';
-import { mapObject, mapArray, mapArrayA, mapDefined, makeProcess, makeProcessB } from '../walker';
+import { Module } from '@isopodlabs/tison/ast';
+import * as W from '@isopodlabs/tison/walker';
+import { mapObject, mapArray, mapArrayA, mapDefined, makeProcess, makeProcessB } from '@isopodlabs/tison/walker';
 
 type Definition			= CPP.Definition;
 type Stmt				= CPP.Stmt;

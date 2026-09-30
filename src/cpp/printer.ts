@@ -1,6 +1,6 @@
 import * as C from './c-parser';
 import * as CPP from './cpp-parser';
-import { Module } from '../common';
+import { Module } from '@isopodlabs/tison/ast';
 import { isExpr, isDeclarator, isPackParameter } from './walker';
 
 type Definition			= CPP.Definition;

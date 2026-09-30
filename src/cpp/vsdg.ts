@@ -41,7 +41,7 @@
 
 import * as C from './c-parser';
 import * as CPP from './cpp-parser';
-import * as Common from '../common';
+import * as Common from '@isopodlabs/tison/ast';
 import { walkerB, isExpr, isPackParameter, calcBinary, calcUnary, Scalar, scalarFor, spellScalar } from './walker';
 import { printer as cppPrinterFactory } from './printer';
 import {
