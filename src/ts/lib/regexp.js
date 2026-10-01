@@ -674,7 +674,6 @@ function compilePattern(pattern) {
 //	RegExp / RegExpMatch
 //-----------------------------------------------------------------------------
 export class RegExp {
-    source;
     // Duplicated from RegExpCompiler -- see that class's own header comment for why (cross-class
     // static access to RegExpCompiler.OP_X isn't resolvable, and a shared top-level const silently
     // reads back 0 at runtime).
@@ -712,13 +711,15 @@ export class RegExp {
     laBase = new Array(16);
     laSp = new Array(16);
     laDepth = 0;
-    constructor(source, flags = '') {
-        this.source = source;
-        this.global = hasFlag(flags, 103); // 'g'
-        this.ignoreCase = hasFlag(flags, 105); // 'i'
-        this.multiline = hasFlag(flags, 109); // 'm'
-        this.sticky = hasFlag(flags, 121); // 'y'
-        this.compiled = compilePattern(source);
+    source;
+    constructor(pattern, flags) {
+        this.source = typeof pattern === 'string' ? pattern : pattern.source;
+        const f = flags ?? (typeof pattern === 'string' ? '' : pattern.flags);
+        this.global = hasFlag(f, 103); // 'g'
+        this.ignoreCase = hasFlag(f, 105); // 'i'
+        this.multiline = hasFlag(f, 109); // 'm'
+        this.sticky = hasFlag(f, 121); // 'y'
+        this.compiled = compilePattern(this.source);
         this.groups = new Array((this.compiled.groupCount + 1) * 2);
     }
     // Canonical relative order matches real JS's full 'dgimsuvy' -- just the subset this class tracks.

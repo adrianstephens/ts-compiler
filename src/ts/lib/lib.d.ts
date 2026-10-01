@@ -143,7 +143,7 @@ interface IterableIterator<T, R = any, N = any> extends Iterator<T, R, N> {
 }
 declare function __towasm_indexed<T>(size: () => number, at: (i: number) => T): Generator<T, void, unknown>;
 interface PromiseLike<T> {
-	then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null): PromiseLike<TResult1 | TResult2>;
+	then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null): PromiseLike<TResult1 | TResult2>;
 }
 
 declare type PropertyKey = string | number | symbol;
@@ -297,7 +297,7 @@ interface RegExpExecArray extends Array<string> {
 // `string[]` of the cooked text for it. `raw` is declared so the checker reports its real type rather
 // than "no such property", but has no physical slot: reading it is an honest `unknown field 'raw'`.
 interface TemplateStringsArray extends Array<string> {
-	raw: string[];
+	readonly raw: readonly string[];
 }
 
 interface RegExp {
@@ -315,8 +315,8 @@ interface RegExp {
 
 // As TS's `RegExpConstructor`: callable without `new` (`RegExp(src, flags)`), same as `ArrayConstructor` above.
 interface RegExpConstructor {
-	new (source: string, flags?: string): RegExp;
-	(source: string, flags?: string): RegExp;
+	new (pattern: RegExp | string, flags?: string): RegExp;
+	(pattern: RegExp | string, flags?: string): RegExp;
 }
 declare var RegExp: RegExpConstructor;
 
@@ -417,7 +417,7 @@ interface ReadonlyArray<T> {
 	some(predicate: (value: T, index: number, array: readonly T[]) => unknown, thisArg?: any): boolean;
 	forEach(callbackfn: (value: T, index: number, array: readonly T[]) => void, thisArg?: any): void;
 	map<U>(callbackfn: (value: T, index: number, array: readonly T[]) => U, thisArg?: any): U[];
-	flatMap<U>(callback: (value: T, index: number, array: readonly T[]) => U[], thisArg?: any): U[];
+	flatMap<U>(callback: (value: T, index: number, array: readonly T[]) => U | readonly U[], thisArg?: any): U[];
 	filter<S extends T>(predicate: (value: T, index: number, array: readonly T[]) => value is S, thisArg?: any): S[];
 	filter(predicate: (value: T, index: number, array: readonly T[]) => unknown, thisArg?: any): T[];
 	find<S extends T>(predicate: (value: T, index: number, obj: readonly T[]) => value is S, thisArg?: any): S | undefined;

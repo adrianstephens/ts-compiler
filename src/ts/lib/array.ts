@@ -307,18 +307,19 @@ export class Array<T> extends ArrayBase {
 		}
 		return out;
 	}
-	// Real TS lets the callback return `U | readonly U[]`; here it must return an array. Telling the two
-	// apart needs a runtime array test on a union, which this compiler has no representation for -- and
-	// the array form is what every real caller uses.
 	// Grown through `push` rather than sized up front by a first pass: the callback must run exactly ONCE
 	// per element (they have effects), and holding the parts to measure them would need a `U[][]`, whose
 	// `arr:ref` elements a concrete `number[]` part has no conversion into.
-	flatMap<U>(callback: (value: T, index: number, array: this) => U[], thisArg?: any): U[] {
-		let result: U[] = Array._make<U>(0);
+	flatMap<U>(callback: (value: T, index: number, array: this) => U | readonly U[], thisArg?: any): U[] {
+		const result: U[] = Array._make<U>(0);
 		for (let i = 0; i < this.length; i++) {
 			const part = callback(this[i], i, this);
-			for (let j = 0; j < part.length; j++)
-				result.push(part[j]);
+			if (Array.isArray(part)) {
+				const inner = part as readonly U[];
+				for (let j = 0; j < inner.length; j++)
+					result.push(inner[j]);
+			} else
+				result.push(part as U);
 		}
 		return result;
 	}

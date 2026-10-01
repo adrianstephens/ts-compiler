@@ -2837,6 +2837,16 @@ async function main() {
 	}
 
 	{
+		// A flatMap callback may return a plain value or an array, told apart at run time as JS does; a RegExp may copy another.
+		const { mixed, copy } = await compile(`
+			export function mixed(): number { const r = [1, 2, 3].flatMap(x => x === 2 ? [x, x * 10] : x); return r.length * 1000 + r[2]; }
+			export function copy(): number { const a = /b+/g; const b = new RegExp(a); const c = new RegExp(a, 'i'); return (b.global ? 100 : 0) + (c.global ? 10 : 0) + (c.test('xBBy') ? 1 : 0) + b.source.length * 1000; }
+		`);
+		check('flatMap: a callback returning a value or an array', mixed(), 4020);
+		check('new RegExp(regexp, flags?) copies the source and, unless given, the flags', copy(), 2101);
+	}
+
+	{
 		// `BigInt(v)`/`Number(v)` of a `number | bigint` take the union constructor, which tells them apart at run time; a
 		// bigint `**` is `BigInt.pow` wherever it appears; `asIntN`/`asUintN` against values from node.
 		const { unionCtors, bigPow, asN } = await compile(`

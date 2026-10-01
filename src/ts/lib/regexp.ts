@@ -614,12 +614,16 @@ export class RegExp {
 	private laSp		= new Array<i32>(16);
 	private laDepth		= 0;
 
-	constructor(public source: string, flags = '') {
-		this.global		= hasFlag(flags, 103);	// 'g'
-		this.ignoreCase = hasFlag(flags, 105);	// 'i'
-		this.multiline	= hasFlag(flags, 109);	// 'm'
-		this.sticky		= hasFlag(flags, 121);	// 'y'
-		this.compiled	= compilePattern(source);
+	source:		string;
+
+	constructor(pattern: string | RegExp, flags?: string) {
+		this.source		= typeof pattern === 'string' ? pattern : pattern.source;
+		const f			= flags ?? (typeof pattern === 'string' ? '' : pattern.flags);
+		this.global		= hasFlag(f, 103);	// 'g'
+		this.ignoreCase = hasFlag(f, 105);	// 'i'
+		this.multiline	= hasFlag(f, 109);	// 'm'
+		this.sticky		= hasFlag(f, 121);	// 'y'
+		this.compiled	= compilePattern(this.source);
 		this.groups		= new Array<i32>((this.compiled.groupCount + 1) * 2);
 	}
 
