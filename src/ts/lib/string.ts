@@ -112,22 +112,10 @@ export class String {
 		return this.charAt(i);
 	}
 
-	indexOf(needle: string): number {
-		const n= this.length;
-		const m = needle.length;
-		for (let i = 0; i <= n - m; i++) {
-			let j = 0;
-			while (j < m && this.charCodeAt(i + j) === needle.charCodeAt(j))
-				j++;
-			if (j === m)
-				return i;
-		}
-		return -1;
-	}
-	lastIndexOf(needle: string): number {
+	indexOf(needle: string, position: i32 = 0): number {
 		const n = this.length;
 		const m = needle.length;
-		for (let i = n - m; i >= 0; --i) {
+		for (let i = clampIndex(position, n); i <= n - m; i++) {
 			let j = 0;
 			while (j < m && this.charCodeAt(i + j) === needle.charCodeAt(j))
 				j++;
@@ -136,22 +124,36 @@ export class String {
 		}
 		return -1;
 	}
-	includes(needle: string): boolean {
-		return this.indexOf(needle) !== -1;
+	lastIndexOf(needle: string, position: i32 = 0x7fffffff): number {
+		const n = this.length;
+		const m = needle.length;
+		const p = clampIndex(position, n);
+		for (let i = p < n - m ? p : n - m; i >= 0; --i) {
+			let j = 0;
+			while (j < m && this.charCodeAt(i + j) === needle.charCodeAt(j))
+				j++;
+			if (j === m)
+				return i;
+		}
+		return -1;
 	}
-	startsWith(prefix: string): boolean {
+	includes(needle: string, position: i32 = 0): boolean {
+		return this.indexOf(needle, position) !== -1;
+	}
+	startsWith(prefix: string, position: i32 = 0): boolean {
 		const m = prefix.length;
-		if (m > this.length)
+		const p = clampIndex(position, this.length);
+		if (p + m > this.length)
 			return false;
 		for (let j = 0; j < m; j++) {
-			if (this.charCodeAt(j) !== prefix.charCodeAt(j))
+			if (this.charCodeAt(p + j) !== prefix.charCodeAt(j))
 				return false;
 		}
 		return true;
 	}
-	endsWith(suffix: string): boolean {
+	endsWith(suffix: string, endPosition: i32 = 0x7fffffff): boolean {
 		const m = suffix.length;
-		const n = this.length;
+		const n = clampIndex(endPosition, this.length);
 		if (m > n)
 			return false;
 		const offset = n - m;
@@ -166,11 +168,8 @@ export class String {
 	// array is too large" -- where JS simply gives `''`.
 	slice(start: i32 = 0, end: i32 = 0x7fffffff): string {
 		const len = this.length;
-		let from	= start < 0 ? len + start : start;
-		let to		= end < 0 ? len + end : end;
-		from	= from < 0 ? 0 : from > len ? len : from;
-		to		= to < 0 ? 0 : to > len ? len : to;
-		const rlen = to > from ? to - from : 0;
+		const from	= relativeIndex(start, len), to = relativeIndex(end, len);
+		const rlen	= to > from ? to - from : 0;
 		const result = String._alloc(rlen);
 		String._copy(result, 0, this as unknown as string, from, rlen);
 		return result;

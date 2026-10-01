@@ -211,22 +211,28 @@ export class TypedArray<T extends number | bigint> {
 		}
 	}
 
-	indexOf(x: T): i32 {
-		for (let i = 0; i < this.length; i++) {
+	indexOf(x: T, fromIndex: i32 = 0): i32 {
+		for (let i = relativeIndex(fromIndex, this.length); i < this.length; i++) {
 			if (this[i] === x)
 				return i;
 		}
 		return -1;
 	}
-	lastIndexOf(x: T): i32 {
-		for (let i = this.length - 1; i >= 0; --i) {
+	lastIndexOf(x: T, fromIndex: i32 = 0x7fffffff): i32 {
+		for (let i = fromIndex < 0 ? this.length + fromIndex : fromIndex >= this.length ? this.length - 1 : fromIndex; i >= 0; --i) {
 			if (this[i] === x)
 				return i;
 		}
 		return -1;
 	}
-	includes(x: T): boolean {
-		return this.indexOf(x) !== -1;
+	// SameValueZero, as `Array.includes`: `indexOf` can never find a NaN.
+	includes(x: T, fromIndex: i32 = 0): boolean {
+		for (let i = relativeIndex(fromIndex, this.length); i < this.length; i++) {
+			const v = this[i];
+			if (v === x || (v !== v && x !== x))
+				return true;
+		}
+		return false;
 	}
 	reverse(): TypedArray<T> {
 		const len = this.length;
@@ -245,11 +251,8 @@ export class TypedArray<T extends number | bigint> {
 	// `String.slice`; all three had the identical bug.
 	slice(start: i32 = 0, end: i32 = 0x7fffffff): TypedArray<T> {
 		const len = this.length;
-		let from: i32	= start < 0 ? len + start : start;
-		let to: i32		= end < 0 ? len + end : end;
-		from	= from < 0 ? 0 : from > len ? len : from;
-		to		= to < 0 ? 0 : to > len ? len : to;
-		const rlen = to > from ? to - from : 0;
+		const from	= relativeIndex(start, len), to = relativeIndex(end, len);
+		const rlen	= to > from ? to - from : 0;
 		const result = new TypedArray<T>(rlen);
 		for (let i = 0; i < rlen; i++)
 			result[i] = this[from + i];
@@ -257,8 +260,8 @@ export class TypedArray<T extends number | bigint> {
 	}
 	fill(x: T, start: i32 = 0, end: i32 = 0x7fffffff): TypedArray<T> {
 		const len = this.length;
-		start	= start < 0 ? start + len : start;
-		end		= end < 0 ? end + len : end > len ? len : end;
+		start	= relativeIndex(start, len);
+		end		= relativeIndex(end, len);
 		for (let i = start; i < end; i++)
 			this[i] = x;
 		return this;
@@ -330,12 +333,7 @@ export class TypedArray<T extends number | bigint> {
 	// overwritten.
 	copyWithin(target: i32, start: i32, end: i32 = 0x7fffffff): TypedArray<T> {
 		const len = this.length;
-		let to		= target < 0 ? target + len : target;
-		let from	= start < 0 ? start + len : start;
-		let last	= end < 0 ? end + len : end > len ? len : end;
-		to		= to < 0 ? 0 : to > len ? len : to;
-		from	= from < 0 ? 0 : from > len ? len : from;
-		last	= last < 0 ? 0 : last > len ? len : last;
+		const to = relativeIndex(target, len), from = relativeIndex(start, len), last = relativeIndex(end, len);
 		let count = last - from;
 		if (count > len - to)
 			count = len - to;
@@ -389,8 +387,8 @@ export class TypedArray<T extends number | bigint> {
 	// semantics as `slice`.
 	subarray(start: i32 = 0, end: i32 = 0x7fffffff): TypedArray<T> {
 		const len = this.length;
-		start	= start < 0 ? start + len : start;
-		end		= end < 0 ? end + len : end > len ? len : end;
+		start	= relativeIndex(start, len);
+		end		= relativeIndex(end, len);
 		if (end < start)
 			end = start;
 		// @ts-expect-error - tison extension: multiple constructor implementations

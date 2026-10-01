@@ -2815,6 +2815,28 @@ async function main() {
 	}
 
 	{
+		// TS's optional position arguments: an array index counts back from the end, a string position clamps; values from node.
+		const { strIdx, strPos, arrIdx, arrIncl, typed, arrFill, nums, errs } = await compile(`
+			export function strIdx(): number { return 'abcabc'.indexOf('a', 2) * 100 + 'abcabc'.lastIndexOf('a', 2) * 10 + 'abc'.indexOf('', 9); }
+			export function strPos(): number { return ('abcabc'.includes('a', 4) ? 1000 : 0) + ('abcabc'.startsWith('ca', 2) ? 100 : 0) + ('abcabc'.endsWith('ab', 5) ? 10 : 0) + ('abc'.startsWith('a', -3) ? 1 : 0); }
+			export function arrIdx(): number { const a = [1, 2, 1, 2]; return a.indexOf(1, 1) * 1000 + a.lastIndexOf(2, -2) * 100 + a.indexOf(2, -1) * 10 + a.lastIndexOf(1, -9) + 2; }
+			export function arrIncl(): number { const a = [1, NaN, 3]; return (a.includes(NaN, 1) ? 100 : 0) + (a.includes(1, -2) ? 10 : 0) + (a.includes(3, -1) ? 1 : 0); }
+			export function typed(): number { const t = new Float64Array([1, NaN, 3]); return (t.includes(NaN) ? 1000 : 0) + t.indexOf(3, -1) * 100 + t.subarray(-100).length * 10 + t.fill(7, -1)[2]; }
+			export function arrFill(): number { const a = [1, 2, 3]; a.fill(9, 2, 1); a.fill(5, -1); return a[0] * 100 + a[1] * 10 + a[2]; }
+			export function nums(): number { return (12.5).toFixed().length * 100 + (1.25).toPrecision().length; }
+			export function errs(): number { return new Error().message.length + new RangeError().name.length * 10; }
+		`);
+		check('string indexOf/lastIndexOf position', strIdx(), 303);
+		check('string includes/startsWith/endsWith position', strPos(), 111);
+		check('array indexOf/lastIndexOf fromIndex', arrIdx(), 2131);
+		check('array includes fromIndex, NaN', arrIncl(), 101);
+		check('typed array includes NaN, indexOf fromIndex, clamped subarray/fill', typed(), 1237);
+		check('array fill: reversed range is empty, negative start counts back', arrFill(), 125);
+		check('toFixed/toPrecision with no argument', nums(), 204);
+		check('Error constructors with no message', errs(), 100);
+	}
+
+	{
 		// `BigInt(v)`/`Number(v)` of a `number | bigint` take the union constructor, which tells them apart at run time; a
 		// bigint `**` is `BigInt.pow` wherever it appears; `asIntN`/`asUintN` against values from node.
 		const { unionCtors, bigPow, asN } = await compile(`

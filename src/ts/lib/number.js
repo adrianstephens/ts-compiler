@@ -1,0 +1,559 @@
+/* eslint-disable no-loss-of-precision */
+/// <reference path="./lib.d.ts" />
+import { f64BitsHi, f64BitsLo, f64FromBits } from './typedarray';
+// JS `%` is fmod, not the truncated-difference formula alone, and wasm has no float remainder
+// instruction. Two edges the bare `x - trunc(x/y)*y` gets wrong, both found by `assistant/difftest.sh`:
+// a `y` of +-Infinity makes `trunc(x/y)*y` a `0 * Infinity` NaN (JS says `7 % Infinity` is `7`), and the
+// subtraction yields +0 where JS keeps the dividend's sign (`-1 % 1` is `-0`).
+// `|x| < |y| -> x` settles the first (and every case where the dividend is already the answer, sign
+// intact) while still falling through to NaN for a `y` of 0/NaN and an infinite `x`; `copysign(..., x)`
+// settles the second, and is a no-op wherever the difference already carries x's sign.
+export const __towasm_mod = __asm(`
+	(switch $T
+		(($i32 $i64) $T.rem_s)
+		(($f32 $f64)
+			(local $x $T)
+			(local $y $T)
+			local.set	$y
+			local.set	$x
+			local.get	$x
+			local.get	$x
+			local.get	$x
+			local.get	$y
+			$T.div
+			$T.trunc
+			local.get	$y
+			$T.mul
+			$T.sub
+			local.get	$x
+			$T.copysign
+			local.get	$x
+			$T.abs
+			local.get	$y
+			$T.abs
+			$T.lt
+			select
+		)
+	)
+`);
+function cos_core(r) {
+    const z = r * r;
+    const C1 = -0.5;
+    const C2 = 4.16666666666665929218e-2;
+    const C3 = -1.38888888888741095749e-3;
+    const C4 = 2.48015872894767294178e-5;
+    return z * (C1 + z * (C2 + z * (C3 + z * C4))) + 1.0;
+}
+function sin_core(r) {
+    const z = r * r;
+    const S1 = -1.66666666666666324348e-1;
+    const S2 = 8.33333333332248946124e-3;
+    const S3 = -1.98412698298579493134e-4;
+    const S4 = 2.75573137070700676789e-6;
+    return r + r * z * (S1 + z * (S2 + z * (S3 + z * S4)));
+}
+// Leibniz series x - x^3/3 + x^5/5 - x^7/7 + x^9/9 -- only accurate for small |x| (converges slowly near
+// its domain edge), so callers must range-reduce down to roughly |x| <= 1/3 first.
+function atanPoly(x) {
+    const x2 = x * x;
+    return x * (1 + x2 * (-1 / 3 + x2 * (1 / 5 + x2 * (-1 / 7 + x2 / 9))));
+}
+function intPow(x, y) {
+    if (y < 0)
+        return 1 / intPow(x, -y);
+    let result = y & 1 ? x : 1;
+    while (y >>= 1) {
+        x *= x;
+        if (y & 1)
+            result *= x;
+    }
+    return result;
+}
+//-----------------------------------------------------------------------------
+//	Boolean
+//-----------------------------------------------------------------------------
+export class Boolean {
+    // `Boolean(x)` is a real truthiness test, not a pass-through: towasm lowers a call on a class to its
+    // constructor, so this IS `Boolean('')`/`Boolean(0)`/`Boolean(NaN)`. The local is declared `i32` so
+    // the (cast-stripped) return type still tells `ensureClass` this class is physically an `i32`.
+    constructor(value) {
+        const b = value ? 1 : 0;
+        return b;
+    }
+    valueOf() { return this; }
+    toString() { return this ? 'true' : 'false'; }
+}
+//-----------------------------------------------------------------------------
+//	Number
+//-----------------------------------------------------------------------------
+function getSign(p) {
+    const c = p.code();
+    if (c === 45) {
+        ++p.pos;
+        return -1;
+    }
+    else if (c === 43) {
+        ++p.pos;
+    }
+    return 1;
+}
+function getUnsigned(p, radix = 10, value = 0) {
+    // `break` isn't supported (see backend.ts's own statement dispatch) -- the stop condition folds
+    // into the loop condition itself instead of exiting from the middle of the body.
+    let stop = false;
+    while (!stop && p.pos < p.n) {
+        const c = p.code(), lower = c | 32;
+        const d = c >= 48 && c <= 57 ? c - 48 : lower >= 97 && lower <= 122 ? lower - 87 : -1;
+        // `>=`, not `>`: a digit equal to the radix is out of range, and `> radix` let 'a' (10) through
+        // for radix 10, so `Number('abc')` parsed as 10 instead of NaN.
+        if (d < 0 || d >= radix) {
+            stop = true;
+        }
+        else {
+            value = value * radix + d;
+            ++p.pos;
+        }
+    }
+    return value;
+}
+// `parseFloat`'s body, taking the parser so a caller can see how much of the string it consumed --
+// `Number(str)` is NOT `parseFloat(str)`: it rejects trailing junk rather than ignoring it.
+function getFloat(p) {
+    const sign = getSign(p);
+    let exp = 0;
+    let pos = p.pos;
+    let value = getUnsigned(p);
+    if (p.pos === pos)
+        return NaN;
+    // fractional part
+    if (p.skipCode(46)) {
+        pos = p.pos;
+        value = getUnsigned(p, 10, value);
+        exp = pos - p.pos;
+    }
+    const c = p.code();
+    if (c === 101 || c === 69) { // 'e' or 'E'
+        p.pos++;
+        exp += getInt(p);
+    }
+    return sign * value * intPow(10, exp);
+}
+// Real `Number(str)`: whitespace-trimmed, an empty string is 0 (not NaN, which is what `parseFloat`
+// gives), and anything left over after the number makes the whole thing NaN.
+function numberFromString(s) {
+    const t = s.trim();
+    if (t.length === 0)
+        return 0;
+    const p = new StringParser(t);
+    const v = getFloat(p);
+    return p.remaining() === 0 ? v : NaN;
+}
+function getInt(p, radix = 10) {
+    const sign = getSign(p);
+    const pos = p.pos;
+    const value = getUnsigned(p, radix);
+    return p.pos === pos ? NaN : sign * value;
+}
+class NormalizedFloat {
+    m;
+    e;
+    constructor(m) {
+        let e = 0;
+        if (m) {
+            while (m >= 10) {
+                m /= 10;
+                e++;
+            }
+            while (m < 1) {
+                m *= 10;
+                e--;
+            }
+        }
+        this.m = m;
+        this.e = e;
+    }
+}
+// A position clamped into [0, len]; a RELATIVE one first counts a negative back from `len` -- JS's two position rules.
+function clampIndex(i, len) {
+    return i < 0 ? 0 : i > len ? len : i;
+}
+function relativeIndex(i, len) {
+    return clampIndex(i < 0 ? len + i : i, len);
+}
+function UnsignedToString(n, radix = 10, digits = 1) {
+    let s = '';
+    while (n > 0 || digits > 0) {
+        digits--;
+        const d = n % radix;
+        // LOWERCASE above 9: `(255).toString(16)` is 'ff' in JS, not 'FF'.
+        s = String.fromCharCode(d < 10 ? 48 + d : 97 + d - 10) + s;
+        n = Math.floor(n / radix);
+    }
+    return s;
+}
+function SignedToString(n, radix = 10) {
+    return (n < 0 ? '-' : '+') + UnsignedToString(Math.abs(n), radix);
+}
+function fracToString(f, digits) {
+    let fs = '';
+    for (let i = 0; i < digits && f !== 0; i++) {
+        f *= 10;
+        const d = Math.floor(f);
+        fs += String.fromCharCode(48 + d);
+        f -= d;
+    }
+    return fs;
+}
+export class Number {
+    // A real conversion, because towasm lowers a call on a class to its constructor and this IS
+    // `Number('42')`/`Number(true)`. `n` is declared `number`, so the (cast-stripped) return type still
+    // tells `ensureClass` this class is physically an `f64`, exactly as the pass-through version did.
+    // @ts-expect-error - tison extension: multiple constructor implementations
+    constructor(value) { return value; }
+    // @ts-expect-error - tison extension: multiple constructor implementations
+    constructor(value) { return numberFromString(value); }
+    // @ts-expect-error - tison extension: multiple constructor implementations
+    constructor(value) { return (value ? 1 : 0); }
+    // @ts-expect-error - tison extension: multiple constructor implementations
+    constructor(value) { return bigToNumber(value); }
+    // One argument of several primitives, told apart at run time (`Number(v)` with `v: number | bigint`).
+    // @ts-expect-error - tison extension: multiple constructor implementations
+    constructor(value) {
+        return (typeof value === 'number' ? value
+            : typeof value === 'bigint' ? bigToNumber(value)
+                : typeof value === 'string' ? numberFromString(value)
+                    : value ? 1 : 0);
+    }
+    static EPSILON = 2.2204460492503130808472633361816e-16;
+    static MAX_SAFE_INTEGER = 9007199254740991;
+    static MIN_SAFE_INTEGER = -9007199254740991;
+    static MAX_VALUE = 1.79E+308;
+    static MIN_VALUE = 5.00E-324;
+    static NaN = 0;
+    static NEGATIVE_INFINITY = 0;
+    static POSITIVE_INFINITY = 0;
+    // `x === Math.floor(x)` alone is true for the infinities, which JS says are not integers.
+    static isInteger(x) { return typeof x === 'number' && Number.isFinite(x) && x === Math.floor(x); }
+    static isNaN(x) { return typeof x === 'number' && x !== x; }
+    // An INTEGER within the safe range, inclusive: the magnitude test alone called `1.5` safe and
+    // `MAX_SAFE_INTEGER` itself unsafe.
+    static isSafeInteger(x) { return typeof x === 'number' && Number.isInteger(x) && Math.abs(x) <= Number.MAX_SAFE_INTEGER; }
+    static isFinite(x) { return typeof x === 'number' && Math.abs(x) < Infinity; }
+    // Leading whitespace is skipped by both, per JS. Only here, not inside `getInt`/`getFloat`
+    // themselves -- `getInt` also reads a float's exponent, where `1e 5` is not `1e5`.
+    // An omitted or 0 radix is 10, or 16 after a `0x` prefix (which radix 16 also accepts); one outside 2..36 is NaN.
+    static parseInt(s, radix) {
+        const p = new StringParser(s);
+        p.skipWhitespace();
+        const sign = getSign(p);
+        let r = radix ? Math.trunc(radix) : 0;
+        if ((r === 0 || r === 16) && p.code() === 48 && p.pos + 1 < p.n && (p.str.charCodeAt(p.pos + 1) | 32) === 120) {
+            p.pos += 2;
+            r = 16;
+        }
+        if (r === 0)
+            r = 10;
+        if (r < 2 || r > 36)
+            return NaN;
+        const pos = p.pos;
+        const value = getUnsigned(p, r);
+        return p.pos === pos ? NaN : sign * value;
+    }
+    static parseFloat(str) {
+        const p = new StringParser(str);
+        p.skipWhitespace();
+        return getFloat(p);
+    }
+    valueOf() { return this; }
+    toString(radix = 10) {
+        let x = this;
+        // The non-finite values first: `Math.floor(NaN)` and the digit walk below produce '' for all
+        // three, so `String(NaN)` was the empty string rather than 'NaN'.
+        if (x !== x)
+            return 'NaN';
+        if (x === Infinity)
+            return 'Infinity';
+        if (x === -Infinity)
+            return '-Infinity';
+        const sign = x < 0 ? '-' : '';
+        x = Math.abs(x);
+        // integer part
+        const n = Math.floor(x);
+        const s = sign + UnsignedToString(n, radix);
+        // fractional part
+        const frac = x - n;
+        return frac ? s + '.' + fracToString(frac, 16) : s;
+    }
+    toFixed(digits = 0) {
+        const x = this;
+        const sign = x < 0 ? '-' : '';
+        const scale = intPow(10, digits);
+        const n = Math.floor(Math.abs(x) * scale + 0.5); // round
+        const s = sign + UnsignedToString(Math.floor(n / scale));
+        return digits > 0 ? s + '.' + UnsignedToString(n % scale, 10, digits) : s;
+    }
+    toExponential(digits) {
+        const x = this;
+        const sign = x < 0 ? '-' : '';
+        const nf = new NormalizedFloat(Math.abs(x));
+        const m = nf.m;
+        const e = nf.e;
+        const scale = intPow(10, digits);
+        const n = Math.floor(m * scale + 0.5);
+        return sign + String.fromCharCode(48 + Math.floor(n / scale)) + (digits > 0 ? '.' + UnsignedToString(n % scale, 10, digits) : '') + 'e' + SignedToString(e);
+    }
+    toPrecision(precision) {
+        if (precision === undefined)
+            return this.toString();
+        const x = this;
+        const sign = x < 0 ? '-' : '';
+        const nf = new NormalizedFloat(Math.abs(x));
+        const m = nf.m;
+        const e = nf.e;
+        const scale = intPow(10, precision - 1);
+        // `s[0]` (real indexing) isn't supported on `string` -- see `StringParser.peek`'s own comment.
+        const rounded = UnsignedToString(Math.floor(m * scale + 0.5), 10, precision);
+        const carried = rounded.length > precision;
+        const e2 = carried ? e + 1 : e;
+        const digits = carried ? rounded.slice(0, precision) : rounded;
+        if (e2 < -6 || e2 >= precision) {
+            const frac = precision > 1 ? '.' + digits.slice(1, precision) : '';
+            return sign + digits.charAt(0) + frac + 'e' + SignedToString(e2);
+        }
+        if (e2 === precision - 1)
+            return sign + digits;
+        if (e2 >= 0)
+            return sign + digits.slice(0, e2 + 1) + '.' + digits.slice(e2 + 1, precision);
+        let zeros = '';
+        for (let i = 0; i < -(e2 + 1); i++)
+            zeros = zeros + '0';
+        return sign + '0.' + zeros + digits;
+    }
+}
+export class Math {
+    static E = 2.718281828459045;
+    static LN10 = 2.302585092994046;
+    static LN2 = 0.6931471805599453;
+    static LOG2E = 1.442695040888963;
+    static LOG10E = 0.4342944819032521;
+    static PI = 3.141592653589793;
+    static SQRT1_2 = 0.707106781186548;
+    static SQRT2 = 1.414213562373095;
+    static PI_2 = Math.PI / 2;
+    static seed = 123456789;
+    static abs = __asm('(switch $T (($f32 $f64) $T.abs))');
+    static max = __asm('(switch $T (($f32 $f64) $T.max))');
+    static min = __asm('(switch $T (($f32 $f64) $T.min))');
+    static floor = __asm('(switch $T (($f32 $f64) $T.floor))');
+    static ceil = __asm('(switch $T (($f32 $f64) $T.ceil))');
+    static trunc = __asm('(switch $T (($f32 $f64) $T.trunc))');
+    // Round-half-UP toward +Infinity. NOT wasm's `nearest`, which is round-half-to-EVEN: that gave
+    // `Math.round(0.5) === 0` and `Math.round(2.5) === 2`. `x - f` is 0 for an already-integral `x`
+    // (including the infinities), so those pass straight through instead of losing precision to `+ 0.5`.
+    static round(x) {
+        const f = Math.floor(x);
+        const r = x - f >= 0.5 ? f + 1 : f;
+        // JS keeps a zero result's sign: `Math.round(-0.5)` is `-0`, not `+0`.
+        return r === 0 && x < 0 ? -0 : r;
+    }
+    static fround = __asm('f32.demote_f64');
+    static sqrt = __asm('(switch $T (($f32 $f64) $T.sqrt))');
+    static clz32 = __asm('i32.clz');
+    // -----------------------------------------------------------------------------
+    // fdlibm-style exp / log
+    // -----------------------------------------------------------------------------
+    static exp(x) {
+        if (x > 709.782712893384)
+            return Infinity;
+        if (x < -745.133219101941)
+            return 0;
+        // x = k*ln2 + r, |r| <= ln2/2 -- needs a real round-to-nearest: `|0` truncates toward zero, so for
+        // negative x (e.g. x=-0.675) k came out 0 instead of -1, leaving |r| well outside the ln2/2 bound
+        // the Taylor series below assumes (found via a direct sweep against real Math.exp).
+        const k = Math.round(x * Math.LOG2E);
+        const r = x - k * Math.LN2;
+        const r2 = r * r;
+        const p = 1 + r + r2 / 2 + r2 * r / 6 + r2 * r2 / 24 + r2 * r2 * r / 120;
+        return p * intPow(2, k);
+    }
+    static log(x) {
+        // `Number.isNaN`/`x === Infinity` are checked explicitly: falling through to the bit
+        // bit-twiddling below for either would silently reconstruct a finite mantissa from NaN's or
+        // Infinity's own all-1s exponent field, producing a large finite garbage value instead of NaN/Infinity.
+        if (Number.isNaN(x))
+            return NaN;
+        if (x < 0)
+            return NaN;
+        if (x === 0)
+            return -Infinity;
+        if (x === Infinity)
+            return Infinity;
+        const hi = f64BitsHi(x);
+        const e = (hi >>> 20) - 1023;
+        const m = f64FromBits(f64BitsLo(x), (hi & 0x000FFFFF) | 0x3FF00000); // Normalize mantissa to [1,2)
+        // ln(m) = 2*atanh(u), u = (m-1)/(m+1) in [0, 1/3) for m in [1,2) -- converges far faster than the
+        // bare f - f^2/2 + f^3/3 series (f = m-1 ranges up to ~1, not small; that series was off by up to
+        // ~2.7% relative, e.g. Math.log(100)).
+        const u = (m - 1) / (m + 1);
+        const u2 = u * u;
+        const atanh_u = u * (1 + u2 * (1 / 3 + u2 * (1 / 5 + u2 * (1 / 7 + u2 / 9))));
+        return e * Math.LN2 + 2 * atanh_u;
+    }
+    static log2(x) { return Math.log(x) * Math.LOG2E; }
+    static log10(x) { return Math.log(x) * Math.LOG10E; }
+    static log1p(x) {
+        if (x <= -1)
+            return NaN;
+        if (Math.abs(x) < 1e-4) {
+            // series for small x
+            const x2 = x * x;
+            return x - x2 / 2 + (x2 * x) / 3;
+        }
+        return Math.log(1 + x);
+    }
+    static expm1(x) {
+        const ax = Math.abs(x);
+        if (ax < 1e-5) {
+            const x2 = x * x;
+            return x + x2 / 2 + (x2 * x) / 6;
+        }
+        return Math.exp(x) - 1;
+    }
+    // -----------------------------------------------------------------------------
+    // fdlibm-style trig: sin, cos, tan
+    // -----------------------------------------------------------------------------
+    static sin(x) {
+        if (!Number.isFinite(x))
+            return NaN;
+        const k = Math.round(x / Math.PI_2); // quadrant index
+        const r = x - k * Math.PI_2;
+        switch (k & 3) {
+            default:
+            case 0: return sin_core(r);
+            case 1: return cos_core(r);
+            case 2: return -sin_core(r);
+            case 3: return -cos_core(r);
+        }
+    }
+    static cos(x) {
+        if (!Number.isFinite(x))
+            return NaN;
+        const k = Math.round(x / Math.PI_2); // quadrant index
+        const r = x - k * Math.PI_2;
+        switch (k & 3) {
+            default:
+            case 0: return cos_core(r);
+            case 1: return -sin_core(r);
+            case 2: return -cos_core(r);
+            case 3: return sin_core(r);
+        }
+    }
+    static tan(x) { return Math.sin(x) / Math.cos(x); }
+    // -----------------------------------------------------------------------------
+    // fdlibm-style inverse trig
+    // -----------------------------------------------------------------------------
+    static asin(x) {
+        if (x > 1 || x < -1)
+            return NaN;
+        const ax = Math.abs(x);
+        if (ax > 0.5) {
+            // t = cos(asin(ax)) = sqrt(1 - ax^2), not sqrt(1 - ax) -- the latter isn't even the right
+            // identity (confirmed against a direct sweep: it was off by up to 13% around x=+-0.77).
+            const t = Math.sqrt(1 - ax * ax);
+            // asin(ax) = pi/2 - atan(t / ax): t/ax = cos(theta)/sin(theta) = cot(theta) = tan(pi/2-theta).
+            const r = Math.PI_2 - Math.atan(t / ax);
+            return x < 0 ? -r : r;
+        }
+        const x2 = ax * ax;
+        const x3 = x2 * ax;
+        const x5 = x3 * x2;
+        const x7 = x5 * x2;
+        const s = ax + x3 / 6 + 3 * x5 / 40 + 5 * x7 / 112;
+        return x < 0 ? -s : s;
+    }
+    static acos(x) {
+        return Math.PI_2 - Math.asin(x);
+    }
+    static atan(x) {
+        const ax = Math.abs(x);
+        if (ax > 1) {
+            const r = Math.PI_2 - Math.atan(1 / ax);
+            return x < 0 ? -r : r;
+        }
+        if (ax > 0.5) {
+            // atan(a) - atan(b) = atan((a-b)/(1+ab)) with b=1 -- atan(ax) = pi/4 + atan((ax-1)/(ax+1)),
+            // which keeps atanPoly's argument within [-1/3, 0] instead of up to 1 (needs dozens of terms
+            // to converge there, e.g. atan(1) via the bare series was off by ~14%).
+            const t = (ax - 1) / (ax + 1);
+            const r2 = Math.PI / 4 + atanPoly(t);
+            return x < 0 ? -r2 : r2;
+        }
+        return atanPoly(x);
+    }
+    static atan2(y, x) {
+        if (Number.isNaN(x) || Number.isNaN(y))
+            return NaN;
+        return x > 0 ? Math.atan(y / x)
+            : x < 0 ? (y >= 0 ? Math.atan(y / x) + Math.PI : Math.atan(y / x) - Math.PI)
+                : y > 0 ? Math.PI_2 : y < 0 ? -Math.PI_2 : 0;
+    }
+    // -----------------------------------------------------------------------------
+    // fdlibm-style hyperbolic + inverses
+    // -----------------------------------------------------------------------------
+    static sinh(x) { return (Math.exp(x) - Math.exp(-x)) / 2; }
+    ;
+    static cosh(x) { return (Math.exp(x) + Math.exp(-x)) / 2; }
+    ;
+    static tanh(x) {
+        const er = Math.exp(x);
+        const ei = Math.exp(-x);
+        return (er - ei) / (er + ei);
+    }
+    ;
+    static asinh(x) { return Math.log(x + Math.sqrt(x * x + 1)); }
+    static acosh(x) { return x < 1 ? NaN : Math.log(x + Math.sqrt((x - 1) * (x + 1))); }
+    ;
+    static atanh(x) { return x <= -1 || x >= 1 ? NaN : 0.5 * Math.log((1 + x) / (1 - x)); }
+    ;
+    static imul(x, y) {
+        const xl = x & 0xFFFF, xh = x >>> 16, yl = y & 0xFFFF, yh = y >>> 16;
+        return (xl * yl + ((xl * yh + xh * yl) << 16)) | 0;
+    }
+    static sign(x) { return x === 0 ? 0 : x > 0 ? 1 : -1; }
+    static random() {
+        Math.seed = (1664525 * Math.seed + 1013904223) >>> 0;
+        return Math.seed / 0xFFFFFFFF;
+    }
+    static pow(x, y) {
+        // An integer exponent goes through `intPow`'s plain repeated-squaring multiplication instead of
+        // `exp(log(x)*y)`: exact to floating-point rounding (vs. the transcendentals' ~1e-4 relative
+        // error), and it already gets a negative base right on its own -- no separate sign-factoring
+        // needed (`intPow(-2, 3) === -8`, `intPow(-2, 4) === 16`, `intPow(0, -3) === Infinity`, all via
+        // plain multiplication, verified against real `Math.pow` directly).
+        if (Number.isInteger(y))
+            return intPow(x, y);
+        // log(negative) is NaN, so a negative base only has a real result for an integer exponent.
+        if (x < 0)
+            return NaN;
+        return Math.exp(Math.log(x) * y);
+    }
+    static hypot(...values) {
+        let total = 0;
+        for (const v of values)
+            total += v * v;
+        return Math.sqrt(total);
+    }
+    static cbrt(x) {
+        return x < 0 ? -Math.pow(-x, 1 / 3) : Math.pow(x, 1 / 3);
+    }
+}
+// The global functions JS defines as the same functions as `Number`'s.
+export function parseInt(s, radix) { return Number.parseInt(s, radix); }
+export function parseFloat(s) { return Number.parseFloat(s); }
+// `Object.is` -- SameValue: `===`, except that NaN is itself and +0 and -0 differ. towasm lowers the intrinsic to this call;
+// the operands arrive boxed (printer.ts's `Object.is(expr.value, -0)` passes a union), so the number test is made at run time.
+export function __towasm_same_value(a, b) {
+    if (typeof a === 'number' && typeof b === 'number')
+        return a === b ? (a !== 0 || 1 / a === 1 / b) : (a !== a && b !== b);
+    return a === b;
+}

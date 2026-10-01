@@ -180,15 +180,15 @@ export class Array<T> extends ArrayBase {
 		return this as unknown as T[];
 	}
 
-	indexOf(x: T): number {
-		for (let i = 0; i < this.length; i++) {
+	indexOf(x: T, fromIndex: i32 = 0): number {
+		for (let i = relativeIndex(fromIndex, this.length); i < this.length; i++) {
 			if (this[i] === x)
 				return i;
 		}
 		return -1;
 	}
-	lastIndexOf(x: T): number {
-		for (let i = this.length - 1; i >= 0; --i) {
+	lastIndexOf(x: T, fromIndex: i32 = 0x7fffffff): number {
+		for (let i = fromIndex < 0 ? this.length + fromIndex : fromIndex >= this.length ? this.length - 1 : fromIndex; i >= 0; --i) {
 			if (this[i] === x)
 				return i;
 		}
@@ -201,8 +201,8 @@ export class Array<T> extends ArrayBase {
 		const i = index < 0 ? this.length + index : index;
 		return i >= 0 && i < this.length ? this[i] : undefined;
 	}
-	includes(x: T): boolean {
-		for (let i = 0; i < this.length; i++) {
+	includes(x: T, fromIndex: i32 = 0): boolean {
+		for (let i = relativeIndex(fromIndex, this.length); i < this.length; i++) {
 			const v = this[i];
 			if (v === x || (v !== v && x !== x))
 				return true;
@@ -218,14 +218,10 @@ export class Array<T> extends ArrayBase {
 		// CLAMPED at both ends, and a reversed or out-of-range range is empty. `rlen` could go negative
 		// (`slice(5)` on length 3, `slice(2, 1)`) and reached `_alloc` as a huge unsigned length --
 		// "requested new array is too large" -- where JS simply gives `[]`.
-		let from	= start < 0 ? len + start : start;
-		let to		= end < 0 ? len + end : end;
-		from	= from < 0 ? 0 : from > len ? len : from;
-		to		= to < 0 ? 0 : to > len ? len : to;
-		const rlen = to > from ? to - from : 0;
-		start	= from;
+		const from	= relativeIndex(start, len), to = relativeIndex(end, len);
+		const rlen	= to > from ? to - from : 0;
 		const result: T[] = Array._make<T>(rlen);
-		Array._raw(result).copyFrom(0, this.data, start, rlen);
+		Array._raw(result).copyFrom(0, this.data, from, rlen);
 		return result;
 	}
 	concat(b: T[]): T[] {
@@ -236,9 +232,10 @@ export class Array<T> extends ArrayBase {
 	}
 	fill(x: T, start: i32 = 0, end: i32 = 0x7fffffff): T[] {
 		const len = this.length;
-		start	= start < 0 ? start + len : start;
-		end		= end < 0 ? end + len : end > len ? len : end;
-		this.data.fillWith(start, x, end - start);
+		start	= relativeIndex(start, len);
+		end		= relativeIndex(end, len);
+		if (end > start)
+			this.data.fillWith(start, x, end - start);
 		return this as any;
 	}
 

@@ -411,7 +411,7 @@ interface ReadonlyArray<T> {
 	indexOf(searchElement: T, fromIndex?: number): number;
 	lastIndexOf(searchElement: T, fromIndex?: number): number;
 	at(index: number): T | undefined;
-	includes(searchElement: T): boolean;
+	includes(searchElement: T, fromIndex?: number): boolean;
 	every<S extends T>(predicate: (value: T, index: number, array: readonly T[]) => value is S, thisArg?: any): this is readonly S[];
 	every(predicate: (value: T, index: number, array: readonly T[]) => unknown, thisArg?: any): boolean;
 	some(predicate: (value: T, index: number, array: readonly T[]) => unknown, thisArg?: any): boolean;
@@ -599,6 +599,8 @@ declare class StringParser {
 	skipCode(c: number): boolean;
 	skipWhitespace(): void;
 }
+declare function clampIndex(i: i32, len: i32): i32;
+declare function relativeIndex(i: i32, len: i32): i32;
 declare function UnsignedToString(n: number, radix?: number, digits?: number): string;
 declare function strIsSpace(code: number): boolean;
 declare function __towasm_alloc(size: i32, align: i32): i32;

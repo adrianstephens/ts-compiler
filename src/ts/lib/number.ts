@@ -190,6 +190,14 @@ class NormalizedFloat {
 	}
 }
 
+// A position clamped into [0, len]; a RELATIVE one first counts a negative back from `len` -- JS's two position rules.
+function clampIndex(i: i32, len: i32): i32 {
+	return i < 0 ? 0 : i > len ? len : i;
+}
+function relativeIndex(i: i32, len: i32): i32 {
+	return clampIndex(i < 0 ? len + i : i, len);
+}
+
 function UnsignedToString(n: number, radix = 10, digits = 1): string {
 	let s = '';
 	while (n > 0 || digits > 0) {
@@ -305,7 +313,7 @@ export class Number {
 		return frac ? s + '.' + fracToString(frac, 16) : s;
 	}
 
-	toFixed(digits: number): string {
+	toFixed(digits: i32 = 0): string {
 		const x		= this as unknown as number;
 		const sign	= x < 0 ? '-' : '';
 		const scale	= intPow(10, digits);
@@ -323,7 +331,9 @@ export class Number {
 		const n		= Math.floor(m * scale + 0.5);
 		return sign + String.fromCharCode(48 + Math.floor(n / scale)) + (digits > 0 ? '.' + UnsignedToString(n % scale, 10, digits) : '') + 'e' + SignedToString(e);
 	}
-	toPrecision(precision: number): string {
+	toPrecision(precision?: number): string {
+		if (precision === undefined)
+			return this.toString();
 		const x		= this as unknown as number;
 		const sign	= x < 0 ? '-' : '';
 		const nf	= new NormalizedFloat(Math.abs(x));

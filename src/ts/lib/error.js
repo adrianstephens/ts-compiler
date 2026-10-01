@@ -1,5 +1,5 @@
+"use strict";
 /// <reference path="./lib.d.ts" />
-
 //-----------------------------------------------------------------------------
 //	Error -- the shape of a thrown value.
 //
@@ -12,28 +12,26 @@
 //	No `stack`: there is no call-stack introspection in this runtime to build one from,
 //	and a field that is always `''` would be worse than its absence.
 //-----------------------------------------------------------------------------
-
 class Error {
-	name: string = 'Error';
-
-	constructor(public message: string = '') {}
-
-	toString(): string {
-		return this.message.length ? this.name + ': ' + this.message : this.name;
-	}
+    message;
+    name = 'Error';
+    constructor(message = '') {
+        this.message = message;
+    }
+    toString() {
+        return this.message.length ? this.name + ': ' + this.message : this.name;
+    }
 }
-
 // `name` set by the constructor, not redeclared: a subclass may not redeclare an inherited field here.
 class RangeError extends Error {
-	constructor(message = '') {
-		super(message);
-		this.name = 'RangeError';
-	}
+    constructor(message = '') {
+        super(message);
+        this.name = 'RangeError';
+    }
 }
-
 class SyntaxError extends Error {
-	constructor(message = '') {
-		super(message);
-		this.name = 'SyntaxError';
-	}
+    constructor(message = '') {
+        super(message);
+        this.name = 'SyntaxError';
+    }
 }
