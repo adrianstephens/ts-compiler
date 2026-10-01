@@ -333,23 +333,23 @@ const return_type = Rules(
 );
 
 const generic_param0 = JS.optional_binding_name;
-const generic_param_list0 = Rules<Param[]>(
-	// The `this` parameter is dropped, not captured as a real positional `Param`: real TypeScript erases it at every call site, and keeping it in
-	// `params` made every consumer of a `this`-typed signature overcount required arguments by one (`mulAffine(this: float2x3, b: T)` needed 2 args).
-	Rule(['this', ':', type],												_ => []),
-	Rule(['this', ':', type, ',', MaybeList(generic_param0, ',', true)],	$ => $[4]),
-	MaybeList(generic_param0, ',', true)
+// The `this` parameter is the signature's `thisType`, never a positional `Param`: TS erases it at every call site, and in `params` it made
+// every consumer overcount required arguments by one (`mulAffine(this: float2x3, b: T)` needed 2 args).
+const generic_param_list0 = Rules<{ params: Param[]; thisType?: Type }>(
+	Rule(['this', ':', type],												$ => ({ params: [], thisType: $[2] })),
+	Rule(['this', ':', type, ',', MaybeList(generic_param0, ',', true)],	$ => ({ params: $[4], thisType: $[2] })),
+	Rule([MaybeList(generic_param0, ',', true)],							$ => ({ params: $[0] })),
 );
 
 const generic_param_list = Rules(
-	Rule([generic_param_list0],												$ => ({params: $[0]})),
-	Rule([generic_param_list0, '...', IDENT],								$ => ({params: $[0], rest: { key: $[2] }})),
-	Rule([generic_param_list0, '...', IDENT, ':', type],					$ => ({params: $[0], rest: { key: $[2], typeAnnotation: $[4] }})),
+	Rule([generic_param_list0],												$ => $[0]),
+	Rule([generic_param_list0, '...', IDENT],								$ => ({...$[0], rest: { key: $[2] }})),
+	Rule([generic_param_list0, '...', IDENT, ':', type],					$ => ({...$[0], rest: { key: $[2], typeAnnotation: $[4] }})),
 	// A rest binding can itself be destructured (`(...[value]: [] | [T])`, notably `Iterator.next`'s own real `lib.d.ts` signature).
-	Rule([generic_param_list0, '...', JS.array_pattern],					$ => ({params: $[0], rest: { key: $[2] }})),
-	Rule([generic_param_list0, '...', JS.array_pattern, ':', type],			$ => ({params: $[0], rest: { key: $[2], typeAnnotation: $[4] }})),
-	Rule([generic_param_list0, '...', JS.object_pattern],					$ => ({params: $[0], rest: { key: $[2] }})),
-	Rule([generic_param_list0, '...', JS.object_pattern, ':', type],		$ => ({params: $[0], rest: { key: $[2], typeAnnotation: $[4] }})),
+	Rule([generic_param_list0, '...', JS.array_pattern],					$ => ({...$[0], rest: { key: $[2] }})),
+	Rule([generic_param_list0, '...', JS.array_pattern, ':', type],			$ => ({...$[0], rest: { key: $[2], typeAnnotation: $[4] }})),
+	Rule([generic_param_list0, '...', JS.object_pattern],					$ => ({...$[0], rest: { key: $[2] }})),
+	Rule([generic_param_list0, '...', JS.object_pattern, ':', type],		$ => ({...$[0], rest: { key: $[2], typeAnnotation: $[4] }})),
 );
 
 const generic_params = Rules(

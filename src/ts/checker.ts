@@ -2478,6 +2478,10 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 					// Explicit type arguments leave nothing to infer.
 					const explicit	= typeArgs && sig.typeParams?.length ? new Map(sig.typeParams.map((p, i) => [p.name, typeArgs![i] ?? p.default ?? T.ANY] as const)) : undefined;
 					const inference	= !explicit && sig.typeParams?.length ? new T.Inference(sig.typeParams, scope, declScope) : undefined;
+					// A declared `this` is inferred from the receiver before any argument, as TS does (`base.get(s)` against
+					// `get<X>(this: X, s)` binds `X` to `base`'s type); an optional chain calls it only on a non-nullish one.
+					if (inference && sig.thisType && calleeObjT)
+						inference.infer(sig.thisType, T.nonNullable(calleeObjT, scope, calleeOptional));
 					// In order, as TS does: each argument's context is its parameter under what the arguments before it inferred
 					// (`mapObject(q, { ps: mapArray(p => ...) })` knows `N` from `q`, so the inner call can infer its `T`).
 					const soFar = (declared: Type | undefined) => declared && (explicit ? T.substituteType(declared, explicit)

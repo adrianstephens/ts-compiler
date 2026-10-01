@@ -57,7 +57,7 @@ export function  Param<T>(key: BindingTarget, typeAnnotation?: T, modifiers?: st
 export interface Params<T>					{ params: Param<T>[]; rest?: Rest<T>; }
 export function  Params<T>(params: Param<T>[], rest?: Rest<T>) : Params<T> { return {params, rest }; }
 // `origin`: the class member a signature was built from, which is how codegen maps a call's resolution to the body it compiles.
-export interface CallSig<T> extends Params<T> { typeParams?: TypeParam<T>[]; returnType?: T; inferredReturn?: boolean; declScope?: unknown; scope?: unknown; pure?: boolean; origin?: unknown }
+export interface CallSig<T> extends Params<T> { typeParams?: TypeParam<T>[]; thisType?: T; returnType?: T; inferredReturn?: boolean; declScope?: unknown; scope?: unknown; pure?: boolean; origin?: unknown }
 
 export type CallSigParams<T> =
 	|	[CallSig<T>]

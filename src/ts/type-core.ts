@@ -835,6 +835,11 @@ export function typeArgMap(typeParams: readonly TS.TypeParam[], typeArgs: readon
 }
 
 // Replaces type-parameter references with their instantiating arguments (`Foo<string>` -> Foo's body with T := string).
+// A method member read as a value: its signature, `this` included, with an unwritten return as `any`.
+function methodSignature(m: TS.CallSig): TS.CallSig {
+	return { params: m.params, rest: m.rest, thisType: m.thisType, returnType: m.returnType ?? ANY, typeParams: m.typeParams };
+}
+
 export function substituteType(t: Type, map: Map<string, Type>): Type {
 	if (map.size === 1) {
 		const [[name, arg]] = map;
@@ -2024,7 +2029,7 @@ export function lookupMember(t: Type, prop: string, scope: Scope, depth = 10, sk
 				if (m?.type === 'method')
 					// `declScope` carried through: this class's own method, consulted from a different module, still resolves
 					// its declared param/return types via that scope.
-					return withScope(TS.FunctionType({ params: m.params, rest: m.rest, returnType: m.returnType ?? ANY, typeParams: m.typeParams, origin: m.origin }), m.declScope as Scope);
+					return withScope(TS.FunctionType({ ...methodSignature(m), origin: m.origin }), m.declScope as Scope);
 				// Both are fallbacks, tried only once no member is named `prop` -- skipped on a per-part intersection lookup so a
 				// `Record<string,X> & {realMethod(){}}` intersection's index signature can't shadow the other part's real member.
 				if (skipObjectFallback)
@@ -3016,7 +3021,7 @@ function matchInfer(pattern: Type, actual: Type, scope: Scope, out: Map<string, 
 			if ((m.type !== 'property' && m.type !== 'method') || typeof m.key === 'object')
 				continue;
 			// A method is its function type, as `lookupMember` gives it; a required member the actual lacks is a confident miss, `infer` or not.
-			const want	= m.type === 'property' ? m.typeAnnotation : TS.FunctionType({ params: m.params, rest: m.rest, returnType: m.returnType ?? ANY, typeParams: m.typeParams });
+			const want	= m.type === 'property' ? m.typeAnnotation : TS.FunctionType(methodSignature(m));
 			const infers	= containsKind(want, 'infer');
 			// A function/constructor type HAS no keyed members, so a required property is a confident miss; a primitive has its boxed interface's.
 			if (!aMembers && !(isPrimitive(a) || a.type === 'literal' || a.type === 'range')) {
@@ -3228,7 +3233,7 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 		const all		= a.type === 'object' || a.type === 'ref' ? collectMembers(a, scope) : [];
 		const props		= all.filter((p): p is Extract<TS.TypeMember, { type: 'property' | 'method' }> => p.type === 'property' || p.type === 'method');
 		const indexes	= all.filter((p): p is IndexMember => p.type === 'index');
-		const propType	= (p: typeof props[number]) => p.type === 'property' ? p.typeAnnotation : TS.FunctionType({ params: p.params, rest: p.rest, returnType: p.returnType ?? ANY, typeParams: p.typeParams });
+		const propType	= (p: typeof props[number]) => p.type === 'property' ? p.typeAnnotation : TS.FunctionType(methodSignature(p));
 		if (c.type === 'keyof' && bare(c.argument)) {
 			const target	= c.argument.name;
 			const slot		= `${target}[${m.keyName}]`;

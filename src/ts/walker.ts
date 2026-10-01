@@ -142,6 +142,7 @@ export function walker(
 		})),
 		rest:			(rest: JS.Rest<Type>): JS.Rest<Type> =>	({key: rest.key, typeAnnotation: mapType(rest.typeAnnotation)}),
 		typeParams:		mapArrayA(mapTypeParam),
+		thisType:		(t: Type) => mapType(t),
 		returnType:		(t: Type) => mapType(t),
 	};
 	const mapSigU = {
@@ -152,6 +153,7 @@ export function walker(
 		})),
 		rest:			(rest: JS.Rest<any>): JS.Rest<any> =>	({key: rest.key, typeAnnotation: mapTypeU(rest.typeAnnotation)}),
 		typeParams:		mapArrayA(mapTypeParamU),
+		thisType:		mapTypeU,
 		returnType:		mapTypeU,
 	};
 
@@ -489,6 +491,7 @@ export function walkerB(
 
 	const walkSig = (sig: TS.CallSig) => sig.params.some(p => walkBindingTarget(p.key) || walkExpression(p.default) || walkType(p.typeAnnotation))
 		|| walkType(sig.rest?.typeAnnotation)
+		|| walkType(sig.thisType)
 		|| walkType(sig.returnType)
 		|| !!sig.typeParams?.some(walkTypeParam);
 

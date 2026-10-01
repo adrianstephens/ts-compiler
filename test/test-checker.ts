@@ -366,6 +366,21 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		const ok: number = (d => d.x)({ x: 1 });
 		const n: string = ((a, b) => a + b)(1, 2);
 		const s: string = (function (v) { return v; })('k');`, ["Property 'y' does not exist", "not assignable to type 'string'"]],
+	['a declared this parameter is inferred from the receiver and is no argument', `
+		interface WithGet { get<X extends abstract new (...args: any) => any>(this: X, s: number): InstanceType<X>; }
+		declare const C: (new (s: number) => { n: number }) & WithGet;
+		const ok: number = C.get(1).n;
+		const bad: string = C.get(1).n;
+		interface Y { foo<T>(this: T, arg: keyof T): void; a: number }
+		declare const y: Y | undefined;
+		y?.foo('a');
+		y?.foo('z');
+		interface Box { m(this: Box, v: string): number }
+		declare const b: Box;
+		b.m('a');
+		b.m();
+		const cp: ConstructorParameters<new (a: string) => void> = [1];
+		const r: Required<{ a?: number }> = {};`, ["not assignable to type 'string'", "not assignable to parameter", "Expected 1 arguments", "not assignable to type", "not assignable to type"]],
 ];
 
 (async () => {

@@ -267,6 +267,8 @@ export function FixParams(params: JS.Params<any>): TS.Params {
 // `params.returnType` with a body-inferred type for its own internal checking -- wrong for this value's type as seen externally.
 export function FixSig(params: JS.CallSig<any>, defaultRet?: Type, declaredReturnType?: Type): TS.CallSig {
 	return { ...FixParams(params),
+		// A value-level declaration keeps `this` among its parameters (it binds in the body); a signature names it apart.
+		thisType: params.thisType ?? params.params.find(p => p.key === 'this')?.typeAnnotation,
 		returnType: declaredReturnType ?? params.returnType as Type ?? defaultRet,
 		typeParams: params.typeParams as TS.TypeParam[]
 	};

@@ -627,4 +627,7 @@ type Omit<T, K extends keyof any> = Pick<T, Exclude<keyof T, K>>;
 type Readonly<T> = { readonly [P in keyof T]: T[P]; };
 type Parameters<T extends (...args: any) => any> = T extends (...args: infer P) => any ? P : never;
 type ReturnType<T extends (...args: any) => any> = T extends (...args: any) => infer R ? R : any;
+type Required<T> = { [P in keyof T]-?: T[P]; };
+type ConstructorParameters<T extends abstract new (...args: any) => any> = T extends abstract new (...args: infer P) => any ? P : never;
+type InstanceType<T extends abstract new (...args: any) => any> = T extends abstract new (...args: any) => infer R ? R : any;
 

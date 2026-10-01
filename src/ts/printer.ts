@@ -248,8 +248,8 @@ export function printer(opts1: Options = {}) {
 		).join(comma) + '>'));
 	}
 
-	function params(params: TS.Params): string {
-		const a = params.params.map(p => p.key + optional(hasMod(p, 'optional')) + typeAnnotation(p.typeAnnotation));
+	function params(params: TS.CallSig): string {
+		const a = [...params.thisType ? ['this' + typeAnnotation(params.thisType)] : [], ...params.params.map(p => p.key + optional(hasMod(p, 'optional')) + typeAnnotation(p.typeAnnotation))];
 		if (params.rest)
 			a.push('...' + bindingTarget(params.rest.key) + typeAnnotation(params.rest?.typeAnnotation));
 		return withParens(a.join(comma));
