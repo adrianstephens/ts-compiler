@@ -107,8 +107,10 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
    classes, whose methods join the interface as overloads) vs TS's es5..es2024, per member, `- TS` / `+ ours` signatures. The lib
    declared what the RUNTIME implements, so every fix is runtime + declaration. Done: `d794c65` (position args, no-arg toFixed/
    toPrecision/Error; `clampIndex`/`relativeIndex` replace 6 clamp copies), `362e7ab` (flatMap value-or-array, RegExp(re), raw,
-   PromiseLike). Left: VARIADICS (`Math.max/min(...)` -- today one 2-operand asm instruction, a rest overload must not make the
-   2-arg call allocate; `String.fromCharCode(...)`, `str.concat(a, b)`, `arr.concat(x, ys)`, `new Array(1, 2, 3)`); `flat(depth)`
+   PromiseLike), `ca616df` VARIADICS (user: per-arity bodies -- an `__asm` body can be one overload (`ClassInfo.inlineOverloads`), so
+   `Math.max(a, b)` stays one `f64.max`; `namedBody` maps an AMBIENT signature to the implementation with the same parameters, so
+   lib.d.ts restates each overload pair the class implements). **Gates for lib work**: towasm, lib-decls, `tsc -p src/ts/lib`
+   (now `noEmit`), difftest. The corpus A/B checks against TS's own `lib.esnext.full` -- it CANNOT see our lib. Left: `flat(depth)`
    (needs `FlatArray`); `toExponential()` no-arg (shortest digits); Promise chaining/`all` (Promise is no PromiseLike); `Map/Set.keys()`
    return arrays (deliberate, accepts more than TS). The "Missing" section is runtime coverage, not this audit.
 
@@ -179,6 +181,10 @@ run it after a change to how the backend READS types. Read `REGRESSED` against a
 - **Never `git diff src/` wholesale for an A/B patch** -- name the files (it once captured the user's work).
 
 ## Tree state
+
+**2026-10-01 mistake, user to decide:** `ca616df` (my variadics commit) also contains the user's in-progress
+`src/cpp/c-parser.ts` and new `src/cpp/glsl-parser.ts`, swept in by `git add src`; left as is (no history rewrite).
+`0d94b27` deleted 16 lib `.js` files a type-check had emitted into `d794c65`.
 
 **Never trust this line -- re-check `git status`; the user edits and commits concurrently.** At 2026-09-30: `compiler` HEAD `aa1d4bf`+ (memory
 commits after), `tison` HEAD `4c7f25e`+; the user's `scad_parser.ts` is out of tison (it no longer trips NOT A BASELINE here).
