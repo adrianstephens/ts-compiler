@@ -20,7 +20,7 @@ consistency with everywhere else" — flagged directly when I added a `WeakMap<S
 checker computes but doesn't expose). The instance-state approach was ALSO functionally broken in a way
 I hadn't caught: consumers other than the one call that ran the check (e.g. `TStoWasm`, which creates
 its own fresh `makeChecker()` instance) see an empty cache and get no benefit, silently falling back to
-worse behavior with no error. See [[tison_checker_scopeofstmt]] for the full incident.
+worse behavior with no error. See `archive/tison_checker_scopeofstmt.md` for the full incident.
 
 **How to apply**: when the fix requires exposing checker-computed per-node info to a later consumer,
 first check whether the codebase already has an established convention for stamping metadata directly

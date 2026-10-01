@@ -8,9 +8,9 @@ metadata:
   modified: 2026-08-18T23:47:47.844Z
 ---
 
-Added 2026-08-18, directly after [[binary_wasm_module]]'s exception-handling work in binary-libs, at the
+Added 2026-08-18, directly after `binary_wasm_module` (memory no longer exists)'s exception-handling work in binary-libs, at the
 user's request to extend the same support into `tison/src/examples/wat-parser.ts` (the WAT-text
-parser/assembler used for `__asm` inline blocks -- see [[tison_towasm_inline_asm]] -- and standalone
+parser/assembler used for `__asm` inline blocks -- see `archive/tison_towasm_inline_asm.md` -- and standalone
 `.wat` compilation). Verified end-to-end against real `wasmtime` (not just self-round-trip): WAT source
 with a declared `(tag ...)`, `throw`, and `try_table` with `catch`/`catch_all` parsed, compiled via
 `toWasm`, and executed correctly under `wasmtime run`, delivering the thrown payload back out.
@@ -80,7 +80,7 @@ straight through as `v as BlockType`, silently violating its own declared type).
 `{op:'block', blockType:{typeIndex:0}, ...}` module now round-trips byte-identical and **executes
 correctly under real `wasmtime`** (returns both block results). Downstream consumers (`toWAT`'s `bt()`
 helper, wat-parser.ts's own resolve logic) were already written assuming the correct `{typeIndex}` shape
--- only the binary encode/decode wiring itself was wrong. [[binary_wasm_module]] should get a pointer to
+-- only the binary encode/decode wiring itself was wrong. `binary_wasm_module` (memory no longer exists) should get a pointer to
 this fix too.
 
 ## Round 1 finding: a real tison LALR(1) generator limitation (block/loop/if/try_table) -- CLOSED by round 2

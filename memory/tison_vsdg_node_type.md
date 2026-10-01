@@ -115,4 +115,4 @@ same edge — vestigial "for values" but load-bearing for scheduling — which o
 exceptions. Right test for tag-vs-stamp: does the CORE branch on it? It branches on these two; it does not
 branch on `pointerMember`/`optional` (printing only), which is why those are stamps.
 
-See [[tison_codegen]] (stale, different file).
+See `archive/tison_codegen.md` (stale, different file).

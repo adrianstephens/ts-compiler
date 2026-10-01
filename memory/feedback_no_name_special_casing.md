@@ -12,7 +12,7 @@ User's own words: "having to special-case 'push', 'pop', etc is taking us in the
 be an absolutely last resort. We must find a general mechanism that will work for any similar situations
 (cleanly and efficiently)." This came *after* I'd already shipped a working, tested, tsc-clean implementation
 that special-cased exactly those four names in `case 'call'` — being correct and verified was not enough; the
-mechanism itself was the problem. See [[tison_towasm_array_mutators]] for the full before/after (round 1:
+mechanism itself was the problem. See `archive/tison_towasm_array_mutators.md` for the full before/after (round 1:
 ~100-line hand-rolled per-method-name codegen; round 2: a structural `assignsToThis`/`reassignsThis` trigger
 + real wasm multi-value results, ~10 lines at the call site, reusing `emitAssignTarget`/`emitMethodCall`
 as-is, works for any class/method automatically).
