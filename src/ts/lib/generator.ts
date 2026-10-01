@@ -24,11 +24,12 @@ export class IteratorResult<Y, R> {
 // 'emitMethodCall' to call a closure through a field, not just a bare local -- a real, general
 // capability, not something special-cased to generators.
 export class Generator<Y, R, N> {
-	private step: (sent: N) => IteratorResult<Y, R>;
-	constructor(step: (sent: N) => IteratorResult<Y, R>) {
+	private step: (sent: N | undefined) => IteratorResult<Y, R>;
+	constructor(step: (sent: N | undefined) => IteratorResult<Y, R>) {
 		this.step = step;
 	}
-	next(v: N): IteratorResult<Y, R> {
+	// An omitted argument resumes with `undefined`, as JS does.
+	next(v?: N): IteratorResult<Y, R> {
 		return this.step(v);
 	}
 	// A generator is its own iterator.

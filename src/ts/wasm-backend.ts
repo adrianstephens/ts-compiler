@@ -8346,9 +8346,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		const genClass		= ensureClass('Generator', [Y, R, N]);
 		if (!resultClass || !genClass)
 			throw `internal: the generator lib classes were not found`;
-		const resultWtype	= resultClass.thisType;
-
-		const sig: FuncSig = { params: [nWtype], result: resultWtype, hasRest: false };
+		// The step is built as the erased class's own `step` field takes it, not from `N`/`IteratorResult<Y, R>` as written.
+		const sig			= closureSigOf(genClass.fields[genClass.fieldIndex.get('step')!].wtype);
+		const resultWtype	= sig.result;
 		const { funcTypeIndex, structTypeIndex } = ensureClosureType(sig);
 		const frame			= resumableFrame(decl, params);
 		const { funcIndex: stepFuncIndex } = types.funcAt(funcTypeIndex);
@@ -8359,7 +8359,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			const fnCtx			= new FunctionContext(name, new Scope(moduleScopeOf(homeModule) ?? libGlobal), plainReturn(resultWtype), undefined, homeModule);
 			// Param order is `ensureClosureType`'s (env, then `sig.params`); the cast-down frame is one more local after them.
 			const envParam		= fnCtx.declareLocal('#envParam', { typeIndex: types.envBase(), nullable: false });
-			const sentParam		= fnCtx.declareLocal('#sent', nWtype);
+			const sentParam		= fnCtx.declareLocal('#sent', sig.params[0]);
 			const frameLocal	= fnCtx.declareLocal('#frame', { typeIndex: frame.typeIndex, nullable: false });
 			fnCtx.emit(I.local.get(envParam.index), I.ref.cast(frame.typeIndex), I.local.set(frameLocal.index));
 
@@ -8381,7 +8381,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					},
 				}),
 				resumesWithValue:	() => true,
-				fromSent:			() => {},
+				fromSent:			field => coerceTop(sig.params[0], fnCtx, field.wtype),
 				suspend(next, resumeId, _loopMark, setFrame) {
 					if (next.kind !== 'yield')
 						throw "'await' is not supported in generators yet";

@@ -129,11 +129,11 @@ interface IteratorResult<Y, R> {
 	done: boolean;
 }
 interface Generator<Y, R, N> {
-	next(v: N): IteratorResult<Y, R>;
+	next(...[value]: [] | [N]): IteratorResult<Y, R>;
 	[Symbol.iterator](): Generator<Y, R, N>;
 }
 interface Iterator<T, R = any, N = any> {
-	next(v?: N): IteratorResult<T, R>;
+	next(...[value]: [] | [N]): IteratorResult<T, R>;
 }
 interface Iterable<T, R = any, N = any> {
 	[Symbol.iterator](): Iterator<T, R, N>;

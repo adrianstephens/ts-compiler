@@ -93,6 +93,13 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
   printed WAT changed) -- stronger than difftest agreeing.
 - The checker never reports an unknown name for TYPES; for values TS2304 is behind `Scope.unknownNames` ([[tison_unknown_name_diagnostic]]).
 
+## Next up (2026-09-30, end of session)
+
+1. **Step 4b** (decided, not started): an object type with no buildable struct layout is held as the dynamic object and read via the
+   any-field dispatch. Find the structural trigger in `typeOf`; repro `assistant/tb/d.ts`, `assistant/tb/litkey.ts`; then the survey.
+2. **Audit `src/ts/lib/lib.d.ts` against TS's real lib declarations.** A wrong lib line looks like a checker gap: `Generator.next(v: N)`
+   was filed as "checker demands an argument" for weeks; the checker handled TS's real `next(...[value]: [] | [N])` all along.
+
 ## Waiting on the user
 
 **String cheap representation.** Done: each literal is materialized once. The data segment is PASSIVE (copy-only), so a bare `u32` offset
