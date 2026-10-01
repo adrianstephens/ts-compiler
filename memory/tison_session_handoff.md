@@ -103,8 +103,14 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
    names; at its slot and as its own type); a struct shape no literal builds is open (`isOpen` in the backend, shared by typeOf/
    ownerFor/holdsLayout/spread). Repros `tb/d.ts`, `tb/litkey.ts` run. +20 lines net (not deletion-first: `resolvePlace`'s `refined`
    clause is still needed for `'in'` narrowing). **Survey NOT yet measured for it** -- the run was killed (memory, above).
-2. **Audit `src/ts/lib/lib.d.ts` against TS's real lib declarations.** A wrong lib line looks like a checker gap: `Generator.next(v: N)`
-   was filed as "checker demands an argument" for weeks; the checker handled TS's real `next(...[value]: [] | [N])` all along.
+2. **lib.d.ts audit IN PROGRESS.** Instrument `assistant/lib-audit.ts` -> `lib-audit.md`: the MERGED lib (lib.d.ts + lib/*.ts
+   classes, whose methods join the interface as overloads) vs TS's es5..es2024, per member, `- TS` / `+ ours` signatures. The lib
+   declared what the RUNTIME implements, so every fix is runtime + declaration. Done: `d794c65` (position args, no-arg toFixed/
+   toPrecision/Error; `clampIndex`/`relativeIndex` replace 6 clamp copies), `362e7ab` (flatMap value-or-array, RegExp(re), raw,
+   PromiseLike). Left: VARIADICS (`Math.max/min(...)` -- today one 2-operand asm instruction, a rest overload must not make the
+   2-arg call allocate; `String.fromCharCode(...)`, `str.concat(a, b)`, `arr.concat(x, ys)`, `new Array(1, 2, 3)`); `flat(depth)`
+   (needs `FlatArray`); `toExponential()` no-arg (shortest digits); Promise chaining/`all` (Promise is no PromiseLike); `Map/Set.keys()`
+   return arrays (deliberate, accepts more than TS). The "Missing" section is runtime coverage, not this audit.
 
 ## Waiting on the user
 
