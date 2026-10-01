@@ -2362,7 +2362,12 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 				// nullish strip-and-reattach below never ran for it: `(() => number) | undefined` isn't
 				// function-shaped, signature lookup found nothing, and the whole call typed as `any`.
 				const calleeOptional = (e.callee.type === 'member' && isOptionalChainLink(e.callee)) || !!(e as { optional?: boolean }).optional;
-				let calleeT		= T.mergeIdenticalSignatures(T.resolveOwn(T.nonNullable(e.callee.type === 'super' ? scope.value('super()') ?? T.ANY : recurse(e.callee), scope, calleeOptional), scope));
+				// An immediately invoked function or arrow: TS types each unannotated parameter by its argument, widened. A quiet query,
+				// as an overload trial types an argument, so the argument's own check below reports once.
+				const iife		= e.type === 'call' && (e.callee.type === 'arrow' || e.callee.type === 'function') && !e.arguments.some(a => a.type === 'spread')
+					? TS.FunctionType({ params: e.arguments.map((a, i) => ({ key: `$${i}`, typeAnnotation: trial(() => typeOf(a, scope, true, undefined, yieldCollector, undefined)) })), returnType: T.ANY })
+					: undefined;
+				let calleeT		= T.mergeIdenticalSignatures(T.resolveOwn(T.nonNullable(e.callee.type === 'super' ? scope.value('super()') ?? T.ANY : recurse(e.callee, iife), scope, calleeOptional), scope));
 				if (calleeT.type === 'union' && calleeObjT && e.callee.type === 'member') {
 					const arr		= T.arrayUnionAsArray(T.nonNullable(calleeObjT, scope, calleeOptional), scope);
 					const method	= arr && T.lookupMember(arr, e.callee.property, scope);

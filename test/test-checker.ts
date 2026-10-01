@@ -361,6 +361,11 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		declare const v: Table<{ 1: 'a'; 2: 'b' }>[1 | 2];
 		const w: { op: 'a' } | { op: 'b' } = v;
 		const u: { op: 'a' } = v;`, ["not assignable to type"]],
+	['an immediately invoked function types its parameters by its arguments, widened', `
+		const r = (d => d.y)({ x: 1 });
+		const ok: number = (d => d.x)({ x: 1 });
+		const n: string = ((a, b) => a + b)(1, 2);
+		const s: string = (function (v) { return v; })('k');`, ["Property 'y' does not exist", "not assignable to type 'string'"]],
 ];
 
 (async () => {

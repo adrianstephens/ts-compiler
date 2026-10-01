@@ -2888,6 +2888,14 @@ async function main() {
 	}
 
 	{
+		// An immediately invoked arrow or function: each parameter takes its argument's type, as TS types it.
+		const { iife } = await compile(`
+			export function iife(): number { return (d => d.x * 2)({ x: 21 }) + ((n, m) => n * m)(3, 4) * 100 + (function (v) { return v.length; })('abc') * 10000; }
+		`);
+		check('an IIFE types its parameters by its arguments', iife(), 31242);
+	}
+
+	{
 		// `BigInt(v)`/`Number(v)` of a `number | bigint` take the union constructor, which tells them apart at run time; a
 		// bigint `**` is `BigInt.pow` wherever it appears; `asIntN`/`asUintN` against values from node.
 		const { unionCtors, bigPow, asN } = await compile(`
