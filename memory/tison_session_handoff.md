@@ -95,6 +95,8 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
 
 ## Next up (2026-09-30, end of session)
 
+0. **Size** ([[feedback_track_total_size]]): `compiler/src` 31,906 lines at `d4fb83f`. 4b must net-DELETE; after it, a consolidation
+   session from a fresh `near-clone-scan.js` run (the 2026-09-21 audit is stale).
 1. **Step 4b** (decided, not started): an object type with no buildable struct layout is held as the dynamic object and read via the
    any-field dispatch. Find the structural trigger in `typeOf`; repro `assistant/tb/d.ts`, `assistant/tb/litkey.ts`; then the survey.
 2. **Audit `src/ts/lib/lib.d.ts` against TS's real lib declarations.** A wrong lib line looks like a checker gap: `Generator.next(v: N)`

@@ -41,6 +41,7 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 
 ## Project rules
 
+- [track TOTAL size; consolidate every session](feedback_track_total_size.md) — net line delta in every commit, `src` total in the handoff (31,906 at `d4fb83f`); extend the duplicated mechanism, never add a near-copy; 4b lands deletion-first
 - [no name special-casing in wasm-backend.ts](feedback_no_name_special_casing.md) — find the structural trigger, never hardcode a method/function name
 - [keep the checker stateless](feedback_no_checker_state.md) — prefer untyped AST-node stamping over new checker state
 - [don't simplify deps for self-hosting](feedback_no_simplifying_deps_for_selfhosting.md) — hard constructs need a real compiler feature
