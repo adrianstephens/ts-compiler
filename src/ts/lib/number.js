@@ -342,8 +342,25 @@ export class Math {
     static PI_2 = Math.PI / 2;
     static seed = 123456789;
     static abs = __asm('(switch $T (($f32 $f64) $T.abs))');
-    static max = __asm('(switch $T (($f32 $f64) $T.max))');
-    static min = __asm('(switch $T (($f32 $f64) $T.min))');
+    // Two operands are one instruction; any other count folds them, from TS's empty-call identities (NaN propagates, as JS's does).
+    // @ts-expect-error - tison extension: multiple implementations
+    static max(a, b) { return __asm('(switch $T (($f32 $f64) $T.max))')(a, b); }
+    // @ts-expect-error - tison extension: multiple implementations
+    static max(...values) {
+        let m = -Infinity;
+        for (const v of values)
+            m = Math.max(m, v);
+        return m;
+    }
+    // @ts-expect-error - tison extension: multiple implementations
+    static min(a, b) { return __asm('(switch $T (($f32 $f64) $T.min))')(a, b); }
+    // @ts-expect-error - tison extension: multiple implementations
+    static min(...values) {
+        let m = Infinity;
+        for (const v of values)
+            m = Math.min(m, v);
+        return m;
+    }
     static floor = __asm('(switch $T (($f32 $f64) $T.floor))');
     static ceil = __asm('(switch $T (($f32 $f64) $T.ceil))');
     static trunc = __asm('(switch $T (($f32 $f64) $T.trunc))');

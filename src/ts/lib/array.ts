@@ -114,6 +114,11 @@ export class Array<T> extends ArrayBase {
 		super();
 		this.data = d;
 	}
+	// @ts-expect-error - tison extension: multiple constructor implementations
+	constructor(...items: T[]) {
+		super();
+		this.data = Array._raw(items);
+	}
 
 	grow(n: i32): i32 {
 		const len = this.length;
@@ -224,10 +229,26 @@ export class Array<T> extends ArrayBase {
 		Array._raw(result).copyFrom(0, this.data, from, rlen);
 		return result;
 	}
+	// @ts-expect-error - tison extension: multiple implementations
 	concat(b: T[]): T[] {
 		const result: T[] = Array._make<T>(this.length + b.length);
 		Array._raw(result).copyFrom(0, this.data, 0, this.length);
 		Array._raw(result).copyFrom(this.length, Array._raw(b), 0, b.length);
+		return result;
+	}
+	// An array item is spread and anything else appended, as JS does.
+	// @ts-expect-error - tison extension: multiple implementations
+	concat(...items: (T | ConcatArray<T>)[]): T[] {
+		const result: T[] = this.slice();
+		for (const item of items) {
+			if (Array.isArray(item)) {
+				const part = item as ConcatArray<T>;
+				for (let j = 0; j < part.length; j++)
+					result.push(part[j]);
+			} else {
+				result.push(item as T);
+			}
+		}
 		return result;
 	}
 	fill(x: T, start: i32 = 0, end: i32 = 0x7fffffff): T[] {

@@ -145,11 +145,13 @@ export function  Pointer<T>(levels: Levels, to: T): Pointer<T> {
 	return result as Pointer<T>;
 }
 
-// `size` uses the plain (never-extended) TypeSpecifier even under cpp -- the `[type_specifier]` array-size
-// form this covers is an obscure, barely-exercised grammar path (see direct_abstract_declarator), not worth
-// threading the `X` seam through the whole declarator system for.
-export interface ArrayDecl<T>		{ type: 'array'; element: T; size?: TypeSpecifier | Expr };
-export function  ArrayDecl<T>(element: T, size?: TypeSpecifier | Expr): ArrayDecl<T>	{ return { type: 'array', element, size }; };
+// `X`: the array-size seam. A size is a `type_specifier` or a constant expression, so both arms widen with
+// `X` together. `NoInfer` is load-bearing: `TypeSpecifier<never>` is a plain union, so without it TS infers
+// `X` from the argument (as `RefType | StructSpecifier | EnumSpecifier`) and every base-grammar
+// `ArrayDecl(...)` call returns a mismatched `ArrayDecl<..., TypeSpecifier>`. With it, `X` comes from the
+// contextual return type (or defaults to `never`), which is what a language's `Declarator<..., X>` supplies.
+export interface ArrayDecl<T, X = never>		{ type: 'array'; element: T; size?: TypeSpecifier<X> | Expr<X> };
+export function  ArrayDecl<T, X = never>(element: T, size?: TypeSpecifier<NoInfer<X>> | Expr<NoInfer<X>>): ArrayDecl<T, X>	{ return { type: 'array', element, size }; };
 
 // `P`: the parameter-shape extension seam -- defaults to `ParameterDecl` (plain C), cpp instantiates it with
 // its own `ParameterDecl | PackParameter` union so default-valued and variadic-pack parameters flow through
@@ -161,19 +163,21 @@ export function  FunctionDecl<T, P = ParameterDecl>(name: T, params: P[], variad
 // `Reference | RvalueReference` so `int &x`/`int &&x` flow through every declarator position without a cast
 // (mirrors js-parser.ts's `Expr<T>` pattern: the recursive positions re-supply the same `<R, P>` pair, and `R`
 // itself is a plain union member alongside the built-in wrapper shapes).
-export type Declarator<R = never, P = ParameterDecl> =
+// `X` (third param): the array-size expression seam, threaded so an array declarator's `size` is the
+// language's own `Expr<X>` -- see `ArrayDecl` above. It defaults to `never`, so plain C and cpp are unchanged.
+export type Declarator<R = never, P = ParameterDecl, X = never> =
 	| Identifier
-	| FunctionDecl<Declarator<R, P>, P>
-	| ArrayDecl<Declarator<R, P>>		// `size` is absent for `int arr[]` (incomplete-array form, also used for unsized array parameters like `void f(int arr[])`).
-	| Pointer<Declarator<R, P>>			// `to` lets a pointer wrap a parenthesized sub-declarator, which is what makes function-pointer declarators (`int (*fp)(int)`) expressible: the parens are what let a pointer bind to the *name*, not to the function type as a whole
+	| FunctionDecl<Declarator<R, P, X>, P>
+	| ArrayDecl<Declarator<R, P, X>, X>		// `size` is absent for `int arr[]` (incomplete-array form, also used for unsized array parameters like `void f(int arr[])`).
+	| Pointer<Declarator<R, P, X>>			// `to` lets a pointer wrap a parenthesized sub-declarator, which is what makes function-pointer declarators (`int (*fp)(int)`) expressible: the parens are what let a pointer bind to the *name*, not to the function type as a whole
 	| R;
 
 // An abstract declarator -- the same shapes as Declarator (pointer/array/function, plus grouping), but never bottoming out in a name:
 // every level is optional since "nothing more" is itself a valid abstract declarator (e.g. plain `int *` has a pointer with no further `to`).
-export type AbstractDeclarator<R = never, P = ParameterDecl> = undefined
-	| Pointer<AbstractDeclarator<R, P> | undefined>
-	| FunctionDecl<AbstractDeclarator<R, P> | undefined, P>
-	| ArrayDecl<AbstractDeclarator<R, P> | undefined>
+export type AbstractDeclarator<R = never, P = ParameterDecl, X = never> = undefined
+	| Pointer<AbstractDeclarator<R, P, X> | undefined>
+	| FunctionDecl<AbstractDeclarator<R, P, X> | undefined, P>
+	| ArrayDecl<AbstractDeclarator<R, P, X> | undefined, X>
 	| R;
 
 // A type-name for casts/sizeof: specifiers plus an optional abstract declarator (pointers, arrays, functions, and combinations

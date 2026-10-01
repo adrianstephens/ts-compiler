@@ -61,9 +61,17 @@ export class String {
 	private static _setChar	= __asm<[string, i32, i32], void>('array.set $this');
 	private static _copy	= __asm<[string, i32, string, i32, i32], void>('array.copy $this $this');
 
+	// @ts-expect-error - tison extension: multiple implementations
 	static fromCharCode(c: number): string {
 		const result = String._alloc(1);
 		String._setChar(result, 0, c);
+		return result;
+	}
+	// @ts-expect-error - tison extension: multiple implementations
+	static fromCharCode(...codes: number[]): string {
+		const result = String._alloc(codes.length);
+		for (let i = 0; i < codes.length; i++)
+			String._setChar(result, i, codes[i]);
 		return result;
 	}
 	// Each code point above 0xFFFF is its UTF-16 surrogate pair; an invalid one is a RangeError, as in JS.
@@ -216,10 +224,18 @@ export class String {
 			String._copy(result, i * len, this as unknown as string, 0, len);
 		return result;
 	}
+	// @ts-expect-error - tison extension: multiple implementations
 	concat(b: string): string {
 		const result = String._alloc(this.length + b.length);
 		String._copy(result, 0, this as unknown as string, 0, this.length);
 		String._copy(result, this.length, b, 0, b.length);
+		return result;
+	}
+	// @ts-expect-error - tison extension: multiple implementations
+	concat(...strings: string[]): string {
+		let result = this as unknown as string;
+		for (const s of strings)
+			result = result.concat(s);
 		return result;
 	}
 

@@ -256,6 +256,8 @@ export type Builtin<T = Inline | MethodDelegate | FunctionDecl> = (args: Operand
 class ClassInfo extends W.ClassInfo {
 	methodDecls		= new Map<string, MethodMember[]>();
 	inlineMethods?:	Map<string, Builtin<Inline>>;
+	// An `__asm` implementation among several of one name, spliced in when a call's overload chooses it.
+	inlineOverloads?: Map<MethodMember, Builtin<Inline>>;
 	// Where this class was DECLARED: its own module's scope and canonical path, so a method body compiled from
 	// another module can resolve the names its own file declares. Absent for a lib class or a synthesized shape.
 	declScope?:		Scope;
@@ -1190,9 +1192,14 @@ function callOf(e: CallNode, scope: Scope): CheckedCall | undefined {
 const memberTemplate	= new WeakMap<object, unknown>();
 const templateOf		= (m: unknown) => (typeof m === 'object' && m && memberTemplate.get(m)) || m;
 
-function namedBody<M>(bodies: M[], checked: CheckedCall | undefined, label: string): M {
+// Parameters only, as an ambient declaration restates an implementation's (`declare var Math` over `class Math`).
+const paramsKey = (s: JS.CallSig<Type>) => [...s.params.map(p => (p.typeAnnotation ? T.typeId(p.typeAnnotation) : '_') + (hasMod(p, 'optional') || p.default ? '?' : '')),
+	s.rest?.typeAnnotation ? `...${T.typeId(s.rest.typeAnnotation)}` : ''].join(',');
+
+// The implementation a resolved call names: the declaration itself, or the one an ambient declaration of it restates.
+function namedBody<M extends JS.CallSig<Type>>(bodies: M[], checked: CheckedCall | undefined, label: string): M {
 	const origin	= templateOf(checked?.sig.origin);
-	const body		= bodies.find(d => templateOf(d) === origin);
+	const body		= bodies.find(d => templateOf(d) === origin) ?? (checked && bodies.find(d => paramsKey(d) === paramsKey(checked.sig)));
 	if (!body)
 		throw `internal: the checker's resolution of '${label}' names none of its bodies`;
 	return body;
@@ -5077,7 +5084,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	function emitMethodCall(owner: ClassInfo, name: string, call: CallSite, ctx: FunctionContext, bypassVirtual?: boolean): W.Type {
 		const args		= argsOf(call);
 		const typeArgs	= typeArgsOf(call);
-		const inline	= owner.inlineMethods?.get(name);
+		const decls		= owner.methodDecls.get(name);
+		const inline	= owner.inlineMethods?.get(name) ?? (decls && owner.inlineOverloads?.get(implementationOf(owner, name, decls, call, ctx)));
 		if (inline) {
 			if (args.some(a => a.type === 'spread'))
 				throw 'spread call arguments are not supported';
@@ -9084,7 +9092,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				info.methodDecls.set(key, [m]);
 		};
 
-		const inlineDecls: { key: string; value: JS.Call<Type>; typeParams?: string[] }[] = [];
+		// `decl`: an `__asm` body that is one of several implementations, chosen per call as any overload is.
+		const inlineDecls: { key: string; value: JS.Call<Type>; typeParams?: string[]; decl?: MethodMember }[] = [];
+		const bodiedKeys	= (decl.body as TS.ClassMember[]).flatMap(m => m.type === 'method' && m.body ? [T.memberKey(m.key)] : []);
+		const overloaded	= new Set(bodiedKeys.filter((k, i) => bodiedKeys.indexOf(k) !== i));
 
 		if (decl.abstract)
 			throw `abstract class '${name}' is not supported`;
@@ -9116,12 +9127,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					// the iteration protocol calls it by that name. A truly dynamic one has no name to call it by.
 					const key = T.memberKey(m.key);
 					if (key !== undefined) {
-						const value = isAsmMethod(m);
-						if (value) {
-							inlineDecls.push({ key, value, typeParams: m.typeParams?.map(tp => tp.name) });
-						} else {
+						const value	= isAsmMethod(m);
+						const decl	= value && overloaded.has(key) ? m : undefined;
+						if (value)
+							inlineDecls.push({ key, value, typeParams: m.typeParams?.map(tp => tp.name), decl });
+						if (!value || decl)
 							addMethod(key, m);
-						}
 					}
 
 					if (m.key === 'constructor') {
@@ -9209,7 +9220,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		const inlineMethods = new Map<string, Builtin<Inline>>(info.superClass?.inlineMethods);
 		for (const i of inlineDecls) {
 			try {
-				inlineMethods.set(i.key, makeAsm(i.value, { typeOf, typeIndexOf: w => W.isArr(w) ? types.array(w.arr) : undefined }, defines, i.typeParams));
+				const asm = makeAsm(i.value, { typeOf, typeIndexOf: w => W.isArr(w) ? types.array(w.arr) : undefined }, defines, i.typeParams);
+				if (i.decl)
+					(info.inlineOverloads ??= new Map(info.superClass?.inlineOverloads)).set(i.decl, asm);
+				else
+					inlineMethods.set(i.key, asm);
 			} catch (err) {
 				throw new W.Error(err as any, i.value).inModule(info.homeModule ?? '.');
 			}
@@ -9217,6 +9232,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 
 		if (inlineMethods.size)
 			info.inlineMethods = inlineMethods;
+		info.inlineOverloads ??= info.superClass?.inlineOverloads;
 
 		return info;
 	}

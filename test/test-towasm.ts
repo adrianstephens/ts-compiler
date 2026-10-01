@@ -2847,6 +2847,30 @@ async function main() {
 	}
 
 	{
+		// TS's rest forms beside the fast fixed-arity ones: a call names the implementation its overload resolves to, so
+		// `Math.max(a, b)` is still one instruction. Values from node.
+		const { mathMany, mathSpread, mathEmpty, chars, scat, acat, refs, ctor } = await compile(`
+			interface P { n: number }
+			export function mathMany(): number { return Math.max(1, 9, 4) * 100 + Math.min(5, 2, 8) * 10 + Math.max(1); }
+			export function mathSpread(): number { const xs = [4, 11, 6]; return Math.max(...xs) * 100 + Math.min(...xs); }
+			export function mathEmpty(): number { return Math.max() === -Infinity && Math.min() === Infinity && Number.isNaN(Math.max(1, NaN, 3)) ? 1 : 0; }
+			export function chars(): number { const s = String.fromCharCode(104, 105, 33); return s.length * 100 + s.charCodeAt(2) + (String.fromCharCode(65) === 'A' ? 1000 : 0) + (String.fromCharCode() === '' ? 10000 : 0); }
+			export function scat(): number { const s = 'a'.concat('bc', 'd', ''); return s.length * 10 + (s === 'abcd' ? 1 : 0) + ('x'.concat() === 'x' ? 100 : 0); }
+			export function acat(): number { const a = [1, 2].concat(3, [4, 5], [], 6); return a.length * 100 + a[4] * 10 + a[5]; }
+			export function refs(): number { const a = ['a'].concat('bc', ['d', 'ef']); const o: P[] = [{ n: 1 }]; const b = o.concat({ n: 2 }, [{ n: 3 }]); return a.length * 1000 + a[3].length * 100 + b.length * 10 + b[2].n; }
+			export function ctor(): number { const a = new Array(3); const b = new Array(7, 8, 9); const c = new Array<string>('x', 'yz'); return a.length * 1000 + b.length * 100 + b[2] * 10 + c[1].length; }
+		`);
+		check('Math.max/min over any count of arguments', mathMany(), 921);
+		check('Math.max/min over a spread', mathSpread(), 1104);
+		check('Math.max/min: no arguments, NaN', mathEmpty(), 1);
+		check('String.fromCharCode over any count of codes', chars(), 11333);
+		check('string concat over any count of strings', scat(), 141);
+		check('array concat spreads arrays and appends values', acat(), 656);
+		check('array concat with reference elements', refs(), 4233);
+		check('new Array(n) is a length, new Array(a, b, ...) the elements', ctor(), 3392);
+	}
+
+	{
 		// `BigInt(v)`/`Number(v)` of a `number | bigint` take the union constructor, which tells them apart at run time; a
 		// bigint `**` is `BigInt.pow` wherever it appears; `asIntN`/`asUintN` against values from node.
 		const { unionCtors, bigPow, asN } = await compile(`

@@ -242,6 +242,7 @@ interface String {
 	charCodeAt(index: number): number;
 	//concat(...strings: string[]): string;
 	concat(b: string): string;
+	concat(...strings: string[]): string;
 	indexOf(searchString: string, position?: number): number;
 	lastIndexOf(searchString: string, position?: number): number;
 //	localeCompare(that: string): number;
@@ -267,6 +268,7 @@ declare var String: {
 	(value?: any): string;
 //	fromCharCode(...codes: number[]): string;
 	fromCharCode(code: number): string;
+	fromCharCode(...codes: number[]): string;
 	fromCodePoint(...codePoints: number[]): string;
 	// One byte per char code, read straight out of linear memory -- the single-alloc counterpart to
 	// building a string one `fromCharCode` at a time, for `lib/node/*`'s own WASI buffers.
@@ -348,6 +350,7 @@ interface Array<T> {
 	//unshift(...items: T[]): number;
 	push(item: T): number;
 	concat(item: T[]): T[];
+	concat(...items: (T | ConcatArray<T>)[]): T[];
 	unshift(item: T): number;
 	join(separator?: string): string;
 	reverse(): T[];
@@ -382,7 +385,9 @@ interface Array<T> {
 // The statics stay on the class in `lib/array.ts`.
 interface ArrayConstructor {
 	new <T>(n?: number): T[];
+	new <T>(...items: T[]): T[];
 	<T>(n?: number): T[];
+	<T>(...items: T[]): T[];
 }
 declare var Array: ArrayConstructor;
 
@@ -406,6 +411,7 @@ interface ReadonlyArray<T> {
 	toString(): string;
 	toLocaleString(): string;
 	concat(item: T[]): T[];
+	concat(...items: (T | ConcatArray<T>)[]): T[];
 	join(separator?: string): string;
 	slice(start?: number, end?: number): T[];
 	indexOf(searchElement: T, fromIndex?: number): number;
@@ -567,10 +573,11 @@ declare var Math: {
 	exp(x: number): number;
 	floor(x: number): number;
 	log(x: number): number;
-//	max(...values: number[]): number;
-//	min(...values: number[]): number;
+	// TS declares only the rest form; the pair restates `class Math`'s two implementations, so a call names the one it compiles to.
 	max(a: number, b: number): number;
+	max(...values: number[]): number;
 	min(a: number, b: number): number;
+	min(...values: number[]): number;
 	pow(x: number, y: number): number;
 	random(): number;
 	round(x: number): number;
