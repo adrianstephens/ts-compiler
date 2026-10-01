@@ -16,7 +16,9 @@ memories resolve through the rename ledger in MEMORY.md. Run everything from the
 e.g. `bash compiler/assistant/selfhost-survey.sh`. The survey compiles `compiler/src/...` and `tison/src/...` targets from a
 snapshot (`selfhost-snapshot.sh` takes tison, compiler, binary-libs, binary). Verified after the split: all suites, corpus gate
 838 = baseline, `vsdg-check.sh`, survey end to end. **Run the survey with `SURVEY_HEAP_MB=6144`** -- `wasm/codegen.ts --whole` and
-wasm-backend.ts slice 0 peak above the 2 GB default and report CRASHED otherwise.
+wasm-backend.ts slice 0 peak above the 2 GB default and report CRASHED otherwise. **6144 x the default 8 workers swapped this
+16 GB Mac to a halt (2026-10-01)**: the scheduler now costs every job at >= half the heap cap (V8's garbage ceiling), so 6144
+runs ~2 workers here -- slower, but the machine stays usable. Ask before a full run; `SURVEY_JOBS` caps it further.
 
 ## State at 2026-09-30
 
@@ -97,8 +99,10 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
 
 0. **Size** ([[feedback_track_total_size]]): `compiler/src` 31,906 lines at `d4fb83f`. 4b must net-DELETE; after it, a consolidation
    session from a fresh `near-clone-scan.js` run (the 2026-09-21 audit is stale).
-1. **Step 4b** (decided, not started): an object type with no buildable struct layout is held as the dynamic object and read via the
-   any-field dispatch. Find the structural trigger in `typeOf`; repro `assistant/tb/d.ts`, `assistant/tb/litkey.ts`; then the survey.
+1. **Step 4b DONE `0c24195`** (user chose "unbuilt shapes"): the open-shape walk records each object literal's `shapeKey` (member
+   names; at its slot and as its own type); a struct shape no literal builds is open (`isOpen` in the backend, shared by typeOf/
+   ownerFor/holdsLayout/spread). Repros `tb/d.ts`, `tb/litkey.ts` run. +20 lines net (not deletion-first: `resolvePlace`'s `refined`
+   clause is still needed for `'in'` narrowing). **Survey NOT yet measured for it** -- the run was killed (memory, above).
 2. **Audit `src/ts/lib/lib.d.ts` against TS's real lib declarations.** A wrong lib line looks like a checker gap: `Generator.next(v: N)`
    was filed as "checker demands an argument" for weeks; the checker handled TS's real `next(...[value]: [] | [N])` all along.
 
