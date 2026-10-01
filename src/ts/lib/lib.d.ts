@@ -258,6 +258,7 @@ interface String {
 	toUpperCase(): string;
 	toLocaleUpperCase(): string;
 	trim(): string;
+	repeat(count: number): string;
 
 	valueOf(): string;
 

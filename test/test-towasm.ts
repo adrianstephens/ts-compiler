@@ -2871,6 +2871,23 @@ async function main() {
 	}
 
 	{
+		// JS's number-to-string: the shortest digits that read back (an exact tie goes to the even digit), positional
+		// within 21 integer digits and 6 leading zeros, else exponential. Strings from node.
+		const { numStrings } = await compile(`
+			const xs = [0.1 + 0.2, 4.35, 123.456, 1e21, 1.5e300, 1e-7, 5e-324, 1.7976931348623157e308, 123456789012345680000, 0.000001, -30138.015747070312, 2 ** 53];
+			const want = ['0.30000000000000004', '4.35', '123.456', '1e+21', '1.5e+300', '1e-7', '5e-324', '1.7976931348623157e+308', '123456789012345680000', '0.000001', '-30138.015747070312', '9007199254740992'];
+			const exps = ['3.0000000000000004e-1', '4.35e+0', '1.23456e+2', '1e+21', '1.5e+300', '1e-7', '5e-324', '1.7976931348623157e+308', '1.2345678901234568e+20', '1e-6', '-3.0138015747070312e+4', '9.007199254740992e+15'];
+			export function numStrings(): number {
+				let ok = 0;
+				for (let i = 0; i < xs.length; i++)
+					ok += (String(xs[i]) === want[i] ? 1 : 0) + (xs[i].toExponential() === exps[i] ? 100 : 0);
+				return ok;
+			}
+		`);
+		check('number to string: shortest round-trip digits, JS formatting, toExponential()', numStrings(), 1212);
+	}
+
+	{
 		// `BigInt(v)`/`Number(v)` of a `number | bigint` take the union constructor, which tells them apart at run time; a
 		// bigint `**` is `BigInt.pow` wherever it appears; `asIntN`/`asUintN` against values from node.
 		const { unionCtors, bigPow, asN } = await compile(`

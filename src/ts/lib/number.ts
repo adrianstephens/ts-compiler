@@ -213,6 +213,74 @@ function SignedToString(n: number, radix = 10): string {
 	return (n < 0 ? '-' : '+') + UnsignedToString(Math.abs(n), radix);
 }
 
+// The shortest digits that read back as `v` (finite, > 0), and where the point goes: v ~ 0.DIGITS x 10^point. Burger & Dybvig's
+// free-format algorithm, exact over bigints; ties-to-even makes an even mantissa's rounding interval closed.
+function shortestDigits(v: number): { digits: string; point: number } {
+	const bits: i64	= __asm<[number], i64>('i64.reinterpret_f64')(v);
+	const biased	= bigToNumber((bits >> 52n) & 0x7ffn);
+	const f: bigint	= biased ? (bits & 0xfffffffffffffn) | 0x10000000000000n : bits & 0xfffffffffffffn;
+	const e			= (biased ? biased : 1) - 1075;
+	const even		= (f & 1n) === 0n;
+	// r/s is v; mp/s and mm/s the half-gaps to its neighbours, the lower one halved at a power of two.
+	const pe	= e >= 0 ? 2n ** BigInt(e) : 1n;
+	const edge	= f === 0x10000000000000n && biased > 1 ? 2n : 1n;
+	let r	= f * pe * 2n * edge, s = (e >= 0 ? 2n : 2n ** BigInt(1 - e)) * edge, mp = pe * edge, mm = pe;
+	let point = Math.ceil(Math.log10(v));
+	if (point >= 0)
+		s *= 10n ** BigInt(point);
+	else {
+		const t = 10n ** BigInt(-point);
+		r *= t;
+		mp *= t;
+		mm *= t;
+	}
+	// The estimate is off by at most one either way: the upper bound must fall below 10^point, and not below 10^(point-1).
+	const above = (hi: bigint) => even ? hi >= s : hi > s;
+	if (above(r + mp)) {
+		s *= 10n;
+		point++;
+	}
+	while (!above((r + mp) * 10n)) {
+		r *= 10n;
+		mp *= 10n;
+		mm *= 10n;
+		point--;
+	}
+	let digits = '';
+	for (;;) {
+		r *= 10n;
+		mp *= 10n;
+		mm *= 10n;
+		const d = r / s;
+		r %= s;
+		const low = even ? r <= mm : r < mm, high = above(r + mp);
+		if (low || high) {
+			// Both neighbours in range: the nearer, and on an exact tie the even one (the spec's rule for `n`).
+			const last = low && !high ? d : high && !low ? d + 1n : r * 2n < s || (r * 2n === s && (d & 1n) === 0n) ? d : d + 1n;
+			return { digits: digits + String.fromCharCode(48 + bigToNumber(last)), point };
+		}
+		digits += String.fromCharCode(48 + bigToNumber(d));
+	}
+}
+
+// JS's Number::toString for a finite x > 0: positional within 21 integer digits and 6 leading zeros, else exponential.
+function decimalToString(x: number): string {
+	if (x <= 9007199254740992 && Math.floor(x) === x)
+		return UnsignedToString(x);
+	const { digits, point } = shortestDigits(x);
+	const n = digits.length;
+	if (n <= point && point <= 21)
+		return digits + '0'.repeat(point - n);
+	if (0 < point && point <= 21)
+		return digits.slice(0, point) + '.' + digits.slice(point);
+	if (-6 < point && point <= 0)
+		return '0.' + '0'.repeat(-point) + digits;
+	return exponential(digits, point);
+}
+function exponential(digits: string, point: number): string {
+	return digits.slice(0, 1) + (digits.length > 1 ? '.' + digits.slice(1) : '') + 'e' + SignedToString(point - 1);
+}
+
 function fracToString(f: number, digits: number): string {
 	let fs = '';
 	for (let i = 0; i < digits && f !== 0; i++) {
@@ -303,6 +371,8 @@ export class Number {
 			return '-Infinity';
 		const sign = x < 0 ? '-' : '';
 		x = Math.abs(x);
+		if (radix === 10)
+			return x === 0 ? '0' : sign + decimalToString(x);
 
 		// integer part
 		const n = Math.floor(x);
@@ -321,9 +391,15 @@ export class Number {
 		const s		= sign + UnsignedToString(Math.floor(n / scale));
 		return digits > 0 ? s + '.' + UnsignedToString(n % scale, 10, digits) : s;
 	}
-	toExponential(digits: number): string {
+	toExponential(digits?: number): string {
 		const x		= this as unknown as number;
 		const sign	= x < 0 ? '-' : '';
+		if (digits === undefined) {
+			if (x !== x || x === Infinity || x === -Infinity)
+				return this.toString();
+			const d = x === 0 ? { digits: '0', point: 1 } : shortestDigits(Math.abs(x));
+			return sign + exponential(d.digits, d.point);
+		}
 		const nf	= new NormalizedFloat(Math.abs(x));
 		const m		= nf.m;
 		const e		= nf.e;
