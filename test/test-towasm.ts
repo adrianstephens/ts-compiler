@@ -2779,6 +2779,22 @@ async function main() {
 	}
 
 	{
+		// A generic class erases its reference type arguments, methods or not: `this as never` into another instantiation is the same
+		// object. `IteratorResult<number, void>.value` is `number | any`, which must still hold `undefined` once done.
+		const { fluent, valueAfterDone } = await compile(`
+			class B<T extends object> {
+				constructor(public root: T, public n: number) {}
+				with<K extends string>(k: K): B<T & { [P in K]: number }> { this.n += k.length; return this as never; }
+			}
+			export function fluent(): number { const a = new B({ a: 1 }, 0); const b = a.with('xy').with('z'); return b.n * 10 + (a === (b as unknown) ? 1 : 0); }
+			function* gen3(): Generator<number, void, unknown> { yield 1; yield 2; }
+			export function valueAfterDone(): number { const g = gen3(); g.next(0); g.next(0); return g.next(0).value === undefined ? 1 : 0; }
+		`);
+		check('generic class: this as never across instantiations is one object', fluent(), 31);
+		check('generator: value is undefined once done', valueAfterDone(), 1);
+	}
+
+	{
 		// `BigInt(v)`/`Number(v)` of a `number | bigint` take the union constructor, which tells them apart at run time; a
 		// bigint `**` is `BigInt.pow` wherever it appears; `asIntN`/`asUintN` against values from node.
 		const { unionCtors, bigPow, asN } = await compile(`

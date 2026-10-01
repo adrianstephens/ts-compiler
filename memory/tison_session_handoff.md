@@ -109,6 +109,9 @@ cannot be a string. Options put to the user: (1) offset+length packed in an `i64
 - VSDG is optional and runs BEFORE check+stamp; the backend compiles whatever AST it gets literally, in tree order. Inlining is a VSDG prepass.
 - Erasure prefers per-instantiation structs (a widening flow OPENS the slot); do NOT erase in the checker to match codegen.
 - Type parameters opaque as TS (`302be07`); TS's inference priority (2026-09-28); the generic conditional stays deferred (2026-09-30).
+- Dynamic-objects step 4 (2026-09-30): (a) a generic class WITH methods also erases its reference type arguments (one struct,
+  methods compiled erased), so `this as never` across instantiations is identity; (b) an object type with no buildable struct
+  layout is held as the dynamic object and read through the any-field dispatch (identity kept; slower, accepted).
 - Architecture SETTLED: `ts/wasm-backend.ts` is the TS half, `wasm/codegen.ts` the neutral half; a file is earned by cross-language reuse
   only; `TSEmitter` rejected; **do not split `ts/wasm-backend.ts` for navigability**; neutral extraction is exhausted, measured; wasm
   knowledge is NOT language-neutral (`numericOpInline` encodes JS semantics). **`cpp/wasm-backend.ts` is the neutrality gate**: keep

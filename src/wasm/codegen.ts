@@ -164,7 +164,7 @@ export function combineUnion(wtypes: readonly Type[]): Type {
 		return wtypes[0];
 	if (wtypes.every(w => scalarKind(w) !== undefined))
 		return 'f64';
-	return REF_ANY;
+	return wtypes.some(isNullable) ? REF_ANY_NULLABLE : REF_ANY;
 }
 
 export class Error {

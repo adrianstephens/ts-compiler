@@ -2113,6 +2113,10 @@ function ownsLayout(t: Type, scope: Scope): boolean {
 	const r = T.resolve(scope, t);
 	return r.type === 'ref' && (r.name === 'number' || r.name === 'boolean' || r.name === 'any');
 }
+// A class instantiation's physical arguments, as `ensureClass` keys it: every other argument erases to `any`.
+function classLayoutArgs(typeArgs: readonly Type[], scope: Scope): Type[] {
+	return typeArgs.map(t => ownsLayout(t, scope) ? t : T.ANY);
+}
 
 // The tag is read UNRESOLVED on purpose: `T.resolve` collapses every `TypedArray` tag alike to plain `number`.
 function layoutArgKey(t: Type, scope: Scope): string {
@@ -2169,12 +2173,11 @@ function resolveParts(t: Type, scope: Scope, depth = 3): Type {
 		:	r;
 }
 
-// A non-class generic's layout is the instantiation `layoutArgs` makes of it, as `openKey` keys it: `Spread<Type>` and `Spread<any>` are
-// one struct. A class keeps its own arguments' layouts, since `ensureClass` collapses them only for a method-less class.
+// A generic's layout is the instantiation `layoutArgs` (a class: `classLayoutArgs`) makes of it, as `openKey` keys it: `Spread<Type>` and
+// `Spread<any>` are one struct.
 function genericSketch(t: Type & { type: 'ref' }, scope: Scope): string {
 	const typeParams = t.typeArgs?.length && !T.isClassRef(t, scope) ? T.ownScope(t, scope).lookupType(t.name)?.typeParams : undefined;
-	return typeParams ? layoutKey(t.name, layoutArgs(typeParams, t.typeArgs, scope), scope)
-		: `${t.name}<${(t.typeArgs ?? []).map(a => ownsLayout(a, scope) ? layoutArgKey(a, scope) : 'ref').join(',')}>`;
+	return layoutKey(t.name, typeParams ? layoutArgs(typeParams, t.typeArgs, scope) : classLayoutArgs(t.typeArgs ?? [], scope), scope);
 }
 
 // Would these two types occupy the same wasm slot? Answered WITHOUT building a shape -- this runs before codegen -- by the same collapse `ensureClass`
@@ -6724,7 +6727,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				const contextual	= ctx.contextualReturn && T.resolve(ctx.scope, ctx.contextualReturn);
 				const arrayMembers	= contextual?.type === 'union' ? T.unionMembers(contextual, ctx.scope).map(m => T.resolve(ctx.scope, m)).filter(m => m.type === 'array') : [];
 				const contextualArr = arrayMembers.length === 1 ? arrayMembers[0] : contextual;
-				const contextualElement = contextualArr?.type === 'array' ? contextualArr.element : undefined;
+				// An iterable context names its element too: `[4, 5]` as an `Iterable<number>` is the `number[]` the checker typed it as.
+				// Not a tuple's, which is always stored boxed (`layoutSketch`).
+				const contextualElement = contextualArr?.type === 'array' ? contextualArr.element
+					: contextualArr?.type === 'tuple' ? undefined : contextual && T.iterationTypes(T.nonNullable(contextual, ctx.scope), ctx.scope)?.yield;
 				const contextForcesAny = !contextualElement || T.isAny(T.resolve(ctx.scope, contextualElement));
 				// An empty literal has no elements for `arrayKindOf` to read and the checker types it `never[]`/`any[]` (always 'ref'): `want`'s kind, else the CONTEXTUAL
 				// element type, which is what its non-empty sibling would infer (`[]` beside `[1,2]` in `number[][]` must be the same `f64` array, not boxed-`any`).
@@ -6926,9 +6932,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 							return wtype;
 						}
 						emitAs(left, ctx, leftWtype);
-						emitShortCircuit(operator, leftWtype, ctx.narrowedTypeOf(left), wtype, () => emitAs(right, ctx, wtype), held => {
+						const leftT = ctx.narrowedTypeOf(left);
+						// The checker's context for the right of `??`: `specs ?? []` is built as the left's array, not `never[]`.
+						const emitRight = () => emitAs(right, ctx, wtype);
+						emitShortCircuit(operator, leftWtype, leftT, wtype, operator === '??' ? () => ctx.withContext(T.nonNullable(leftT, ctx.scope), emitRight) : emitRight, held => {
 							// When the kept part of the left is only null/undefined, the result is its type's own `undefined`, not the left's physical value.
-							if (T.isNullish(T.logicalLeftPart(ctx.narrowedTypeOf(left), operator, ctx.scope), ctx.scope))
+							if (T.isNullish(T.logicalLeftPart(leftT, operator, ctx.scope), ctx.scope))
 								return void emitAs(Identifier('undefined'), ctx, wtype);
 							ctx.emit(I.local.get(held.index));
 							coerceTop(leftWtype, ctx, wtype);
@@ -8421,14 +8430,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		const frame			= resumableFrame(decl, params, [{ type: toValType(promiseWtype), mut: true }]);
 		const resultPromise	= frame.extraAt;
 		const { funcIndex: stepFuncIndex, typeIndex: stepFuncTypeIndex } = types.func(
-			[{ type: { ref: frame.typeIndex, nullable: false }, id: 'frame' }, { type: toValType(W.REF_ANY), id: 'sent' }], []);
-		const stepInfo: FuncInfo = { params: [{ typeIndex: frame.typeIndex, nullable: false }, W.REF_ANY], result: 'void', hasRest: false, funcIndex: stepFuncIndex, typeIndex: stepFuncTypeIndex };
+			[{ type: { ref: frame.typeIndex, nullable: false }, id: 'frame' }, { type: toValType(W.REF_ANY_NULLABLE), id: 'sent' }], []);
+		const stepInfo: FuncInfo = { params: [{ typeIndex: frame.typeIndex, nullable: false }, W.REF_ANY_NULLABLE], result: 'void', hasRest: false, funcIndex: stepFuncIndex, typeIndex: stepFuncTypeIndex };
 		closureLiterals.push(stepInfo);
 
 		worklist.push(W.withCatch(() => {
 			const fnCtx			= new FunctionContext(name, new Scope(moduleScopeOf(homeModule) ?? libGlobal), plainReturn(), undefined, homeModule);
 			const frameLocal	= fnCtx.declareLocal('#frame', { typeIndex: frame.typeIndex, nullable: false });
-			const sentParam		= fnCtx.declareLocal('#sent', W.REF_ANY);
+			const sentParam		= fnCtx.declareLocal('#sent', W.REF_ANY_NULLABLE);
 			const resolveMethod	= ensureMethod(promiseClass, 'resolve', [], fnCtx)!;
 			// `resolve`'s RESOLVED param, not `T`: a `Promise<void>`'s `T` was boxed to `any` by `ensureClass`.
 			const valueWtype	= resolveMethod.params[0];
@@ -8457,7 +8466,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 						const envParam		= tCtx.declareLocal('#envParam', { typeIndex: types.envBase(), nullable: false });
 						const valueParam	= tCtx.declareLocal('#value', tWtype);
 						tCtx.emit(I.local.get(envParam.index), I.ref.cast(frame.typeIndex), I.local.get(valueParam.index));
-						coerceTop(tWtype, tCtx, W.REF_ANY);
+						coerceTop(tWtype, tCtx, W.REF_ANY_NULLABLE);
 						tCtx.emit(I.call(stepFuncIndex), I.return);
 						tInfo.body			= tCtx.toFuncBody(2, toValType);
 					});
@@ -8474,7 +8483,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				// Only a REAL Promise suspension resumes through `#sent`: the synchronous fast path writes the local inline, and re-writing
 				// it from `#sent` would clobber it with an earlier resume's value.
 				resumesWithValue:	next => !!T.asPromiseRef(checkerTypeOf(next.operand!, fnCtx.scope), fnCtx.scope),
-				fromSent:			field => coerceTop(W.REF_ANY, fnCtx, field.wtype),
+				fromSent:			field => coerceTop(W.REF_ANY_NULLABLE, fnCtx, field.wtype),
 				suspend(next, resumeId, loopMark, setFrame) {
 					if (next.kind !== 'await')
 						throw "'yield' is not supported inside an async function";
@@ -8498,8 +8507,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 						return;
 					}
 					const tType		= promiseRef.typeArgs![0];
-					const tWtype	= typeOf(tType);
-					if (!tWtype)
+					if (!typeOf(tType))
 						throw "'await' on a Promise of an unsupported element type";
 					const awaitedClass = ensureClass('Promise', [tType]);
 					if (!awaitedClass)
@@ -8510,12 +8518,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					// `state` must say where to resume BEFORE `.then()`: a settled promise calls the trampoline synchronously,
 					// re-entering the step before `.then()` returns (safe -- this arm ends in `return`).
 					setFrame(resumeId);
-					// A trampoline is built from a resolved `W.Type`, bypassing the `void`-as-`any` boxing a field or param gets.
-					const tramp = ensureTrampoline(tWtype === 'void' ? W.REF_ANY : tWtype);
+					// The trampoline takes what `then` hands its callback: the erased class's own parameter, not the awaited TS type's.
+					const then	= ensureMethod(awaitedClass, 'then', [], fnCtx)!;
+					const tramp	= ensureTrampoline(closureSigOf(then.params[then.params.length - 1]).params[0]);
 					fnCtx.emit(
 						I.local.get(promiseLocal.index),
 						I.ref.func(tramp.funcIndex), I.local.get(frameLocal.index), I.i32.const(1), I.struct.new(tramp.structTypeIndex),
-						I.call(ensureMethod(awaitedClass, 'then', [], fnCtx)!.funcIndex), I.return);
+						I.call(then.funcIndex), I.return);
 				},
 				complete: () => resolve(undefined, fnCtx),
 			});
@@ -8530,9 +8539,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			ctx.emit(I.call(promiseCtor.funcIndex), I.local.set(promiseLocal.index));
 			emitFrameInit(ctx, params, frame);
 			ctx.emit(I.local.get(promiseLocal.index), I.struct.new(frame.typeIndex));
-			// Run the body at once, up to its first real suspension, as JS does. The entry segment never reads `#sent`, but it is a
-			// non-nullable `any`, so a real (unused) box keeps that true.
-			ctx.emit(I.f64.const(0), I.struct.new(types.box('f64')), I.call(stepFuncIndex), I.local.get(promiseLocal.index), I.return);
+			// Run the body at once, up to its first real suspension, as JS does; the entry segment never reads `#sent`.
+			ctx.emit(I.ref.null('any'), I.call(stepFuncIndex), I.local.get(promiseLocal.index), I.return);
 		});
 	}
 
@@ -8931,15 +8939,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		// UNBOXED. A reference type occupies one ref slot, so swapping refs cannot reshape a struct; only a scalar
 		// (`number` -> f64, `boolean` -> i32) or a typed-array tag can. Everything else collapses to `any`, so a conversion
 		// between those instantiations is identity rather than an unsatisfiable `cannot convert ref:X<a> to ref:X<b>` --
-		// wasm struct fields are mutable, hence invariant.
-		// Restricted to a class with no METHODS of its own: a method body is compiled against the instantiation it was
-		// reached through (`substElemMethods`), so merging two whose methods differ runs code built for one layout against
-		// the other -- measured as a wasm `invalid struct index`. `Array` is exempt: its methods are compiled for the boxed
-		// `any` form, the point of collapsing to it, while a DATA-shaped generic (`Terminal<T>`, `Rule<T>`) has no such code.
-		// The trigger is structural, never a class name.
+		// wasm struct fields are mutable, hence invariant. Methods compile once for the erased form: a type parameter is opaque,
+		// so no body can depend on a reference argument's layout, and `this as never` across instantiations stays the same object.
 		const classDecl = LIB_DECL_MAP.get(name) ?? userGenericClassDecls.get(name) ?? declScope?.decl(name);
-		if (name === 'Array' || (classDecl?.type === 'class_decl' && !classDecl.body.some(m => m.type === 'method')))
-			typeArgs = typeArgs?.map(t => ownsLayout(t, global) ? t : T.ANY);
+		if (classDecl?.type === 'class_decl')
+			typeArgs = typeArgs && classLayoutArgs(typeArgs, global);
 		// A class declared outside the entry module is keyed by its module too, as a shape is: `W.FunctionContext` and wasm-backend.ts's own
 		// `FunctionContext extends W.FunctionContext` are two classes.
 		const tag	= classDecl?.type === 'class_decl' ? moduleTag(stmtHomeModule.get(classDecl)) : '';
