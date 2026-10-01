@@ -2255,7 +2255,7 @@ function iteratesByProtocol(e: Expr, ctx: FunctionContext): T.IterationTypes | u
 		return undefined;
 	const it = T.iterationTypes(t, ctx.scope);
 	if (!it)
-		throw `'${T.typeKey(t)}' has '[Symbol.iterator]()' but its iterator has no 'next()'`;
+		throw `'${T.showType(t)}' has '[Symbol.iterator]()' but its iterator has no 'next()'`;
 	return it;
 }
 
@@ -2806,7 +2806,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		const func = T.baseSignature(sig, T.ANY);
 		// Naming the whole signature, not just the parameter: one of these reaches a caller from some
 		// enclosing declaration's own type, and the parameter name alone rarely says which.
-		const sigText = () => T.typeKey({ type: 'function', ...sig } as Type);
+		const sigText = () => T.showType({ type: 'function', ...sig } as Type);
 		const defaults = defaultsWithImplicitUndefined(func.params);
 		const omittable = (i: number) => !!defaults[i] && T.nullLiteralKind(defaults[i]!) === 'undefined';
 		const params = func.params.map((p, i) => {
@@ -2814,7 +2814,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			const wt = p.typeAnnotation && typeOf(p.typeAnnotation);
 			const boxed = wt === 'void' ? W.REF_ANY : wt;
 			if (!boxed)
-				throw `function type parameter '${describeBinding(p.key)}': '${p.typeAnnotation ? T.typeKey(p.typeAnnotation) : '<no annotation>'}' has no representation, in '${sigText()}'`;
+				throw `function type parameter '${describeBinding(p.key)}': '${p.typeAnnotation ? T.showType(p.typeAnnotation) : '<no annotation>'}' has no representation, in '${sigText()}'`;
 			// A slot a caller may fill with `undefined` (a bare `p?: T`, or a default only the callee can apply) is nullable;
 			// a re-emitted default always arrives. Same rule as `resolveParam`, or the two physical signatures disagree.
 			return omittable(i) ? types.nullable(boxed) : boxed;
@@ -3030,7 +3030,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			case 'function': {
 				const parts = closureSigParts(resolved);
 				if (!parts)
-					throw `a function type has an unsupported return type: '${resolved.returnType ? T.typeKey(resolved.returnType) : 'void'}' in '${T.typeKey(resolved)}'`;
+					throw `a function type has an unsupported return type: '${resolved.returnType ? T.showType(resolved.returnType) : 'void'}' in '${T.showType(resolved)}'`;
 				const { params, result, hasRest, defaults } = parts;
 				// Not memoized by physical signature: `resolvedParams` carries this signature's own TS types, and an unannotated
 				// closure parameter takes its type from them -- `(x?: Stmt) => boolean` and `(x?: Stmt[]) => boolean` share one physical shape.
@@ -4404,7 +4404,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		const members	= T.unionMembers(t, ctx.scope);
 		const hasNull	= members.some(m => T.isLiteral(m, 'null') || T.isRef(m, 'null'));
 		if (hasNull && members.some(m => T.isRef(m, 'undefined') || T.isRef(m, 'void')))
-			throw `'typeof' of '${T.typeKey(t)}': null and undefined share one representation here, so a null slot cannot be told apart`;
+			throw `'typeof' of '${T.showType(t)}': null and undefined share one representation here, so a null slot cannot be told apart`;
 		const ALL		= ['undefined', 'number', 'boolean', 'string', 'bigint', 'symbol', 'function', 'object'];
 		const named		= members.map(m => T.isNullish(m, ctx.scope) ? (hasNull ? 'object' : 'undefined') : T.typeofName(m, ctx.scope));
 		const tags		= named.some(n => n === undefined) ? ALL : ALL.filter(tag => named.includes(tag));
@@ -4420,7 +4420,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			}
 			// A null slot is tested by `emitTypeofTest('undefined')`; its tag is the type's own null tag.
 			if (!emitTypeofTest(id, tag === 'object' && hasNull ? 'undefined' : tag, ctx))
-				throw `'typeof' of '${T.typeKey(t)}' cannot be told apart at run time (tag '${tag}')`;
+				throw `'typeof' of '${T.showType(t)}' cannot be told apart at run time (tag '${tag}')`;
 			ctx.emitIf(toValType(str), () => emitAs(Literal(tag), ctx, str), () => cascade(i + 1));
 		};
 		cascade(0);
@@ -4536,7 +4536,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			ctx.emitAnyTruthy(got, types);
 			return;
 		}
-		throw `'${T.typeKey(t)}' (${W.typeKey(got)}) cannot be used as a boolean condition`;
+		throw `'${T.showType(t)}' (${W.typeKey(got)}) cannot be used as a boolean condition`;
 	}
 
 	// `got` is `want`'s layout with reference fields erased to `any`: what a value read through an erased generic instantiation is.
@@ -4880,7 +4880,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				return { kind: 'union', owners, name, recv };
 			if (dispatchesAsAny(obj, e.arguments, ctx))
 				return { kind: 'dynamic', name, recv };
-			throw `unknown method '${name}' (its receiver's type: '${T.typeKey(ctx.narrowedTypeOf(obj)).slice(0, 160)}')`;
+			throw `unknown method '${name}' (its receiver's type: '${T.showType(ctx.narrowedTypeOf(obj))}')`;
 		}
 		// A local's own slot, not its checker type rebuilt: an unannotated parameter with a default has no representation of its own.
 		const physical	= callee.type === 'identifier' && ctx.resolvesName(callee.name) ? ctx.resolvedWtype(callee.name) : wtypeOf(callee, ctx);
@@ -5270,11 +5270,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			const result	= typeOf(ctx.typeAt(e));
 			const cls		= W.isRef(result) ? classes.get(result.ref) : undefined;
 			if (!cls?.callable)
-				throw `'Object.assign' onto a function: '${T.typeKey(ctx.typeAt(e))}' is no callable object`;
+				throw `'Object.assign' onto a function: '${T.showType(ctx.typeAt(e))}' is no callable object`;
 			return emitCallableObject(cls, target, call.writes, ctx);
 		}
 		if (!W.isRef(wtype))
-			throw `'Object.assign': '${T.typeKey(tsType)}' is not an object to assign onto`;
+			throw `'Object.assign': '${T.showType(tsType)}' is not an object to assign onto`;
 		const name	= `$assign$${ctx.tempCounter++}`;
 		const local	= ctx.declareValue(name, wtype, tsType);
 		emitAs(target, ctx, wtype);
@@ -5553,7 +5553,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			if (!kind || kind === 'i16' || kind === 'i8') {
 				if (write)
 					throw "this operation is not supported";
-				throw `'${T.exprKey(target.object)}' is indexed but is not an array, a typed array, or a class with index accessors (its type: '${T.typeKey(ctx.narrowedTypeOf(target.object))}')`;
+				throw `'${T.exprKey(target.object)}' is indexed but is not an array, a typed array, or a class with index accessors (its type: '${T.showType(ctx.narrowedTypeOf(target.object))}')`;
 			}
 			const typeIndex	= types.array(kind);
 			// A ref-kind array's storage is nullable `anyref`, shared by every non-scalar element, whatever the element's declared type.
@@ -5984,7 +5984,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		const fnType	= T.resolve(ctx.scope, ctx.narrowedTypeOf(e));
 		const w			= typeOf(fnType);
 		if (fnType.type !== 'function' || !W.isClosure(w))
-			throw `method '${e.property}' as a value needs a function type, got '${T.typeKey(fnType)}'`;
+			throw `method '${e.property}' as a value needs a function type, got '${T.showType(fnType)}'`;
 		const sig		= closureSigOf(w);
 		const { funcTypeIndex, structTypeIndex } = ensureClosureType(sig);
 		const key		= `${cls.name}.${e.property}:${W.typeKey(w)}`;
@@ -6577,7 +6577,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 							// always nullable.
 							const anyOperand = !unionCls && !dynamic && T.isAny(spreadT);
 							if (!unionCls && !dynamic && !anyOperand)
-								throw `object literal for '${owner.name}': a spread operand needs a known object type, got '${T.typeKey(spreadT)}'`;
+								throw `object literal for '${owner.name}': a spread operand needs a known object type, got '${T.showType(spreadT)}'`;
 							const spreadLocal = ctx.declareLocal(`$spread$${ctx.tempCounter++}`, W.REF_ANY_NULLABLE);
 							emitSpreadOperand(p.operand, ctx, W.REF_ANY_NULLABLE);
 							ctx.emit(I.local.set(spreadLocal.index));

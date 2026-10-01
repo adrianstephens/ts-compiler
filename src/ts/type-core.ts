@@ -62,6 +62,9 @@ export const NUMERIC	= TS.UnionType([NUMBER, BIGINT]);
 // ===================================================================
 
 export const tocode = printer({newline:'', indent:'', spaceAfterColon: false, spaceAfterComma: false, spaceAroundOps: false});
+// For messages: `typeKey` is an identity key, and a fluent builder's type prints exponentially larger than it is.
+export const show		= () => printer({ typeBudget: 4096 });
+export const showType	= (t: Type) => show().type(t);
 export function typeKey(t: Type) { const k = tocode.type(t); if (process.env.XK && k.length > 200000) { const st = new Error().stack!.split('\n').slice(2, 6).join(' | '); const g = ((globalThis as any).__xks ??= new Set()); if (g.size < 3 && !g.has(st)) { g.add(st); console.error('XKSTACK', k.length, st); } } return k; }
 
 // A type's structural identity, linear in its DAG where `typeKey` prints the tree: a type naming a part twice at each of n steps

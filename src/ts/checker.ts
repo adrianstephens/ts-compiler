@@ -4,7 +4,6 @@ import * as JS from './js-parser';
 import { Literal, Binary, hasMod, Location, getPos } from '@isopodlabs/tison/ast';
 import { isTsDeclaration, walker, walkerB } from './walker';
 import * as T from './type-utils';
-import { printer } from './printer';
 
 export const SEVERITY = {
 	GAP:		0,	// known missing functionality (see the header's own gap list) -- not a judgment call, just a reminder
@@ -14,7 +13,7 @@ export const SEVERITY = {
 export type SEVERITY = (typeof SEVERITY)[keyof typeof SEVERITY];
 export type Err = (sev: SEVERITY, pos: Location) => (strings: TemplateStringsArray, ...values: (string | number | undefined)[]) => void;
 // A fresh printer per interpolated value: `typeBudget` is spent per `Output` instance, never reset.
-const show = () => printer({ typeBudget: 4096 });
+const show = T.show;
 
 type Type		= TS.Type;
 type Expr		= TS.Expr;
