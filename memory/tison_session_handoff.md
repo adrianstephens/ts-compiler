@@ -21,10 +21,13 @@ wasm-backend.ts slice 0 peak above the 2 GB default and report CRASHED otherwise
 ## State at 2026-09-30
 
 Survey at `b84847a` (SURVEY_HEAP_MB=6144): **314/403 compile, 107 failures / 35 causes.** Top rows:
-- **60, wasm-backend.ts + wasm/codegen.ts: `Invalid string length`** -- `resolvePlace`'s "is indexed but is not an array" message
-  prints `T.typeKey` of makeAsm's `I` (the TreeBuilder fluent type, exponential to print) and overflows. TWO bugs: the MESSAGE (needs
-  a bounded printer) and the REAL cause, `I[type]` (wasm/codegen.ts ~938): an object indexed by a union of literal keys (`type` is a
-  scalar-name union), which `resolvePlace` only handles for arrays. `probe-decl.ts` takes `STACK_DEPTH=80`, `STACK=1` for a stack.
+- **60, wasm-backend.ts + wasm/codegen.ts: `Invalid string length`** -- the MESSAGE half is fixed (`cd71072`: backend messages print
+  with `T.showType`, the budgeted printer; never `T.typeKey` in a message). The REAL cause is NOT literal-key indexing (`O[k]` with
+  `k: 'a'|'b'` on a plain struct runs correctly, `assistant/litkey-repro.ts`): even `I.f64` fails (`unknown field 'f64'`, probe
+  `resolveAsmLocals`). `wasm.I` is physically the `DynamicObject` `new TreeBuilder({})` built through `any`, statically the deferred
+  fluent intersection -- dynamic-objects STEP 4, waiting on the user (below). Repro `assistant/tb/litkey.ts`.
+- **probe-decl.ts / checker-type.ts had drifted from the survey** (no `@isopodlabs/tison/` paths since the split, so every tison import
+  read as `any` and probes showed a different, earlier failure). Fixed 2026-09-30; if a probe and the survey disagree, diff their `paths`.
 - **6, wasm.ts: `unknown method 'as'`** on `bin.as(SLEB128, ...)` (top-level `const S32`, wasm.ts:47) -- `bin` read as an object whose
   type lacks `as` (star re-export via `export * from './types'`); a 3-module repro of the same shape compiled fine.
 
@@ -41,7 +44,7 @@ checked against real tsc. `wasm.ts` probe: 42 s / 2.2 GB.
 **Dynamic objects (TreeBuilder in binary-libs wasm.ts), four steps (user chose option 2):** 1 DONE `68e9cb5` (`{[k:string]: V}` is the lib's
 `DynamicObject<V>`, map.ts; `dynamicObjectArms` in every erased cascade; the spread clone `ensureAnySpreadClone` has NO arm yet);
 2 DONE; **3 NEXT**: a callable object gaining run-time-keyed properties (`Object.assign(anyFn, anyObj)`, probe `tb/c.ts`);
-4 undecided: the built dynamic object read statically as `T`; `this as never` across instantiations (`tb/d.ts`).
+4 undecided, now the top blocker: the built dynamic object read statically as `T`; `this as never` across instantiations (`tb/d.ts`: `ensureClass` monomorphizes a generic class WITH methods per reference argument, so `B<T>` -> `B<T & X>` is a cast between unrelated structs; only method-less classes and `Array` erase).
 Callable objects are DONE (a shape with call signature(s) + fields is a struct extending the closure struct; [[tison_representation_table]]);
 not built: `Object.assign` onto an EXISTING callable object (a later mutation), and a function-typed value flowing into a callable-object
 slot other than as a literal (honestly unsupported). `TreeBuilder.more`'s own body is dynamic (`Object.assign(v, existing)` between two
