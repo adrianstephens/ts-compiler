@@ -110,7 +110,11 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
    PromiseLike), `ca616df` VARIADICS (user: per-arity bodies -- an `__asm` body can be one overload (`ClassInfo.inlineOverloads`), so
    `Math.max(a, b)` stays one `f64.max`; `namedBody` maps an AMBIENT signature to the implementation with the same parameters, so
    lib.d.ts restates each overload pair the class implements). **Gates for lib work**: towasm, lib-decls, `tsc -p src/ts/lib`
-   (now `noEmit`), difftest. The corpus A/B checks against TS's own `lib.esnext.full` -- it CANNOT see our lib. Left: `flat(depth)`
+   (now `noEmit`), difftest. The corpus A/B checks against TS's own `lib.esnext.full` -- it CANNOT see our lib. Then (2026-10-01):
+   `8a4ffd8` numbers print as JS does (Burger & Dybvig over bigints, 0/4,424 vs node; ~30 us per fraction -- a machine-int
+   Ryu is the speed-up), `toExponential()` no-arg; IIFE parameters typed by their arguments (checker); **`this` parameters**
+   (`CallSig.thisType`, inferred from the receiver -- binary's `WithStaticGet.get<X>(this: X)`), lib InstanceType/
+   ConstructorParameters/Required. Not done: TS2684 (receiver fits `this`). Left: `flat(depth)` (now feasible: `this: A` + `FlatArray`)
    (needs `FlatArray`); `toExponential()` no-arg (shortest digits); Promise chaining/`all` (Promise is no PromiseLike); `Map/Set.keys()`
    return arrays (deliberate, accepts more than TS). The "Missing" section is runtime coverage, not this audit.
 
