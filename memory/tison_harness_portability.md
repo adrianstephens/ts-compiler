@@ -45,7 +45,7 @@ script that delegates does not contain):
   and scheduled from each file's recorded per-slice cost (`slices` in its report), longest first, within 40% of RAM
   (`SURVEY_MEM_GB`, `SURVEY_JOBS` override) -- the user works on the same machine, and 4 unbudgeted workers once ran it
   out of memory. It was ~10 min when most probes failed early; passing probes compile their whole graph. Run it in the
-  background as one job, never with an A/B toggle left in a surveyed file (`backend.ts` is itself a target).
+  background as one job, never with an A/B toggle left in a surveyed file (`wasm-backend.ts` is itself a target).
 - The survey was NONDETERMINISTIC before `935a4e1` (import-cycle race) — re-run a probe 3-5x before trusting
   a delta, and read the MOVED/REGRESSED lines rather than the flat total.
 - `test-towasm.ts` runs under `ts-node -T` (transpile-only), so it does NOT type-check: it will pass while

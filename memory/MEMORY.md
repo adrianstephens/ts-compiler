@@ -6,11 +6,11 @@ no longer exist in the tree — run it after a rename and fix what is LIVE; hist
 
 | was | is now | when |
 |---|---|---|
-| `TS/towasm.ts` | `TS/backend.ts` | `ed2d662` |
-| `TS/towasm-analysis.ts` | folded into `TS/backend.ts` | `307aa89` |
+| `TS/towasm.ts` | `ts/wasm-backend.ts` (was `TS/backend.ts` until the 2026-09-30 split) | `ed2d662` |
+| `TS/towasm-analysis.ts` | folded into `ts/wasm-backend.ts` | `307aa89` |
 | `TS/towasm-types.ts`, `TS/towasm-asm.ts`, `tocode.ts` | folded away / renamed (`tocode.ts` → `printer.ts`) | earlier |
-| `wasm-types.ts` | `wasm-codegen.ts` | `a69d68a` |
-| `wasm-asm.ts` | folded into `wasm-codegen.ts` | `deb2d18` |
+| `wasm-types.ts` | `wasm/codegen.ts` (was `wasm-codegen.ts` until the split) | `a69d68a` |
+| `wasm-asm.ts` | folded into `wasm/codegen.ts` | `deb2d18` |
 | `TSWError` → `WasmError` | `W.Error` (the module is imported as `W`) | `efe46bd`, then the user's pass |
 | `WasmScalar`/`WasmType`/`WasmElementI` | `Scalar`/`Type`/`ElementI` | the user's pass |
 | `ARR_WTYPE` | `ARRAY` | the user's pass |
@@ -28,7 +28,7 @@ no longer exist in the tree — run it after a rename and fix what is LIVE; hist
 | `dist/examples/...`, `npm run examples`, `cd src/examples && tsc -p .` | `dist/...`, `npm run build:emit` (one tsconfig now, so the "needs its own tsconfig" trap is gone) | same |
 | `tison/test`, `tison/assistant`, `tison/memory` (compiler-side) | `compiler/test`, `compiler/assistant`, `compiler/memory`; engine memories stay in `tison/memory` | same |
 | `tison/src/examples/common.ts`, `walker.ts` (the shared AST shapes / walker types) | `tison/src/ast.ts`, `tison/src/walker.ts`, imported as `@isopodlabs/tison/ast` and `@isopodlabs/tison/walker` | moved into tison so parser-only consumers need not pull in the compiler, 2026-09-30 |
-| `scad_parser.ts` | deleted from tison by the user, not moved; `test-scad-parser.ts` still in `tison/test` and dangling | 2026-09-30 |
+| `scad_parser.ts` | deleted from tison by the user (lives in their vscode extension); its memory `tison_scad_port.md` moved to `tison/memory` | 2026-09-30 |
 
 The module dropped its `wasm`/`Wasm` prefixes throughout: the file is already named `wasm-codegen.ts` and
 is imported as `W`, so `W.Type` beats `WT.WasmType`.
@@ -41,7 +41,7 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 
 ## Project rules
 
-- [no name special-casing in backend.ts](feedback_no_name_special_casing.md) — find the structural trigger, never hardcode a method/function name
+- [no name special-casing in wasm-backend.ts](feedback_no_name_special_casing.md) — find the structural trigger, never hardcode a method/function name
 - [keep the checker stateless](feedback_no_checker_state.md) — prefer untyped AST-node stamping over new checker state
 - [don't simplify deps for self-hosting](feedback_no_simplifying_deps_for_selfhosting.md) — hard constructs need a real compiler feature
 - [no JSON.stringify on AST/Type](feedback_no_json_stringify_ast.md) — bigints throw; print with `T.typeKey` / `T.exprKey` / `T.stmtKey`
@@ -51,7 +51,7 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 - [session boundaries](feedback_session_boundaries.md) — when the user asks "continue or start fresh?", recommend; default fresh after a committed fix, always after a compaction
 - [build and tests](compiler_build_and_tests.md) — tests import the BUILT `dist/`; `build` vs `build:emit`; the `dist/ts/lib` copy traps
 - [two-tier gates](feedback_two_tier_gates.md) — fast gates while iterating, full set once before the commit; measured 10.1 gate runs per commit. **`test-towasm.ts` and `test-checker.ts` read `dist/` — `npm run build:emit` first, on both sides of an A/B**
-- [index backend.ts before hunting](feedback_towasm_symbol_index.md) — one-off `grep -n` symbol index; the file was named in 575 separate read/grep calls over 8 sessions
+- [index wasm-backend.ts before hunting](feedback_towasm_symbol_index.md) — one-off `grep -n` symbol index; the file was named in 575 separate read/grep calls over 8 sessions
 - **Scratch and instruments live in `compiler/assistant/`** (2026-09-14, d8f407c; the workspace root is not a project). Older memories write instrument paths as `assistant/…` — read those as `compiler/assistant/…`. They are still RUN from the workspace root, where `node_modules` is: `bash compiler/assistant/selfhost-survey.sh`. Generated markdown gets `.md`, not `.txt`.
 
 ## Semantic conformance (current method)
@@ -69,7 +69,6 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 - [py-parser](tison_py_parser.md) — off-side rule done purely in the lexer
 - [jsx-parser](tison_jsx_parser.md) — LALR reduce-lookahead leaks + JSX-vs-generic-arrow ambiguity
 - [wat-parser exceptions](tison_wat_parser_exceptions.md) — exceptions + multi-value blocktypes, verified vs wasmtime
-- [SCAD port](tison_scad_port.md) — OpenSCAD parser.y → `scad_parser.ts`: its entry point, the three tison traps it hit (inline-action numbering, `precedence:` levels or a silent GLR fork, a commented-out `/* empty */`), and the OpenSCAD lexer facts verified against lexer.l
 
 ## TS-to-wasm compiler
 

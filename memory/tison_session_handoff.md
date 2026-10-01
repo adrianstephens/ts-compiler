@@ -31,10 +31,10 @@ wasm.ts probe 42 s / 2.2 GB. Known gap: an UNDECLARED name relates to anything, 
 `keyof` reads it, everything else names via `JS.keyName`/`String`. Noted: `0 | 16` is held as a numeric RANGE (prints `number`).
 Corpus since dd64ba2: ERROR 1005 -> 999; every new error in between was checked against real tsc.
 **Survey at `b84847a`** (SURVEY_HEAP_MB=6144; banner-marked only for the user's scad_parser.ts): 314/403, 107 failures / 35
-causes. backend.ts is MEASURED again (its worker had crashed), so +62 probeable. Top rows:
-- **60, backend.ts + wasm-codegen.ts: `Invalid string length`** -- `resolvePlace`'s "is indexed but is not an array" message
+causes. wasm-backend.ts is MEASURED again (its worker had crashed), so +62 probeable. Top rows:
+- **60, wasm-backend.ts + wasm/codegen.ts: `Invalid string length`** -- `resolvePlace`'s "is indexed but is not an array" message
   prints `T.typeKey` of makeAsm's `I` (the TreeBuilder fluent type, exponential to print) and overflows. Two bugs: the MESSAGE
-  (needs a bounded printer), and the REAL cause, `I[type]` (wasm-codegen.ts ~938): an object indexed by a union of literal
+  (needs a bounded printer), and the REAL cause, `I[type]` (wasm/codegen.ts ~938): an object indexed by a union of literal
   keys (`type` is a scalar-name union), which `resolvePlace` only handles for arrays. `probe-decl.ts` takes `STACK_DEPTH=80`.
 - **6, wasm.ts: `unknown method 'as'`** on `bin.as(SLEB128, ...)` (top-level `const S32`, wasm.ts:47) -- `bin` read as an object
   whose type lacks `as` (star re-export via `export * from './types'`). A 3-module repro of the same shape compiled fine.
@@ -47,7 +47,7 @@ as a TARGET; `this` in `class C<V>` is `C<V>` (codegen's instantiation copy is s
 lists the ~15 TS rules the change exposed as missing, each implemented. **Scale:** fluent builders (`B<T & F<T>>`) double
 per step, so printed keys (`typeKey`) are exponential there -- use `T.typeId` (structural hash, DAG-linear) for any
 equality/cache/set key on types; `resolve` also caches expensive kinds by scoped `typeId`.
-Survey: run with **SURVEY_HEAP_MB=6144** -- backend.ts slice 0 peaks at 6.1 GB (1303 s; the pre-`302be07` compiler needed
+Survey: run with **SURVEY_HEAP_MB=6144** -- wasm-backend.ts slice 0 peaks at 6.1 GB (1303 s; the pre-`302be07` compiler needed
 4.1 GB, so the 2 GB default never fit it). `da19727` cut the rest: `typeId` lives on the node and skips checker stamps,
 resolve's structural cache is weak. 314/341 compile; top row `EnumValue<EnumType>` has no representation (6, wasm.ts).
 Instruments for memory: `assistant/inspect-heap.mjs <port> [secs]` (live-allocation sampling by caller, the twin of
@@ -91,11 +91,11 @@ depth exhaustions per measurement).
 
 ## Before: HEAD `ed4944c` (2026-09-27, late)
 
-Survey at `bc160d4` (clean baseline): 312/403, top row `closure parameter 'a'` (59, backend.ts + wasm-codegen.ts).
+Survey at `bc160d4` (clean baseline): 312/403, top row `closure parameter 'a'` (59, wasm-backend.ts + wasm/codegen.ts).
 That was a REGRESSION from `f2b24e9`, bisected: the lib lacked `ArrayBufferLike`, `isAbstract` reads an undeclared
 name as an unbound type param, and the now-uncapped `mentionsAbstract` reached it inside `wasm.Instr`, so
 `ReadType<T[keyof T]>` never distributed and `Instr['op']` was `any`. `ed4944c` declares it; those decls are back at
-**`unresolved identifier 'Uint8Array'` -- the next blocker** (probe `makeAsm` in wasm-codegen.ts). Trap: an undeclared
+**`unresolved identifier 'Uint8Array'` -- the next blocker** (probe `makeAsm` in wasm/codegen.ts). Trap: an undeclared
 TYPE name is silently "abstract" (no TS2304 for types) -- suspect a missing lib name whenever a conditional over
 concrete-looking types stays deferred. Probe with snapshot paths: the live `binary/src` has the user's uncommitted edits.
 
@@ -107,7 +107,7 @@ printed WAT changed (capture `npx ts-node -T compiler/test/test-towasm.ts > x.ou
 
 ## Earlier: HEAD `a5043ab`+ (2026-09-26)
 
-The direction since 2026-09-21 (the user's): backend.ts had grown by giving each failing case its own path, because
+The direction since 2026-09-21 (the user's): wasm-backend.ts had grown by giving each failing case its own path, because
 it RE-DERIVED types the checker already knew. Now **the checker stamps each expression's type**
 (`checkedTypeOf`, [[tison-checker-type-stamps]]) and **representation is the backend's own choice**
 ([[tison-representation-table]]). Landed, in order: consolidation steps 5/4/1 (W.Type guards; one closure-call
@@ -227,7 +227,7 @@ automatically, and SATURATING (`trunc_sat`) is fine (user, 2026-09-25: the point
    constraint-checked inference -- makeInstr/Switch/NoPromise now type. DONE `00c43ec`: the Instr runaway was resolve's depth
    BAIL (a conditional's taken branch spent depth; a bail uncaches every enclosing level) -- Instr now resolves and narrows
    in ~10 s. Survey after it: still 312/403, but the 55-row blocker moved on to `unresolved identifier 'Uint8Array'`
-   (backend.ts, wasm-codegen.ts); next is `EnumValue<EnumType>` has no representation (7, wasm.ts). Then `a085b42`..`a7f6a56`
+   (wasm-backend.ts, wasm/codegen.ts); next is `EnumValue<EnumType>` has no representation (7, wasm.ts). Then `a085b42`..`a7f6a56`
    fixed the false positives that exposed (predicate filter/find, keyof computed keys, per-key mapped index, flat). `f2b24e9`:
    conditionals distribute at their own node; the OOM that first blocked it was `mentionsAbstract` missing indexed/keyof/
    mapped/conditional kinds, so FlattenOps<S> over an abstract S looked concrete and unrolled. Also 3 peg.ts rows: `cannot convert Generator<any> to
@@ -237,12 +237,12 @@ automatically, and SATURATING (`trunc_sat`) is fine (user, 2026-09-25: the point
    closure, any-callee); `emitCallee` emits it -- `case 'call'` and `case 'new'` are one line. `emitGuardedCall` is the one `?.` guard
    (method, union, dispatch, closure); `emitReceiverCall` the one receiver emitter; `dispatchArm` the one runtime-dispatch arm
    (`ensureAnyDispatch`, `ensureAnyCallDispatch`); `emitCall` lost its import/class fallback. Suite WAT byte-identical;
-   backend.ts -52 lines. Not merged, deliberately: the analysis pass's two callee resolvers (`calleeOf` for escaping params,
+   wasm-backend.ts -52 lines. Not merged, deliberately: the analysis pass's two callee resolvers (`calleeOf` for escaping params,
    `monomorphized` for slots) answer slightly different questions (nested `function_decl`s), so unifying them is a behaviour change.
    DONE `e92fd8e`: `namedCallee` reads the stamp (arrow/function-expression signatures carry an `origin`).
    **Task 4 DONE** (`1b96123` compound assignment; `a47fe3f`): `emitShortCircuit` is the one lowering for `&&`/`||`/`??` and
    `&&=`/`||=`/`??=`; `admitsLiterals` the one literal-discriminant test (three shape matchers); `emitDiscarded`; the binary
-   default arm keeps its decision order with one `identity` emitter. backend.ts -126 lines, suite WAT instruction-identical
+   default arm keeps its decision order with one `identity` emitter. wasm-backend.ts -126 lines, suite WAT instruction-identical
    (local order only). `&&`/`||`'s `anyref` fallback for an unrepresentable result is gone (throws, as `??` did). NOT merged,
    judged not worth it: the object literal's three spread classifications (Map path, struct path, `emitUnionShapedLiteral`)
    use different owner resolvers (`ownerOf` / `flattenOwners` / `ownerFor`); unifying them is a behaviour change (the Map
@@ -312,7 +312,7 @@ Run from the workspace root with the ABSOLUTE script path (a relative one failed
 - **Codegen cannot narrow an `Array<any>` instance's result** to the array the checker types (`mixed.flat()`, a predicate
   `filter` over `(number|string)[]`): `cannot convert Array<any> to Array<number>`.
 - Narrowing `g.t === 'MC'` does not drop an arm whose `t?: never`, and that fallback widens `{a: 1}` to `{a: number}`.
-- wasm-codegen.ts (snapshot) still has 2 checker errors: 605 (callback return vs `ReadType<...>`) and 802
+- wasm/codegen.ts (snapshot) still has 2 checker errors: 605 (callback return vs `ReadType<...>`) and 802
   (`{ref: 'any'}` vs `wasm.ParamType[]`); not investigated.
 - **Diagnostic positions are the NEXT token's** (the LALR reduce stamps `actionTok.pos`), so an error can sit lines below
   its node; corpus A/B then shows a real tsc error on a different line. Fix: record each frame's first-token pos.
@@ -336,7 +336,7 @@ Run from the workspace root with the ABSOLUTE script path (a relative one failed
 
 ## Architecture -- SETTLED, do not re-propose
 
-**`TS/backend.ts` is the TS half, `wasm-codegen.ts` the neutral half; a file is earned by cross-language reuse
+**`TS/backend.ts` is the TS half, `wasm/codegen.ts` the neutral half; a file is earned by cross-language reuse
 only.** `TSEmitter` is rejected. **Do not split `TS/backend.ts` for navigability** (the consolidation audit's
 "step 9" is therefore off the table). Neutral extraction is exhausted, measured. Moving a genuinely neutral
 function onto `FunctionContext`/`Types`/`ClassInfo` is still right. wasm-knowledge is NOT language-neutral

@@ -1,6 +1,6 @@
 ---
 name: tison-towasm-capabilities
-description: "backend.ts — index of closed capability work (what exists and the one durable lesson from each), consolidating 13 former per-feature memories."
+description: "wasm-backend.ts — index of closed capability work (what exists and the one durable lesson from each), consolidating 13 former per-feature memories."
 metadata: 
   node_type: memory
   type: project
@@ -8,9 +8,9 @@ metadata:
   modified: 2026-09-04T18:23:43.196Z
 ---
 
-Closed capability work in `backend.ts` and the checker, one entry each. **The live gap list is
-backend.ts's own header comment** ([[tison-towasm]]) — this file records only the lessons that aren't
-recoverable from the code. Full per-feature originals are in `../memory-archive/`.
+Closed capability work in `wasm-backend.ts` and the checker, one entry each. **The live gap list is
+wasm-backend.ts's own header comment** ([[tison-towasm]]) — this file records only the lessons that aren't
+recoverable from the code. Full per-feature originals are in `archive/`.
 
 **Codegen capabilities, all CLOSED:**
 
@@ -157,7 +157,7 @@ Worth doing -- it is the root under several worked-around symptoms -- but budget
 `(s as any).scope ??= scope` is legal TypeScript and the checker's own idiom, so towasm has to
 compile it. It now does, for a local, a `new`-constructed class, a PARAMETER, and a UNION receiver.
 
-**The decision is per SHAPE and made UP FRONT.** `collectExpandoFields` (backend.ts) walks every
+**The decision is per SHAPE and made UP FRONT.** `collectExpandoFields` (wasm-backend.ts) walks every
 module body before any struct type exists, resolves each property write and `Object.defineProperty`
 to its receiver's shape (every member, for a union), and anything the shape does not already
 declare becomes an ordinary optional `REF_ANY` field ON THAT SHAPE (`addExpandoFields`).

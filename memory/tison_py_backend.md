@@ -1,13 +1,13 @@
 ---
 name: tison-py-backend
-description: PY/backend.ts — the minimal Python wasm back end (annotated scalar subset), the second non-TS consumer of wasm-codegen.ts. Scope, the deliberate CPython departures, and the int/float literal bug it forced.
+description: PY/backend.ts — the minimal Python wasm back end (annotated scalar subset), the second non-TS consumer of wasm/codegen.ts. Scope, the deliberate CPython departures, and the int/float literal bug it forced.
 metadata:
   type: project
   modified: 2026-09-21
 ---
 
 `src/examples/PY/backend.ts` (`PYtoWasm`) + `test/test-py-backend.ts`. Written in the mould of [[tison-cpp-backend]]
-with **no change to `wasm-codegen.ts`**. Not a checker: the subset is the STATICALLY typed one. Params and
+with **no change to `wasm/codegen.ts`**. Not a checker: the subset is the STATICALLY typed one. Params and
 returns are annotated `int`/`float`/`bool`/`None` (i64/f64/i32/void), and a local takes the type of its first
 assignment. Anything else throws `W.Error`. The header comment lists the scope and the CPython departures.
 

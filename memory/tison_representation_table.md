@@ -5,7 +5,7 @@ metadata:
   type: project
 ---
 
-Read from the code at `36a419c`: `builtinTypes` (backend.ts ~647), `wasmTypeOf`, `typeOfUncached`,
+Read from the code at `36a419c`: `builtinTypes` (wasm-backend.ts ~647), `wasmTypeOf`, `typeOfUncached`,
 `W.intType`/`elementKind`/`combineUnion`, `Types.nullable`/`box`/`array`, `collectRangeWidenings`, `ownsLayout`.
 
 **A stamp is a TYPE. A representation is the BACKEND's choice** (the user, 2026-09-22) -- nothing about it is
@@ -109,7 +109,7 @@ native op; `coerceValue` widens before BOXING, or `typeof x === 'bigint'` reads 
 `[1, 2]` a tuple -- a different representation from the widened `number[]` -- and broke 5 cases (copyWithin x2,
 async x3); TS widens array/object literals for a `const` too. A `let` always takes the widened type.
 
-**Found, pre-existing, now in backend.ts's gap list:** `const a: any = BigInt(5); Number(a)` traps -- `Number(any)`
+**Found, pre-existing, now in wasm-backend.ts's gap list:** `const a: any = BigInt(5); Number(a)` traps -- `Number(any)`
 picks its conversion statically and casts to the number box, where `a.toString()` dispatches on the runtime type and
 works. Verified failing at HEAD before this work. Next intended representation: string as a `u32` data offset.
 

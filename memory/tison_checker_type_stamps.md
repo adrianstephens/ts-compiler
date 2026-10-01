@@ -6,11 +6,11 @@ metadata:
 ---
 
 **Why:** the checker computes every expression's type (narrowing included) but records none -- its exported
-`typeOf(e, scope)` recomputes from scratch, and only STATEMENTS carry a stamped scope. So backend.ts re-runs the
+`typeOf(e, scope)` recomputes from scratch, and only STATEMENTS carry a stamped scope. So wasm-backend.ts re-runs the
 checker (53 `checkerTypeOf`, 61 `narrowedTypeOf` calls) and must guess which scope to ask in (`ctx.scope` = the
 slot's declared type, `stmtScope` = narrowed, `physicalScope`), and re-applies `narrow()` itself inside
 ternaries/`&&` (`withNarrowed`). Each wrong guess became a local patch: the "every failing case got its own path"
-sprawl the user objected to (backend.ts ~11k lines, 2026-09-21).
+sprawl the user objected to (wasm-backend.ts ~11k lines, 2026-09-21).
 
 **Plan:** the check pass stamps its FINAL answer on every expression (narrowed type) and every binding (declared
 type) -- untyped AST-node stamping, per [[feedback-no-checker-state]]. The backend reads stamps; no scope choice,
@@ -97,7 +97,7 @@ uses that only resolve type names) and the per-statement `stmtScope` update in `
 
 ## The narrowing machinery is deleted (2026-09-22, `36a419c`)
 
-Gone from backend.ts: `ctx.stmtScope` (per-statement, from the checker's scope stamp), `inNarrowed` (re-running
+Gone from wasm-backend.ts: `ctx.stmtScope` (per-statement, from the checker's scope stamp), `inNarrowed` (re-running
 `narrow()` for a ternary/`&&` branch), `typeScope`. Replacements: `ctx.typeAt(e)` (the stamp, widened as
 `checkerTypeOf` widens, falling back to `ctx.scope` for nodes synthesized after the check pass) and
 `physicalTypeOf` (a call/`new`/array literal has no slot, so its representation is its own checked type -- what

@@ -11,7 +11,7 @@ same interface name share one struct: common.ts's `Member`/`Index`/`Call` agains
 `UnaryPost`. Whichever is built first wins; a literal for the other is then checked against its
 fields (`object literal for 'Member<any>' has unknown property 'optional'`).
 
-Latent until a namespace-qualified base resolves at all — see [[tison-namespace-qualified-interface]].
+Latent until a namespace-qualified base resolves at all — see `tison-namespace-qualified-interface` (memory no longer exists).
 
 **Why detection is not enough:** keeping the bare key for the first declaration and giving later ones
 a suffix fails, because `ensureClass` is also asked by KEY (`want.ref`), where no declaration can be

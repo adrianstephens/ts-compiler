@@ -28,7 +28,7 @@ needs this commit on *both* sides (old base output format → PARSE-FAILED).
 
 **Progress: 13,527 virtual files. 2,936 threw at baseline (2026-08-21) → 1,508 (run55, 2026-08-25) →
 1,519 (2026-09-04).** ~51 numbered items landed. Per-item detail is derivable from git; the full log
-is at `../memory-archive/tison_official_ts_test_suite.md`.
+is at `archive/tison_official_ts_test_suite.md`.
 
 **The harness was silently dead for 79 commits (2026-08-29 `5b6b3dc` → 2026-09-04 `28bd378`.)**
 `5b6b3dc` removed `TypeContext` from type-utils without updating this test's `checkBlock` call, so the
