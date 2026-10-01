@@ -46,7 +46,7 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 - [don't simplify deps for self-hosting](feedback_no_simplifying_deps_for_selfhosting.md) — hard constructs need a real compiler feature
 - [no JSON.stringify on AST/Type](feedback_no_json_stringify_ast.md) — bigints throw; print with `T.typeKey` / `T.exprKey` / `T.stmtKey`
 - [no unimplemented-throws tests](feedback_no_unimplemented_throws_tests.md) — `checkThrows` is for permanent enforced behavior only
-- [SESSION HANDOFF](tison_session_handoff.md) — **read this at cold start**, before the 2233-line plan: live row state, what's deliberately unfixed, what the user hasn't decided
+- [SESSION HANDOFF](tison_session_handoff.md) — **read this at cold start**: live state (survey 314/403 at `b84847a`, top blockers), user decisions, what's deliberately unfixed, what the user hasn't decided
 - [harness portability](tison_harness_portability.md) — for running tison under a DIFFERENT agent harness: cwd, gate order, the acceptance numbers at `ec2a21f`, which instruments gate by EXIT CODE (difftest and vsdg-check do; the survey is a probe to be read), and what does not travel (the transcript)
 - [session boundaries](feedback_session_boundaries.md) — when the user asks "continue or start fresh?", recommend; default fresh after a committed fix, always after a compaction
 - [build and tests](compiler_build_and_tests.md) — tests import the BUILT `dist/`; `build` vs `build:emit`; the `dist/ts/lib` copy traps
@@ -57,7 +57,7 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 ## Semantic conformance (current method)
 
 - [conformance sweeps](tison_conformance_sweeps.md) — **start here for new work**: per-lib-area differential sweeps are the gate now, not the survey; 10 groups, 6 green, remaining divergences listed
-- [workaround inventory](tison_workaround_inventory.md) — 2026-09-11 audit: every `any`-fallback/leniency/cast site classified (TS-matching / silent-`any` modeling gap / accepts-bad-code / towasm), each with its proper fix and an order. All fixable
+- [workaround inventory](tison_workaround_inventory.md) — audit of every leniency/`any`-fallback/cast site: what is NOT a workaround, what is open (silent `any`, accepts-bad-code, towasm gaps) with the proper fix and order, plus checker rules learnt removing them
 - [unknown-name diagnostic (TS2304)](tison_unknown_name_diagnostic.md) — types+values behind `Scope.unknownNames` (on in tsw/test-towasm, off in corpus); forced-on corpus causes; `import()`/`import.meta`/`globalThis` modelled 2026-09-28; `unique symbol` unmodelled
 - [corpus error dump](tison_corpus_errdump.md) — per-ERROR corpus A/B; `corpus-ab.sh` totals hide a false-positive-for-true-positive trade
 
@@ -77,15 +77,14 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 - [REPRESENTATION TABLE](tison_representation_table.md) — which wasm representations are valid for which TS types, and that the BACKEND alone decides (never a stamp)
 - [type vs representation](tison_type_vs_representation.md) — many-to-one and must stay separable; tags name representations, and it is what lets `Node[]`/`Foo[]` share one physical array type
 - [array identity — RESOLVED](tison_array_identity.md) — `Array<T>` owns a `RawArray` field; the compiler knows only `RawArray`; the traps hit, the pre-existing bugs found, and why struct merging wasn't built
-- [towasm](tison_towasm.md) — **the authoritative gap list is backend.ts's own header comment**; this covers design invariants
-- [comment pass tooling](tison_comment_pass_tooling.md) — rewriting backend.ts comments safely: edits anchored to ORIGINAL lines + a printer-based code-identity gate; never analyse the file with a bare `ts.createScanner` (template bug)
-- [CROSS-LANGUAGE PLAN](tison_towasm_cross_language_plan.md) — **the plan, plus the file-splitting rule that governs it**: separating the TS-specific half of the wasm backend. MEASURED cut is **94/6**, so cut at the TYPES not the functions; `src/wasm/codegen.ts` (neutral, compiler-enforced) is the deliverable; **don't split without a reason — TS types + TS codegen stay together** (settles builtins / `towasm-types.ts`; **a component's axis is the file's axis** — the asm machinery is neutral (folded into `wasm-codegen.ts` at `deb2d18`), the AST analysis is per-language); the relocation list into `type-utils`/`checker`; the four closed scope decisions. Working tables: `assistant/towasm-split-inventory.md`
+- [towasm](tison_towasm.md) — **the authoritative gap list is `ts/wasm-backend.ts`'s own header comment**; this covers design invariants
+- [comment pass tooling](tison_comment_pass_tooling.md) — rewriting wasm-backend.ts comments safely: edits anchored to ORIGINAL lines + a printer-based code-identity gate; never analyse the file with a bare `ts.createScanner` (template bug)
+- [CROSS-LANGUAGE PLAN](tison_towasm_cross_language_plan.md) — why/where the TS-specific half of the wasm backend separates from `wasm/codegen.ts`: the file-splitting rule (**no split without a reason; a component's axis is the file's axis**), the rejected `TSEmitter`/relaxed-VSDG, the shelved `TypeOracle`+IR seam, unfinished generic-core extractions, do-not-merge traps
 - [module records](tison_module_records.md) — a module is `TS.Module` (body+scope+filename), not a bare `Stmt[]`; run all FOUR tsconfigs
 - [nested array element kind](tison_nested_array_element_kind.md) — inner arrays keep their DECLARED kind (`objectArrayKind`'s comment lies); `a.push([])` into `number[][]` still traps
 - [towasm capabilities](tison_towasm_capabilities.md) — index of closed feature work + the checker fixes whose blast radius exceeded their bug report
 - [difftest cross-module cases](tison_difftest_cross_module.md) — `addModule`/`addCross` + `--only`; the only instrument that sees cross-module bugs
-- [self-hosting instruments](tison_towasm_self_hosting_plan.md) — `difftest.sh` (differential codegen, green = gate), `selfhost-survey.sh` (reports declarations MOVED; surveys a frozen SNAPSHOT of its source, `selfhost-snapshot.sh` refreshes it, `--live` for the tree), `corpus-ab.sh` (checker A/B in one command)
-- [SELF-HOSTING PLAN](tison_towasm_self_hosting_plan.md) — **current focus**: the goal is towasm compiling its OWN source unmodified (never adapt a surveyed file). Run `compiler/assistant/selfhost-survey.sh` from the workspace root, work its cause table. At 2026-09-14: **100/343 compile in isolation, 254 failures from 99 causes**; printer.ts (ex-tocode.ts) COMPLETE, checker.ts and backend.ts still at 0. Earlier, at 2026-09-11 end (59/278): `find` + `Parser<any>` rows closed; next rows object-literal alias (25) / null-literal target (22) / `JSON.parse` in tableCache (20); imported modules are now CHECKED (were only hoisted); survey TARGETS include core.ts. `===` on a boxed `any` was IDENTITY until `ensureAnyStrictEq`. Never survey with an A/B toggle left in a surveyed file (backend.ts is one) The survey was NONDETERMINISTIC before `935a4e1` (import-cycle race) — re-run a probe 3-5x before trusting a delta. Read the MOVED delta and the REGRESSED line, never the flat total; a run banner-marked NOT A BASELINE (src changed mid-run, or uncommitted src) cannot be diffed against -- 52 false regressions, 2026-09-21
+- [SELF-HOSTING PLAN](tison_towasm_self_hosting_plan.md) — goal: wasm-backend compiles its OWN source unmodified (never adapt a surveyed file). Distilled: instruments (`selfhost-survey.sh` reads MOVED/REGRESSED not the total, `probe-decl.ts`, `difftest.sh`, `corpus-ab.sh`) and their traps, the codegen/checker design invariants, user decisions, recorded-open items. Live numbers are in the handoff
 - [checker perf debugging](tison_checker_perf_debugging.md) — `sample <pid>`, or `assistant/inspect-profile.mjs` when JIT frames are `???`; count resolve depth bails first
 - [interface inheritance](tison_interface_inheritance.md) — `extends` IS an intersection; last part = most concrete, and all four consumers must read it backwards
 - [closure-param causes](tison_closure_param_causes.md) — the survey's `closure parameter 'X'` rows are THREE unrelated blockers, not one; read before working that row
@@ -94,18 +93,17 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 - [nominal class refs](tison_nominal_class_refs.md) — **`resolve` keeps class refs nominal; `resolveMembers` is the opt-out** (4 sites); replaced 8 per-site guards
 - [scope stamping](tison_scope_stamping.md) — how checker scopes reach towasm (statement/branch stamps); **don't "fix" `narrowedTypeOf`**; why block-node scopes were measured and declined
 - [checker narrowing plan](tison_checker_narrowing_plan.md) — user plans integer/range narrowing in the checker (not started as of 2026-07-31)
-- [ReadType resolution](tison_readtype_resolution.md) — OPEN: opt's spurious `_` key; the reverted fix regressed other fields
+- [ReadType resolution](tison_readtype_resolution.md) — TStoDecl's resolveTypes for pe.ts `.d.ts`; checker bugs it flushed out; known-unfixed: `_` key bloat and TStoDecl's load-bearing `checkBlock`
 - [C++ back end](tison_cpp_backend.md) — `cpp/wasm-backend.ts` (379 lines) over the neutral `wasm/codegen.ts`; **the neutrality gate**, keep `test-cpp-backend.ts` green. Written without changing one neutral line; found the `emitIf` depth trap and a real tison precedence bug
-- [Python back end](tison_py_backend.md) — `PY/backend.ts` minimal annotated-scalar subset over `wasm-codegen.ts`; test expectations come from CPython. Forced the py float-literal `raw` fix
-- [vsdg dialects](tison_vsdg_dialects.md) — **the VSDG is language-neutral now**: `src//vsdg.ts` core + `TS/vsdg.ts` + `PY/vsdg.ts` + `CPP/vsdg.ts`; the verbatim-fallback rule, the shape stamps, and the SIX pre-existing bugs the split surfaced
-- [vsdg C++ dialect](tison_vsdg_cpp.md) — the widened top level (`Definition | Stmt`), what's modelled vs verbatim, and the C++-specific bugs/limits found (incl. a shared verbatim-reader bug TS/PY still have)
-- [vsdg node type](tison_vsdg_node_type.md) — RawNode & INode discriminated union; gate = `assistant/vsdg-check.sh` (48 TS + 28 PY + 15 CPP cases)
+- [Python back end](tison_py_backend.md) — `py/wasm-backend.ts` minimal annotated-scalar subset over `wasm/codegen.ts`; test expectations come from CPython. Forced the py float-literal `raw` fix
+- [vsdg dialects](tison_vsdg_dialects.md) — the VSDG core + per-language dialects: the three objects a language supplies, THE TEST for what belongs in the core, shape stamps, the verbatim-fallback rule, shared switch, and the core bugs the multi-language work surfaced
+- [vsdg C++ dialect](tison_vsdg_cpp.md) — the widened top level (`Definition | Stmt`), typed constant folding, `++`/`--` as an unmodelled re-binding mutation, switch, C++-specific bugs/limits
+- [vsdg node type](tison_vsdg_node_type.md) — RawNode & INode discriminated union; gate = `compiler/assistant/vsdg-check.sh`
 
 - [object shapes keyed by bare name](tison_shape_key_collision.md) — same-named interfaces in two modules share one struct; qualify by module
 ---
 
-*`archive/` holds full originals of the four largest memories (~650KB of dated per-fix changelog,
-derivable from git), compressed to current-state summaries above on 2026-09-04.*
+*`archive/` holds older dated originals; the ledger and git (`1c439ff` = pre-distillation text of the five largest notes) hold the rest. Distilled 2026-09-30.*
 
 *Migrated out of the global auto-memory store (`~/.claude/projects/-Volumes-DevSSD-dev-packages/memory/`)
 on 2026-09-09 so tison's memories travel with the tison repo.*

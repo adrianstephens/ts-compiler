@@ -127,30 +127,12 @@ in module A, a trap in module B) -- it wasn't. The trap module simply came later
 printed WAT of the PREVIOUS module was what the stack trace appeared to point at. Reproduce the failing
 case ALONE before assuming shared state.
 
-## OPEN, STRUCTURAL: codegen does not see the checker's narrowing
+## Codegen sees the checker's narrowing -- CLOSED (superseded)
 
-towasm asks `checkerTypeOf(e, ctx.scope)` where `ctx.scope` is ITS OWN scope, so it only ever sees a
-name's DECLARED type. Every narrowing-dependent access has therefore been worked around individually
-rather than fixed: `58d301b` (drop union members lacking the field), the `'++'/'--' on a nullable
-primitive` refusal, `typeof s === 'function' ? s(4)` still failing with "call to unknown function 's'".
-
-**Feasibility probed 2026-09-05 and REVERTED.** What it established:
-
-- The mechanism is there and clean: `narrow(test, scope, sense)` in checker.ts is pure, returns a
-  refined `Scope`, and is called by the checker at exactly the points codegen needs (`if`, ternary,
-  `&&`/`||`). Exporting it and swapping `ctx.scope` around branch bodies is ~15 lines.
-- With that wired in, **difftest stayed 1196/1211 and the corpus gate stayed at baseline** -- the common
-  paths are fine.
-- It broke one real test, and that is the actual cost: **the checker's narrowed types have shapes
-  codegen's physical mapping doesn't handle**. `"k" in obj` narrows a dynamic object to
-  `{[k:string]:V} & {k:unknown}`, and the index signature stops being findable. Two targeted attempts
-  (look through intersection parts in `indexSignatureValueType`; check it before merging in `ownerFor`/
-  `typeOf`) did not land -- so this needs a real pass over the type->physical mapping, not a patch.
-- Design hazard to know first: `ctx.scope` does DOUBLE DUTY -- checker types AND `declareValue`'s
-  registration of locals. `lookup` reads `ctx.declared` (a separate list), so swapping the scope is safe
-  for locals, but a name declared inside a narrowed branch loses its checker-visible type afterwards.
-
-Worth doing -- it is the root under several worked-around symptoms -- but budget it as a project.
+An earlier probe (2026-09-05) reverted swapping `ctx.scope` per branch because the checker's narrowed shapes (`"k" in obj` narrows a dynamic object to `{[k:string]:V} & {k:unknown}`)
+had no physical mapping. The real fix was the 2026-09-21..25 direction: the checker STAMPS each expression's type and flow (`checkedTypeOf`, [[tison_checker_type_stamps]]) and the
+backend's own narrowing machinery (`stmtScope`/`typeScope`/`inNarrowed`) was deleted -- see [[tison_session_handoff]]. Hazard that stood: `ctx.scope` did DOUBLE DUTY (checker types AND
+`declareValue`'s registration of locals).
 
 ## EXPANDO properties -- CLOSED 2026-09-09 (`80316bd`, `6247fa2`)
 
