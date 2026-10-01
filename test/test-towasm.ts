@@ -2798,6 +2798,23 @@ async function main() {
 	}
 
 	{
+		// A shape no literal builds is held as `any`: its values arrived through a cast, here a dynamic object the builder wrote by key.
+		const { built, byKey } = await compile(`
+			function insert(root: any, k: string, v: unknown) { root[k] = v; }
+			class TB<T extends object> {
+				constructor(private root: T) {}
+				one<S extends string, V>(k: S, v: V): TB<T & { [K in S]: V }> { insert(this.root, k, v); return this as never; }
+				build(): T { return this.root; }
+			}
+			const I = new TB({}).one('f64', { add: 1 }).one('i32', { add: 2 }).build();
+			export function built(): number { return I.f64.add + I.i32.add * 10; }
+			export function byKey(): number { const k: 'f64' | 'i32' = 'i32'; return I[k].add; }
+		`);
+		check('an unbuilt shape reads a dynamic object by name', built(), 21);
+		check('an unbuilt shape reads a dynamic object by key', byKey(), 2);
+	}
+
+	{
 		// `BigInt(v)`/`Number(v)` of a `number | bigint` take the union constructor, which tells them apart at run time; a
 		// bigint `**` is `BigInt.pow` wherever it appears; `asIntN`/`asUintN` against values from node.
 		const { unionCtors, bigPow, asN } = await compile(`

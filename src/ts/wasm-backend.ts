@@ -1170,7 +1170,7 @@ function genericKey(name: string, typeParams: readonly TS.TypeParam[], map: Map<
 
 // What each imported module's own flows open (`collectOpenShapes`), by its body: the same walk over the same stamped AST, so a
 // later compile in the same process replays it instead of repeating it. `DBG_VERIFYSHAPES=1` walks anyway and checks it matches.
-const openedByModule		= new WeakMap<object, { shapes: string[]; slots: Slot[] }>();
+const openedByModule		= new WeakMap<object, { shapes: string[]; slots: Slot[]; built: string[] }>();
 // An open slot's type, and this compile's reads of one: `any` physically, while the checker's type still names what it holds.
 const OPEN_SLOT: Type	= { type: 'ref', name: 'any' };
 // A slot with a declaration of its own: a declarator, a parameter (a parameter property is its field too), or a class field.
@@ -1213,6 +1213,8 @@ function collectOpenShapes(
 ) {
 	const escaping		= escapingParams();
 	const openShapes	= new Set<string>();
+	// The layout of every object literal, as built: at its slot, and as its own type where its slot is not a shape.
+	const builtShapes	= new Set<string>();
 	// A SLOT (`Slot`) that holds more than one array storage is opened alone, and so is every read of it.
 	const openSlots		= new Set<Slot>();
 	const openReads		= new Set<Expr>();
@@ -1277,6 +1279,8 @@ function collectOpenShapes(
 		if (value.type === 'new' && value.callee.type === 'identifier' && part.type === 'ref' && (READONLY_ALIAS.get(part.name) ?? part.name) === value.callee.name)
 			return;
 		const s = resolvedShape(slot, scope);
+		if (value.type === 'object' && s.type === 'object')
+			builtShapes.add(builtKey(s, scope));
 		if ((value.type === 'object' || value.type === 'array') && s.type === 'union')
 			// Built as the member it matches, even as an array element: only what it holds can widen anything.
 			return s.types.filter(m => T.isAssignable(checkerTypeOf(value, scope, false, m), m, scope)).forEach(m => noteSlot(m, value, scope, depth, false, id));
@@ -1450,9 +1454,10 @@ function collectOpenShapes(
 			if (remembered && !VERIFY_OPEN_SHAPES) {
 				remembered.shapes.forEach(k => openShapes.add(k));
 				remembered.slots.forEach(d => openSlots.add(d));
+				remembered.built.forEach(k => builtShapes.add(k));
 				continue;
 			}
-			const before = new Set(openShapes), slotsBefore = new Set(openSlots);
+			const before = new Set(openShapes), slotsBefore = new Set(openSlots), builtBefore = new Set(builtShapes);
 			let scope = modScope;
 			const within = <R>(inner: Scope | undefined, fn: () => R): R => {
 				const saved = scope;
@@ -1499,6 +1504,8 @@ function collectOpenShapes(
 						});
 					if (readsOpen(e, scope))
 						openReads.add(e);
+					if (e.type === 'object')
+						builtShapes.add(builtKey(T.widenLiterals(checkerTypeOf(e, scope)), scope));
 					if (e.type === 'call' || e.type === 'new') {
 						const callee		= unwrapAs(e.callee);
 						const calleeDecl	= callee.type === 'identifier' ? scope.decl(callee.name)
@@ -1550,7 +1557,7 @@ function collectOpenShapes(
 				}).statements(m.body);
 			if (propagating)
 				continue;
-			const opened	= { shapes: [...openShapes].filter(k => !before.has(k)), slots: [...openSlots].filter(d => !slotsBefore.has(d)) };
+			const opened	= { shapes: [...openShapes].filter(k => !before.has(k)), slots: [...openSlots].filter(d => !slotsBefore.has(d)), built: [...builtShapes].filter(k => !builtBefore.has(k)) };
 			const key		= (r: typeof opened) => [...r.shapes].sort().join('\n') + `\n${r.slots.length} slots`;
 			if (remembered && key(remembered) !== key(opened))
 				throw `internal: '${moduleId}' opened different shapes than the compile before it (${remembered.shapes.length} then, ${opened.shapes.length} now)`;
@@ -1562,7 +1569,7 @@ function collectOpenShapes(
 	propagating = true;
 	for (let n = -1; openSlots.size && openSlots.size !== n; walk())
 		n = openSlots.size;
-	return { openShapes, openSlots, openReads };
+	return { openShapes, openSlots, openReads, builtShapes };
 }
 
 // The expando fields `collectExpandoFields` found for this shape, appended before its struct type is finalized. `optional`, because no
@@ -2151,6 +2158,9 @@ function openKey(t: Type, scope: Scope): string {
 	const entry	= part.type === 'ref' && part.typeArgs?.length && !T.isClassRef(part, scope) ? T.ownScope(part, scope).lookupType(part.name) : undefined;
 	return part.type === 'ref' && entry?.typeParams?.length ? layoutKey(part.name.slice(part.name.lastIndexOf('.') + 1), layoutArgs(entry.typeParams, part.typeArgs, scope), scope) : T.typeId(T.resolve(scope, part));
 }
+
+// By member names, as a shape's identity is (`shapeKey`): a literal in a generic body builds every instantiation of its slot.
+const builtKey = (t: Type, scope: Scope) => (s => s.type === 'object' ? shapeKey(s.members) : '')(resolvedShape(t, scope));
 
 // `t`'s non-nullish part resolved, an interface's `extends` intersection merged into the one object it describes.
 function resolvedShape(t: Type, scope: Scope): Type {
@@ -2927,7 +2937,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			return W.ARRAY[rawElemKind(t.typeArgs?.[0], typeOf)];
 
 		// An open shape is stored as `any` and may hold any layout (`ownerFor` agrees); a union's nullable part is its members' business.
-		if (openShapes.size && t.type !== 'union' && openShapes.has(openKey(t, global)))
+		if (t.type !== 'union' && isOpen(t))
 			return W.REF_ANY;
 		// `T[]` is `Array<T>`, an ORDINARY lib class -- the compiler has no array representation of its own (see
 		// [[tison-array-identity]]); `Array<T>`/`ReadonlyArray<T>` already reach the class via the generic-ref branch below.
@@ -3382,7 +3392,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		// references is one physical array (`arr:any` is `arr:ref`).
 		const sketch	= (x: Type) => layoutSketch(T.resolve(global, T.nonNullable(x, global)), global).replace(/arr:any/g, 'arr:ref');
 		const want		= sketch(declared), got = sketch(t);
-		return want === got || want === 'any' || got === 'any' || openShapes.has(openKey(declared, global));
+		return want === got || want === 'any' || got === 'any' || isOpen(declared);
 	}
 
 	// A bare object literal with no single resolvable target type (`case 'object'`'s own `want` doesn't name one class) -- a
@@ -3704,7 +3714,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 
 	function ownerFor(t: Type): ClassInfo | undefined {
 		// An open shape is stored as `any` and may hold any layout, so nothing owns it statically.
-		if (openShapes.size && openShapes.has(openKey(t, global)))
+		if (isOpen(t))
 			return undefined;
 		// Same fast path `wasmTypeOf` needs, for the same reason -- a hoisted `builtinTypes` name would
 		// otherwise fully expand via its own `declScope` before reaching the `w.type === 'ref'` check below.
@@ -6565,7 +6575,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 						const spreadT	= T.resolve(ctx.scope, ctx.narrowedTypeOf(p.operand));
 						// An OPEN shape holds any layout, so it has no struct to read fields off -- not even a synthesized one, which the
 						// value would have to be cast to. Its keys are read by name below, as a union member stored as `any` is.
-						const spreadCls	= ownerOf(p.operand, ctx) ?? (spreadT.type === 'object' && !openShapes.has(openKey(spreadT, global)) ? ensureAnonObjectShape(spreadT) : undefined);
+						const spreadCls	= ownerOf(p.operand, ctx) ?? (spreadT.type === 'object' && !isOpen(spreadT) ? ensureAnonObjectShape(spreadT) : undefined);
 						// A NULLABLE operand is one too (`{ ...more }`, `more?: Partial<Decl>`): spreading `undefined` supplies nothing.
 						if (!spreadCls || T.unionMembers(spreadT, ctx.scope).some(m => T.isNullish(m, ctx.scope))) {
 							// A union operand reads each field off whichever member the value is, absent where it has none. A member stored as `any` (an open shape)
@@ -10063,8 +10073,18 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			moduleFunctions.delete(origin);
 
 	// Both read the functions just registered: which parameters escape, and where an imported call lands.
-	const { openShapes, openSlots, openReads: opened } = collectOpenShapes(stmtHomeModule, moduleBodies, functionDeclByName, namedImportsByModule);
+	const { openShapes, openSlots, openReads: opened, builtShapes } = collectOpenShapes(stmtHomeModule, moduleBodies, functionDeclByName, namedImportsByModule);
 	openReads = opened;
+	// Stored as `any`: a shape holding several layouts, or a struct shape no literal builds, whose values all arrived through `any` or a
+	// cast (a dynamic object). Its members are reached by the run-time dispatchers.
+	const isOpen = (t: Type) => openShapes.has(openKey(t, global)) || unbuiltShape(t);
+	const unbuiltShape = (t: Type) => {
+		const n = T.nonNullable(t, global), r = T.resolve(global, n);
+		if (T.isClassRef(n, global) || (n.type === 'ref' && READONLY_ALIAS.has(n.name)) || (r.type !== 'object' && r.type !== 'intersection') || (r.type === 'intersection' && (arrayPartOf(r, global) || primitivePart(r, global))))
+			return false;
+		const s = resolvedShape(n, global);
+		return s.type === 'object' && s.members.length > 0 && s.members.every(m => m.type === 'property' || m.type === 'method') && !builtShapes.has(builtKey(s, global));
+	};
 	// A slot holding more than one array storage (`collectOpenShapes`) is stored as `any`, and so is what is read from it.
 	const openedAs = (d: Slot, t: Type) => openSlots.has(d) ? OPEN_SLOT : t;
 	const { accessorKeys, pendingExtensions } = collectExpandoFields(stmtHomeModule, moduleBodies, namedImportsByModule);
