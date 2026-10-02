@@ -7235,76 +7235,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 						emitPatternBinding(s.kind, d.name, d.init, d.typeAnnotation, ctx);
 						continue;
 					}
-					// Type computed before emitting the init, so the init can be emitted via `emitAs` straight into the local's declared representation.
-					// `checker.scopeOfStmt(s)` -- the real, narrowing-aware scope the checker type-checked this statement under -- not `ctx.scope` (towasm's own,
-					// separately-tracked scope, which never reflects flow-sensitive narrowing the way the checker's internal scope tree does). Without it, a
-					// narrowed-non-null receiver (e.g. `if (m === null) return; ...; m.group(0)`) would still look nullable to `checkerTypeOf` here and member/call
-					// resolution could fail on it. Unset for a real minority of statements -- see the two reasons spelled out at the `narrowedTypeOf` fallback below.
-					const stamped	= (s as any).scope as Scope | undefined;
-					const stmtScope = stamped ?? ctx.scope;
-					const {methodOwner, methodName, calleeOptional} = d.init.type === 'call' && d.init.callee.type === 'member' && !objectIntrinsic(d.init) && !ctx.isNamespaceQualifier(d.init.callee.object)
-						? {methodOwner: ownerOf(d.init.callee.object, ctx), methodName: d.init.callee.property, calleeOptional: d.init.callee.optional}
-						: {};
-
-					// No `Array<T>` substitution needed -- `substElemMethods` already monomorphized a method's whole body once, up front, so `d.typeAnnotation` is already concrete here.
-
-					// The widened range before `T.literalTypeOf`: a loop-reassigned local's widened range must win over its initializer's narrower literal type,
-					// or its wasm local gets fixed too tight and a later out-of-range reassignment corrupts it.
-					let tsType = d.typeAnnotation ?? slotType(d.flowType) ?? T.literalTypeOf(d.init);
-					if (!tsType && d.init.type === 'index') {
-						// The real declared element `Type`: `T[]`/`Array<T>` give `T`, but `Uint8Array`/etc resolve (`resolveClassAlias`, before `T.resolve`
-						// expands the alias) to `TypedArray<T>`, whose elements read back as `number` -- a physical-storage tag, not the real TS element type.
-						const objT = checkerTypeOf(d.init.object, stmtScope);
-						if (objT.type === 'ref' && !objT.typeArgs && resolveClassAlias(objT.name)?.name === 'TypedArray') {
-							tsType = T.NUMBER;
-						} else {
-							const w = T.widenLiterals(T.resolve(global, objT), false, true);
-							if (w.type === 'array') {
-								tsType = w.element;
-							} else if (w.type === 'ref') {
-								switch (w.name) {
-									case 'Array':
-									case 'ReadonlyArray':	tsType = w.typeArgs?.[0]; break;
-								}
-							}
-						}
-						// `arr?.[i]` short-circuits to `undefined` like any `?.`, but this bypasses `checkerTypeOf`, so the optional flag has to be
-						// reattached here too -- same as `case 'member'`'s own `e.optional` handling. A read the program TESTS for
-						// absence (the checker's `markAbsenceTests`) reads `T | undefined` for the same reason, and is reattached alike.
-						if (tsType && (d.init.optional || (d.init as { testedForAbsence?: boolean }).testedForAbsence))
-							tsType = T.combineTypes([tsType, T.UNDEFINED]);
-					}
-					if (!tsType && methodOwner) {
-						// The method's raw declared return type read off the class decl, not `checkerTypeOf(d.init, stmtScope)`: `stmtScope`'s stamp only exists for a lib
-						// method body when `makeLibScope`'s one-time check wasn't muted for it (see its own comment) -- deliberately not always the case, since a GENERIC
-						// lib class method's stamp (`Array<T>.reverse`/`.fill`) would reflect the template's unresolved `T` and permanently block (`??=` first-wins) the real
-						// per-instantiation substituted scope (`ctx.scope`) codegen needs. A `?.` call's `undefined` is reattached here too, and a `this`-typed return
-						// (`sort(): this`) is substituted the way `ensureMethod` resolves it -- the declaring class's own type, since this bypass has no receiver inference.
-						const method		= methodOwner.decl.body.find(m => m.type === 'method' && m.key === methodName) as MethodMember | undefined;
-							// A return naming the method's OWN type parameter (`map<U>(...): U[]`) is only known from call-site inference; one naming its CLASS's
-							// (`Array<T>.filter(): T[]`) is only known from the receiver: this owner is the ERASED instantiation (`Array<any>` backs every array of a
-							// non-scalar element), whose decl already reads `any[]`. The original generic declaration says which, and the checker knows the real instantiation.
-						const ownerName		= methodOwner.decl.name;
-						const generic		= ownerName ? LIB_DECL_MAP.get(ownerName) ?? userGenericClassDecls.get(ownerName) : undefined;
-						const genericReturn	= generic?.type === 'class_decl' ? (generic.body.find(m => m.type === 'method' && m.key === methodName) as MethodMember | undefined)?.returnType : undefined;
-						const methodReturn	= method?.returnType && !method.typeParams?.some(p => T.mentionsTypeParam(method.returnType!, p.name)) ? method.returnType : undefined;
-						const substituted = methodReturn && T.substituteThisType(methodReturn, methodOwner.thisTsType);
-						tsType = substituted && calleeOptional ? T.combineTypes([substituted, T.UNDEFINED]) : substituted;
-						// An erased `filter(): T[]` owner is `any`-shaped, so the checker -- which knows the real instantiation -- wins, unless it has no
-						// answer either: a structural dynamic object routed to `Map` has no `keys()` for the checker to see at all.
-						if (tsType && genericReturn && (generic?.type === 'class_decl' ? generic.typeParams ?? [] : []).some(p => T.mentionsTypeParam(genericReturn, p.name))) {
-							const checked = checkerTypeOf(d.init, stmtScope);
-							if (!T.isAny(checked))
-								tsType = checked;
-						}
-					}
-
-					// A `const` takes its initializer's PRECISE type only where that lands on a scalar: precise types make `[1, 2]` a
-					// TUPLE, not the widened `number[]`. A `let` takes its flow's hull (`flowType`), which covers every assignment.
-					const precise = s.kind === 'const' ? ctx.typeAt(d.init, false) : undefined;
-					tsType ??= precise && W.scalarKind(typeOf(precise)) ? slotType(precise) : checkerTypeOf(d.init, stmtScope);
-					// Unstamped = synthesized after the check pass, or a generic template's stamp suppressed/stripped.
-					// `narrowedTypeOf`, not `ctx.scope`: a narrowed scope turns a nominal `Map<K,V>` structural.
+					// Built straight into the local's representation: its annotation, else its flow's hull (`flowType`, every assignment), else a
+					// const's precise SCALAR (a precise `[1, 2]` would be a tuple), else the initializer's type; one synthesized after the check, where it stands.
+					const stamped	= (s as { scope?: Scope }).scope;
+					const precise	= () => (t => W.scalarKind(typeOf(t)) ? slotType(t) : undefined)(ctx.typeAt(d.init!, false));
+					let tsType		= d.typeAnnotation ?? slotType(d.flowType) ?? T.literalTypeOf(d.init)
+						?? (s.kind === 'const' ? precise() : undefined) ?? checkerTypeOf(d.init, stamped ?? ctx.scope);
 					if (T.isAny(tsType) && !stamped)
 						tsType = ctx.narrowedTypeOf(d.init);
 
@@ -7499,47 +7435,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 						), ctx);
 						return;
 					}
-					// `for (const k in obj)` -- most efficiently over a dynamic object (structural `{[k: string]: V}`, routed to `Map<string, V>`; see `indexSignatureValueType`),
-					// which has a real, live key set: desugars to `for (const k of obj.keys())`, already-supported syntax, `keys()` being a real snapshot array (see
-					// `lib/map.ts`'s own comment on why) -- so it iterates the live key set as the loop starts, matching real `for...in` closely enough for every real
-					// use this project has (none mutate the object mid-loop). Anything else falls back to `Object.entries`, pulling just the key out of each `[k, v]`
-					// pair via ordinary array-destructuring: deferring to `emitObjectEntries`'s own dispatch covers a *sealed* struct/class instance the same way, and
-					// throws its own "not supported yet" for an extended class, for free.
+					// `for (const k in obj)` is `for (const k of Object.keys(obj))`; something read by POSITION enumerates its indices, as strings.
 					case 'in': {
-						if (s.init.type !== 'var_decl' || s.init.declarations.length !== 1)
-							throw "'for...in' loop variable must be a single declaration";
-
-						// Anything read by POSITION (`isPositional`) enumerates its INDICES, as strings. Falling through to `Object.entries` below bound the entries instead,
-						// so `for (const i in [5, 6])` gave the wrong values and the wrong count. `Array._indexKeys` builds them in ordinary typed lib code -- a synthesized
-						// `String(i)` here has no checker stamp to resolve `toString` through.
-						const indexed = ownerOf(s.right, ctx);
-						if (indexed && isPositional(indexed, ctx)) {
-							emitStmt({
-								type: 'for', kind: 'of',
-								init: s.init,
-								right: JS.Call(JS.Member(Identifier('Array'), '_indexKeys'), [JS.Member(s.right, 'length')]),
-								body: s.body,
-							}, ctx);
-							return;
-						}
-
-						if (ownerOf(s.right, ctx)?.methodDecls.get('keys')) {
-							emitStmt({
-								type: 'for', kind: 'of',
-								init: s.init,
-								right: JS.Call(JS.Member(s.right, 'keys'), []),
-								body: s.body,
-							}, ctx);
-							return;
-						}
-
-						const v = s.init.declarations[0];
-						emitStmt({
-							type: 'for', kind: 'of',
-							init: JS.VarDecl(s.init.kind, { ...v, name: JS.ArrayPattern([{ target: v.name }]) }),
-							right: JS.Call(JS.Member(Identifier('Object'), 'entries'), [s.right]),
-							body: s.body,
-						}, ctx);
+						const indexed	= ownerOf(s.right, ctx);
+						const keys		= indexed && isPositional(indexed, ctx)
+							? JS.Call(JS.Member(Identifier('Array'), '_indexKeys'), [JS.Member(s.right, 'length')])
+							: JS.Call(JS.Member(Identifier('Object'), 'keys'), [s.right]);
+						emitStmt({ ...s, kind: 'of', right: keys }, ctx);
 						return;
 					}
 					default:
