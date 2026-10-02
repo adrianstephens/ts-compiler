@@ -3563,7 +3563,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		if (found === undefined) {
 			found = null;
 			for (const decl of cls.methodDecls.get('constructor') ?? []) {
-				const w = decl.params.length === 1 && !decl.rest ? resolveParams(decl.params, cls.declScope ?? libGlobal)[0].wtype : undefined;
+				const w = decl.params.length === 1 && !decl.rest ? resolveParams(decl, cls.declScope ?? libGlobal)[0].wtype : undefined;
 				if (W.isArr(w)) {
 					found = { decl, storage: w };
 					break;
@@ -8044,12 +8044,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			: { key: p.key, wtype: boxed, tsType };
 	}
 
-	// Resolves a whole param list left to right, growing the earlier-names/scope `resolveParam` needs to validate and type a default that reads an earlier parameter:
-	// each param sees every param resolved before it (real JS default-evaluation order), never one declared after it.
-	function resolveParams(params: readonly JS.Param<Type>[], home: Scope = libGlobal): ResolvedParam[] {
+	// Left to right: a default sees only the params before it (JS's evaluation order). An annotated rest param comes last.
+	function resolveParams(sig: JS.Params<Type>, home: Scope = libGlobal): ResolvedParam[] {
 		const earlierNames = new Set<string>();
 		const scope = new Scope(home);
-		return params.map(p => {
+		const params = sig.params.map(p => {
 			const r = resolveParam(p, earlierNames, scope);
 			if (typeof p.key === 'string') {
 				earlierNames.add(p.key);
@@ -8057,6 +8056,32 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			}
 			return r;
 		});
+		if (sig.rest?.typeAnnotation)
+			params.push({key: sig.rest.key, wtype: restParamWtype(sig.rest.typeAnnotation)!, tsType: sig.rest.typeAnnotation});
+		return params;
+	}
+
+	// A declared function's own wasm signature and `FuncInfo`, registered under `key`; `self` is a method's leading `this`.
+	function declareFunc(key: string, sig: JS.Params<Type>, params: ResolvedParam[], result: W.Type, self?: W.Type, reassignsThis?: boolean): FuncInfo {
+		const {funcIndex, typeIndex} = types.func(
+			self ? [{ type: toValType(self), id: 'this' }, ...toParams2(params)] : toParams2(params),
+			reassignsThis ? [...toResults(result), toValType(self!)] : toResults(result));
+		const info: FuncInfo = { params: params.map(r => r.wtype), result, funcIndex, typeIndex, defaults: defaultsWithImplicitUndefined(sig.params), resolvedParams: params, hasRest: !!sig.rest?.typeAnnotation, reassignsThis };
+		funcs.set(key, info);
+		return info;
+	}
+
+	// Binds the params (running their defaults) and hoists the body's `var`s.
+	function beginBody(ctx: FunctionContext, body: Stmt[], params: ResolvedParam[]) {
+		ctx.ownBody = body;
+		ctx.declareParams(params).forEach(st => emitStmt(st, ctx));
+		hoistVars(body, params, ctx);
+	}
+
+	function emitFuncBody(ctx: FunctionContext, body: Stmt[], params: ResolvedParam[], result: W.Type) {
+		beginBody(ctx, body, params);
+		emitStmts(body, ctx);
+		ctx.emitTrailingUnreachable(result);
 	}
 
 	// The type arguments the checker resolved `decl` with, or under which `decl` realizes the signature it resolved (an overload's implementation).
@@ -8193,20 +8218,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			// (only when `name` is directly reachable via `global`) -- `homeScope` is simply `undefined` otherwise, falling back to `libGlobal` exactly as before.
 			const homeScope = (checkedType?.type === 'function' ? checkedType.declScope as Scope | undefined : undefined) ?? moduleScope;
 
-			const params	= resolveParams(decl.params, homeScope ?? libGlobal);
-			if (decl.rest?.typeAnnotation)
-				params.push({key: decl.rest.key, wtype: restParamWtype(decl.rest.typeAnnotation)!, tsType: decl.rest.typeAnnotation});
-
-			const {funcIndex, typeIndex} = types.func(toParams2(params), toResults(result));
-			const info: FuncInfo = {params: params.map(r => r.wtype), result, funcIndex, typeIndex, defaults: defaultsWithImplicitUndefined(decl.params), resolvedParams: params, hasRest: !!decl.rest?.typeAnnotation};
-			funcs.set(homeKey(homeModule, name), info);
+			const params	= resolveParams(decl, homeScope ?? libGlobal);
+			const info		= declareFunc(homeKey(homeModule, name), decl, params, result);
 			worklist.push(W.withCatchAt(() => {
 				const ctx	= new FunctionContext(name, new Scope(homeScope ?? libGlobal), plainReturn(result, overloaded ?? decl.returnType as Type | undefined), undefined, homeModule);
-				ctx.ownBody = decl.body!;
-				ctx.declareParams(params).forEach(st => emitStmt(st, ctx));
-				hoistVars(decl.body!, params, ctx);
-				emitStmts(decl.body!, ctx);
-				ctx.emitTrailingUnreachable(result);
+				emitFuncBody(ctx, decl.body!, params, result);
 				info.body		= ctx.toFuncBody(params.length, toValType);
 			}, decl, homeModule, name));
 			return info;
@@ -9387,16 +9403,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		if (existing)
 			return existing;
 
-		const params		= resolveParams(ctor.params, cls.declScope ?? libGlobal);
-		if (ctor.rest?.typeAnnotation)
-			params.push({key: ctor.rest.key, wtype: restParamWtype(ctor.rest.typeAnnotation)!, tsType: ctor.rest.typeAnnotation});
-
-		//const thisWtype	= cls.thisType;
+		const params		= resolveParams(ctor, cls.declScope ?? libGlobal);
 		const thisWtype		= cls.thisWtype!;
-
-		const {funcIndex, typeIndex} = types.func(toParams2(params), toResults(thisWtype));
-		const info: FuncInfo = { params: params.map(r => r.wtype), result: thisWtype, funcIndex, typeIndex, defaults: defaultsWithImplicitUndefined(ctor.params), resolvedParams: params, hasRest: !!ctor.rest?.typeAnnotation };
-		funcs.set(key, info);
+		const info			= declareFunc(key, ctor, params, thisWtype);
 
 		// A constructor's own `return;` never carries a value (real TS syntax already enforces that at the checker level) -- it just means
 		// "stop early, `this` is the result", the same value every real exit already emits via `ctx.ctorThis`.
@@ -9416,9 +9425,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			// need not be its own module (a helper `use(h: Holder)` in another file), and then its body could not see its own imports at all -- an
 			// `import * as TS` call inside it read as an unresolved identifier.
 			const ctx		= new FunctionContext(key, new Scope(moduleScopeOf(cls.homeModule) ?? cls.declScope ?? libGlobal), plainReturn(thisWtype), cls, cls.homeModule);
-			ctx.ownBody = ctor.body!;
-			ctx.declareParams(params).forEach(st => emitStmt(st, ctx));
-			hoistVars(ctor.body!, params, ctx);
+			beginBody(ctx, ctor.body!, params);
 			// This constructor supplies `this` directly via its own return value (`ctorReturnsValue`)
 			// `cls`'s own `thisWtype`/`typeIndex` already say so; ordinary statement compilation does the right thing once `ctx.ctorThis` is unset.
 			const last = ctor.body?.at(-1);
@@ -9559,20 +9566,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		if (!result)
 			throw `'${fullName}' has an unsupported return type`;
 
-		const params		= resolveParams(decl.params, owner.declScope ?? libGlobal);
-		if (decl.rest?.typeAnnotation)
-			params.push({key: decl.rest.key, wtype: restParamWtype(decl.rest.typeAnnotation)!, tsType: decl.rest.typeAnnotation});
-
+		const params		= resolveParams(decl, owner.declScope ?? libGlobal);
 		const isStatic		= decl.modifiers?.includes('static');
 		const reassignsThis = !isStatic && assignsToThis(decl.body);
 		const thisWtype		= owner.thisType;
-		const {funcIndex, typeIndex} = types.func(
-			isStatic		? toParams2(params) : [{ type: toValType(thisWtype), id: 'this' }, ...toParams2(params)],
-			reassignsThis	? [...toResults(result), toValType(thisWtype)] : toResults(result)
-		);
-
-		const info: FuncInfo = { params: params.map(r => r.wtype), result, funcIndex, typeIndex, defaults: defaultsWithImplicitUndefined(decl.params), resolvedParams: params, hasRest: !!decl.rest?.typeAnnotation, reassignsThis };
-		funcs.set(key, info);
+		const info			= declareFunc(key, decl, params, result, isStatic ? undefined : thisWtype, reassignsThis);
 		worklist.push(W.withCatch(() => {
 			// See `ensureCtor`'s own note -- a method body resolves against its class's declaring module too.
 			const ctx	= new FunctionContext(key, new Scope(moduleScopeOf(owner.homeModule) ?? owner.declScope ?? libGlobal), plainReturn(result, decl.returnType as Type | undefined), owner, owner.homeModule);
@@ -9595,11 +9593,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					},
 				};
 			}
-			ctx.ownBody = decl.body!;
-			ctx.declareParams(params).forEach(st => emitStmt(st, ctx));
-			hoistVars(decl.body!, params, ctx);
-			emitStmts(decl.body!, ctx);
-			ctx.emitTrailingUnreachable(result);
+			emitFuncBody(ctx, decl.body!, params, result);
 			info.body = ctx.toFuncBody((isStatic ? 0 : 1) + params.length, toValType);
 		}, key));
 		return info;
