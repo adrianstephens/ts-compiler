@@ -97,8 +97,9 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
 
 ## Next up (2026-09-30, end of session)
 
-0. **Size** ([[feedback_track_total_size]]): `compiler/src` 31,906 lines at `d4fb83f`. 4b must net-DELETE; after it, a consolidation
-   session from a fresh `near-clone-scan.js` run (the 2026-09-21 audit is stale).
+0. **Size** ([[feedback_track_total_size]]): tracked src (`ts/` sans lib + `wasm/` + `vsdg.ts` + `transpile.ts`) 31,658 at `8c037ea`
+   (wasm-backend.ts 10,145). The work queue is [[compiler_size_reduction_plan]] (whole-file examination, 2026-10-02); near-clone
+   scanning is NOT the method (user: it only finds local copies).
 1. **Step 4b DONE `0c24195`** (user chose "unbuilt shapes"): the open-shape walk records each object literal's `shapeKey` (member
    names; at its slot and as its own type); a struct shape no literal builds is open (`isOpen` in the backend, shared by typeOf/
    ownerFor/holdsLayout/spread). Repros `tb/d.ts`, `tb/litkey.ts` run. +20 lines net (not deletion-first: `resolvePlace`'s `refined`

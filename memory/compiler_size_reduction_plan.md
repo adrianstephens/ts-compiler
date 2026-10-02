@@ -41,9 +41,10 @@ resolution, contextual types), plus several mechanisms built twice. Line counts 
    `physicallyAny`, and `case 'var_decl'`'s ~70 lines of type special cases (TypedArray alias, erased generic method returns).
    Target: stamps complete (a synthesized node is typed where it is built), one `typeAt` and one `wtypeOf`.
 7. **Comments (~2,000 lines, 585 over the 2-line cap, many 200-300 chars).** Trimmed inside each family as it is rewritten,
-   then one pass with the printer-based code-identity gate ([[tison_comment_pass_tooling]]). ~600-800.
+   NOT a separate pass: the 2026-09-17 pass already ran, and the user chose to let load-bearing blocks exceed the cap
+   ([[tison_comment_pass_tooling]]). Trim only what a change touches.
 
-Total ~2,300 lines from wasm-backend.ts. `checker.ts` (3,756) and `type-core.ts` (3,880) were NOT examined; do that next.
+Total ~1,700 lines of code from wasm-backend.ts. `checker.ts` (3,756) and `type-core.ts` (3,880) were NOT examined; do that next.
 
 ## Order and gates
 
@@ -55,3 +56,26 @@ then checker, cpp-backend, difftest; the survey once per family. A WAT change is
 
 - 2026-10-02 `835a5d9`: function prelude (`declareFunc`/`beginBody`/`emitFuncBody`, `resolveParams` takes the rest): -6
   lines (its commit message wrongly says -20).
+- 2026-10-02 `981a774`: `ownerFor` derived from `typeOf` (primitive wrapper by `typeofName`, a class ref by name, else the
+  class `typeOf`'s ref names): -95 (message says -96).
+- 2026-10-02 `04241ca`: `for...in` desugars to `Object.keys(obj)` (the checker types it); `case 'var_decl'`'s AST re-typing
+  (TypedArray-alias element, method owner's declared return) deleted: -98.
+- 2026-10-02 `d1ceeb8`: one memoized `closureFree(fn)`/`freeIn(body, bound)` replaces collectFreeVars/collectClosureFreeVars and
+  the re-walks in collectCapturedMutables, namesSelfAsValue, closureDefaultIsSelfContained, usesThis, emitStmts: -100.
+- 2026-10-02 `8c037ea`: `SCALAR_CONVERSIONS` table in coerceTop; `in` uses `emitTestsAny`; a union spread uses `emitTypeCascade`: -31.
+- Session total: tracked src 31,988 -> 31,658 (-330); wasm-backend.ts 10,475 -> 10,145.
+
+## Learned (do not retry blind)
+
+- **Family 3 via the checker's flow slot does not delete `matchContextualUnionMember`.** `stampFlow` already discriminates an
+  object literal's union context (`discriminateContext`) and stamps the member; a literal with that stamp gets the same owner the
+  backend finds. But a literal under a GENERIC return (`rule<T>(x => ({params}))`) has no flow (its slot is `T`), and its context
+  (`{params} | {params; rest}`, inferred) has no unit discriminant -- only the backend's required-field match picks a layout, which TS
+  never needs to. Recursing `stampFlow` into a literal's elements and property values (tried, reverted) adds stamps but deletes nothing.
+- **`collectExpandoFields`' Container/Binding tree -> checker `declarator()`/`decl()` saves only ~25 lines**: a named function
+  expression's own name has no declarator (`addLazyValue` only), and imports copy `decl` (the statement), not the declarator.
+- **The deep lever is the SYNTHESIZED node.** Most fallback typing (`checkerTypeOf` on unstamped nodes, `typeAt`'s query path,
+  `ctx.contextualReturn` writes at ~12 sites, `var_decl`'s `!stamped` branch) exists because desugarings (for-of, destructuring,
+  spread, typeof, switch, entries, defaults) build AST the checker never saw. Checking each synthesized statement in `ctx.scope`
+  (muted, stamping) would make stamps complete and let those go. Architectural: put to the user before doing it.
+
