@@ -397,6 +397,11 @@ interface ArrayLike<T> {
 	readonly [n: number]: T;
 }
 
+declare type FlatArray<Arr, Depth extends number> = {
+	done: Arr;
+	recur: Arr extends ReadonlyArray<infer InnerArr> ? FlatArray<InnerArr, [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20][Depth]> : Arr;
+}[Depth extends -1 ? 'done' : 'recur'];
+
 interface ConcatArray<T> {
 	readonly length: u32;
 	readonly [n: number]: T;
@@ -425,6 +430,7 @@ interface ReadonlyArray<T> {
 	forEach(callbackfn: (value: T, index: number, array: readonly T[]) => void, thisArg?: any): void;
 	map<U>(callbackfn: (value: T, index: number, array: readonly T[]) => U, thisArg?: any): U[];
 	flatMap<U>(callback: (value: T, index: number, array: readonly T[]) => U | readonly U[], thisArg?: any): U[];
+	flat<A, D extends number = 1>(this: A, depth?: D): FlatArray<A, D>[];
 	filter<S extends T>(predicate: (value: T, index: number, array: readonly T[]) => value is S, thisArg?: any): S[];
 	filter(predicate: (value: T, index: number, array: readonly T[]) => unknown, thisArg?: any): T[];
 	find<S extends T>(predicate: (value: T, index: number, obj: readonly T[]) => value is S, thisArg?: any): S | undefined;

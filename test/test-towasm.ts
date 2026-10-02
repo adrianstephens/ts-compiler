@@ -9479,6 +9479,49 @@ async function main() {
 	check('flat: a union element flattens to its members',
 		typeErrors(`declare const xs: (number | number[])[]; const f: number[] = xs.flat(); const g: string[] = xs.flat();`).map(e => /to type '(\w+)\[\]'/.exec(e)?.[1]).join(),
 		'string');
+	// `flat(depth)` is TS's: the element is `FlatArray<A, D>`, flattened as deep as the literal depth says.
+	check('flat: the depth types the result',
+		typeErrors(`declare const x: number[][][]; const a: number[] = x.flat(2); const b: number[][] = x.flat(); const c: number[] = x.flat();`).length,
+		1);
+
+	{
+		// Recursion per element type: `Array.isArray` folds statically at each level, and the push where TS typed the result flatter
+		// than the element (never reached at the right depth) still compiles, as a checked conversion through `unknown`.
+		const r = await compile(`
+			export function deep2(): number {
+				const x: number[][][] = [[[1, 2], [3]], [[4]]];
+				const f: number[] = x.flat(2);
+				return f.length * 100 + f[0] + f[3] * 10;
+			}
+			export function zero(): number {
+				const x: number[][] = [[1], [2, 3]];
+				const f: number[][] = x.flat(0);
+				return f.length * 10 + f[1].length;
+			}
+			export function infinite(): number {
+				const x: number[][][] = [[[1, 2], [3]], [[4]]];
+				let s = 0;
+				for (const v of x.flat(Infinity))
+					s += v as number;
+				return s;
+			}
+			export function mixed(): number {
+				const xs: (number | number[])[] = [1, [2, 3], 4];
+				const f: number[] = xs.flat();
+				return f.length * 10 + f[2];
+			}
+			export function readonlyFlat(): number {
+				const x: readonly (readonly string[])[] = [['a'], ['b', 'c']];
+				const f: string[] = x.flat();
+				return f.length * 10 + (f[2] === 'c' ? 1 : 0);
+			}
+		`);
+		check('flat(2): two levels', r.deep2(), 441);
+		check('flat(0): no level', r.zero(), 22);
+		check('flat(Infinity): every level', r.infinite(), 10);
+		check('flat(): a union element', r.mixed(), 43);
+		check('flat(): a readonly receiver', r.readonlyFlat(), 31);
+	}
 
 	{
 		// `'k' in u` on a UNION is a TYPE test, not a property lookup -- it is how TypeScript narrows a

@@ -439,6 +439,10 @@ class FunctionContext extends W.FunctionContext {
 			const inner = this.staticGuard(test.operand);
 			return inner === undefined ? undefined : !inner;
 		}
+		if (test.type === 'binary' && (test.operator === '&&' || test.operator === '||')) {
+			const and = test.operator === '&&', l = this.staticGuard(test.left), r = this.staticGuard(test.right);
+			return l === !and || r === !and ? !and : l === and && r === and ? and : undefined;
+		}
 		if (test.type !== 'call')
 			return undefined;
 		const scope	= this.scope;
@@ -1138,11 +1142,10 @@ function containsDefineProperty(body: Stmt[]): boolean {
 const checkedModules = new WeakSet<Module>();
 
 
-// JS `fn.length`: the parameters before the first defaulted one; a rest parameter and a TS `this` parameter never count.
+// JS `fn.length`: the parameters before the first defaulted one; a rest parameter never counts.
 function jsLength(params: { key: unknown; default?: unknown }[]): number {
-	const own = params.filter(p => p.key !== 'this');
-	const i = own.findIndex(p => p.default !== undefined);
-	return i < 0 ? own.length : i;
+	const i = params.findIndex(p => p.default !== undefined);
+	return i < 0 ? params.length : i;
 }
 
 // A `get`/`set` accessor's `methodDecls`/`inlineMethods`/`funcs` key, mangled apart from a plain same-named
@@ -4049,6 +4052,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		if ((got === 'i32' || got === 'u32' || got === 'f32') && W.isAny(want) && !boxesAsBoolean(e, ctx)) {
 			coerceTop(got, ctx, 'f64');
 			got = 'f64';
+		}
+		// A value TS types `unknown`/`any`, or casts through one (`x as unknown as F`), converts as from `any`: a checked unbox or cast,
+		// whatever narrower form it is held in. Only scalar meeting ref needs it -- no direct conversion bridges them.
+		const throughTop = (x: Expr): boolean => x.type === 'as' ? T.isAny(x.typeAnnotation) || throughTop(x.expression) : T.isAny(ctx.narrowedTypeOf(x));
+		if (typeof got !== typeof want && !W.isAny(got) && !W.isAny(want) && throughTop(e)) {
+			coerceTop(got, ctx, W.REF_ANY);
+			got = W.REF_ANY;
 		}
 		if (adoptErased && erasedTwin(got, want))
 			return got;
@@ -9525,6 +9535,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				typeParams: undefined,
 				params:		decl.params.map(p => p.typeAnnotation ? { ...p, typeAnnotation: T.substituteType(p.typeAnnotation, map) } : p),
 				rest:		decl.rest?.typeAnnotation ? { ...decl.rest, typeAnnotation: T.substituteType(decl.rest.typeAnnotation, map) } : decl.rest,
+				thisType:	decl.thisType && T.substituteType(decl.thisType, map),
 				returnType: decl.returnType ? T.substituteType(decl.returnType, map) : decl.returnType,
 				body:		decl.body ? substituteTypeParams(map).statements(decl.body) : decl.body,
 			};
@@ -9565,8 +9576,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		worklist.push(W.withCatch(() => {
 			// See `ensureCtor`'s own note -- a method body resolves against its class's declaring module too.
 			const ctx	= new FunctionContext(key, new Scope(moduleScopeOf(owner.homeModule) ?? owner.declScope ?? libGlobal), plainReturn(result, decl.returnType as Type | undefined), owner, owner.homeModule);
+			// A declared `this:` types the body's `this` (`flat<A>(this: A)`); the value is still the receiver's struct.
 			if (!isStatic)
-				ctx.declareValue('this', thisWtype, owner.thisTsType);
+				ctx.declareValue('this', thisWtype, decl.thisType ? T.substituteThisType(decl.thisType, owner.thisTsType) : owner.thisTsType);
 			if (reassignsThis) {
 				// A `reassignsThis` method's own (possibly just-updated) `this` rides along as one more wasm-level result on every return, on top of its
 				// ordinary declared result -- see `assignsToThis`'s own comment for why a body doing this is this compiler's signal to compile it this way.

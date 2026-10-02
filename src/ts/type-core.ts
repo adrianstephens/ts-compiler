@@ -691,8 +691,14 @@ export function stampScope<T extends Type>(t: T, scope: Scope, exclude?: Set<str
 			return process(x);
 		}),
 		searchOnce((m: TS.TypeMember | TS.ClassMember, process: (x: TS.TypeMember | TS.ClassMember) => boolean) => {
-			if (m.type === 'method' || m.type === 'call' || m.type === 'construct')
+			if (m.type === 'method' || m.type === 'call' || m.type === 'construct') {
+				// A generic member binds its own type parameters, as a nested generic signature does above.
+				if (m.typeParams?.length) {
+					stampSig(m, scope, exclude);
+					return false;
+				}
 				m.declScope ??= scope;
+			}
 			return process(m);
 		})
 	).type(t);
@@ -717,6 +723,8 @@ export function stampSig<T extends TS.CallSig>(sig: T, scope: Scope, exclude?: S
 	sig.params.forEach(p => p.typeAnnotation && stampScope(p.typeAnnotation as Type, scope, ownTypeParams));
 	if (sig.rest?.typeAnnotation)
 		stampScope(sig.rest.typeAnnotation as Type, scope, ownTypeParams);
+	if (sig.thisType)
+		stampScope(sig.thisType, scope, ownTypeParams);
 	if (sig.returnType)
 		stampScope(sig.returnType, scope, ownTypeParams);
 	// A type param's own `constraint`/`default` need it too -- otherwise `inferTypeArgs`'s `isLiteralOnly(tp.constraint, ...)`
@@ -2190,7 +2198,7 @@ export function sealed(t: Type, scope: Scope, depth = 6): boolean {
 
 // TS's getMinArgumentCount: through the last parameter a call must pass -- not optional (or defaulted), and not accepting `void`.
 export function minArgumentCount(sig: TS.Params, scope: Scope): number {
-	const own = sig.params.filter(p => p.key !== 'this');
+	const own = sig.params;
 	let n = own.length;
 	while (n > 0 && (hasMod(own[n - 1], 'optional') || (own[n - 1].typeAnnotation && unionMembers(resolveOwn(own[n - 1].typeAnnotation!, scope), scope).some(m => m.type === 'ref' && m.name === 'void'))))
 		n--;
@@ -2471,18 +2479,17 @@ export function instantiateInContextOf(generic: TS.CallSig, genericParams: TS.Ty
 	const rename	= new Map(genericParams.map(p => [p.name, TS.RefType(`${p.name}'`)]));
 	const src		= instantiateSig({ ...generic, typeParams: undefined }, rename);
 	const typeParams = genericParams.map(p => ({ ...p, name: `${p.name}'`, constraint: p.constraint && substituteType(p.constraint, rename) }));
-	const own		= (f: TS.CallSig) => f.params.filter(p => p.key !== 'this');
 	const tparams	= new Map(typeParams.map(p => [p.name, p] as const));
 	const map		= new Map<string, Type>();
 	// The target's type at position `i`: a fixed parameter's, else its rest's element there.
 	const dstAt = (i: number): Type | undefined => {
-		const fixed = own(dst);
+		const fixed = dst.params;
 		if (i < fixed.length)
 			return fixed[i].typeAnnotation;
 		const rest = dst.rest?.typeAnnotation && resolve(dstScope, dst.rest.typeAnnotation);
 		return rest?.type === 'tuple' ? tupleElementType(flatTupleElements(rest, dstScope)[i - fixed.length]) : rest && arrayLikeElement(rest);
 	};
-	own(src).forEach((p, i) => {
+	src.params.forEach((p, i) => {
 		const d = dstAt(i);
 		if (p.typeAnnotation && d)
 			inferTypeArgs(p.typeAnnotation, d, tparams, map, dstScope, scope);
@@ -2543,9 +2550,8 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 	// TS's callback mode: a source parameter's callback `s` accepts the target's `d` if each of `s`'s parameters is one of `d`'s
 	// (one way, not bivariantly) and `d` returns what `s` does.
 	const callbackRelated = (s: TS.FunctionType, d: TS.FunctionType, depth: number): boolean => {
-		const own = (f: TS.CallSig) => f.params.filter(p => p.key !== 'this');
-		const sp = own(s), dp = own(d);
-		return sp.every((p, i) => !p.typeAnnotation || !dp[i]?.typeAnnotation || recurse(p.typeAnnotation, dp[i].typeAnnotation!, depth - 1))
+		const dp = d.params;
+		return s.params.every((p, i) => !p.typeAnnotation || !dp[i]?.typeAnnotation || recurse(p.typeAnnotation, dp[i].typeAnnotation!, depth - 1))
 			&& (!s.returnType || !d.returnType || isRef(s.returnType, 'void') || recurse(d.returnType, s.returnType, depth - 1));
 	};
 	const related = (src: Type, dst: Type, depth: number): boolean => {
@@ -2598,11 +2604,13 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 
 		// `resolve()` gets a fresh budget here, not `depth` -- see `lookupMember`'s identical pattern.
 		// NOT `resolveOwn`: `src.type === 'intersection'` checks each part individually, never the combined shape -- known gap, unfixed.
+		// Resolving loses a ref's identity, which the by-name paths above need: what recurses below meets the other side AS WRITTEN.
+		const srcWritten = src, dstWritten = dst;
 		src = resolve(scope, src);
 		dst = resolve(dstScope, dst);
 		// An alias that resolves to an array shape (`type Rules<T> = Rule<T>[]`) goes back through the Array-ref comparisons above.
 		if (src.type === 'array' || dst.type === 'array')
-			return recurse(src, dst, depth - 1);
+			return recurse(src.type === 'array' ? src : srcWritten, dst.type === 'array' ? dst : dstWritten, depth - 1);
 
 		// `unknown` is a top type only as a target: as a source it fits nothing but a top type.
 		if (src === dst || isAny(dst) || (isRef(src, 'any') && !precise))
@@ -2665,7 +2673,7 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 			return !strict || (!OPAQUE_GAP.has(src.type) && !OPAQUE_GAP.has(dst.type));
 
 		if (src.type === 'union')
-			return src.types.every(t => recurse(t, dst, depth - 1));
+			return src.types.every(t => recurse(t, dstWritten, depth - 1));
 		// `{}` holds every value but `null`/`undefined` (`void`, `unknown` may be either), primitives and `object` included.
 		if (dst.type === 'object' && !dst.members.length && !isNullOrUndefined(src) && !isRef(src, 'void') && !isRef(src, 'unknown'))
 			return true;
@@ -2752,7 +2760,7 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 				return isAssignable(src, { ...dst, typeParams: undefined }, bind(scope), bind(dstScope), strict, depth, precise, inProgress);
 			}
 			// TS's arity rule (compareSignaturesRelated): a source needing more arguments than the target ever passes is not one.
-			if (!dst.rest && minArgumentCount(src, scope) > dst.params.filter(p => p.key !== 'this').length)
+			if (!dst.rest && minArgumentCount(src, scope) > dst.params.length)
 				return false;
 			// A GENERIC source is instantiated in the target's context first (TS's instantiateSignatureInContextOf): its type parameters
 			// inferred from the target's parameters, the rest at their constraints -- `<T>(x: T) => number` is a `(x: number) => void`.
@@ -2761,8 +2769,7 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 			// but a `(h: Handler) => ...` is no `(value: number) => ...` callback either way.
 			// A CALLBACK pair relates one way only, the target's callback to the source's (TS's strict callback rule), which is what
 			// makes `then(onfulfilled: (value: T) => ...)` covariant in `T`.
-			const own = (f: TS.CallSig) => f.params.filter(p => p.key !== 'this');
-			const srcParams = own(fn), dstParams = own(dst);
+			const srcParams = fn.params, dstParams = dst.params;
 			if (srcParams.some((p, i) => {
 				const s = p.typeAnnotation, d = dstParams[i]?.typeAnnotation;
 				const callbacks = s && d && callbackPair(s, d, scope, dstScope);
@@ -3276,6 +3283,11 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 			}
 			return;
 		}
+		// TS's getApparentType: a type-parameter argument infers through its constraint (`A extends readonly T[]` gives `readonly E[]`
+		// its `E = T`), but a union, intersection or conditional target pairs its parts with the parameter itself first.
+		const bound = paramT.type !== 'union' && paramT.type !== 'intersection' && paramT.type !== 'conditional' ? typeParamConstraint(argT, scope) : undefined;
+		if (bound)
+			return recurse(paramT, bound, depth - 1);
 		const a = resolveOwn(argT, scope);
 		if (paramT.type === 'array') {
 			if (a.type === 'array') {

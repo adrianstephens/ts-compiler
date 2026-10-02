@@ -278,10 +278,9 @@ function applyContextualParams(fn: { params: JS.Param<Type>[]; typeParams?: TS.T
 	const params	= fn.params;
 	// TS's isAritySmaller: a signature with fewer parameters than the callback REQUIRES gives it no context at all -- an overload
 	// trial with `(req1: string) => void` must not type `(req, res) => ...`, which only the two-parameter overload fits.
-	const own		= params.filter(p => p.key !== 'this');
-	const required	= own.findIndex(p => !!p.default || hasMod(p, 'optional'));
+	const required	= params.findIndex(p => !!p.default || hasMod(p, 'optional'));
 	const found		= expected && resolveFnMember(expected, scope);
-	const sig		= found && (found.rest || found.params.filter(p => p.key !== 'this').length >= (required < 0 ? own.length : required)) ? found : undefined;
+	const sig		= found && (found.rest || found.params.length >= (required < 0 ? params.length : required)) ? found : undefined;
 	if (sig) {
 		// Past the declared fixed parameters it is the REST that covers them, so its ELEMENT is the
 		// contextual type -- `(_, a, b) => ...` against `(substring: string, ...args: any[]) => string`,
@@ -448,7 +447,7 @@ function flowContainer(scope: Scope): Scope {
 	return s;
 }
 
-// A non-arrow function's body: its own `this`, which TS types `any` absent a `this:` parameter (ts-parser drops those), never the
+// A non-arrow function's body: its own `this`, which TS types `any` absent a `this:` parameter (`checkFunctionBody` binds one), never the
 // enclosing method's. An arrow keeps the enclosing `this`, so it does not come through here.
 function ownThis(scope: Scope): Scope {
 	scope.addValue('this', T.ANY);
@@ -3035,6 +3034,8 @@ function checkFunctionBody(fn: TS.CallSig, body: JS.Stmt<any>[] | Expr | undefin
 	// until now.
 	for (const p of fn.typeParams ?? [])
 		inner.addTypeParam(p.name, p.constraint ?? T.UNKNOWN);
+	if (fn.thisType)
+		inner.addValue('this', fn.thisType);
 
 	for (const p of fn.params) {
 		const anno = p.typeAnnotation;

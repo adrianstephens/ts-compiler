@@ -54,10 +54,13 @@ export interface Rest<T>					{ key: BindingTarget; typeAnnotation?: T; }
 export function  Rest<T>(key: BindingTarget, typeAnnotation?: T): Rest<T> { return {key, typeAnnotation}; }
 export interface Param<T>					{ key: BindingTarget; default?: Expr<T>; typeAnnotation?: T; modifiers?: string[]; decorators?: Expr[] }
 export function  Param<T>(key: BindingTarget, typeAnnotation?: T, modifiers?: string[]): Param<T> { return { key, typeAnnotation, modifiers }; }
-export interface Params<T>					{ params: Param<T>[]; rest?: Rest<T>; }
-export function  Params<T>(params: Param<T>[], rest?: Rest<T>) : Params<T> { return {params, rest }; }
+export interface Params<T>					{ params: Param<T>[]; rest?: Rest<T>; thisType?: T; }
+// TS's `this:` parameter (always first) is the signature's `thisType`, never a positional parameter: no call passes it.
+export function  Params<T>(params: Param<T>[], rest?: Rest<T>) : Params<T> {
+	return params[0]?.key === 'this' ? { params: params.slice(1), rest, thisType: params[0].typeAnnotation } : { params, rest };
+}
 // `origin`: the class member a signature was built from, which is how codegen maps a call's resolution to the body it compiles.
-export interface CallSig<T> extends Params<T> { typeParams?: TypeParam<T>[]; thisType?: T; returnType?: T; inferredReturn?: boolean; declScope?: unknown; scope?: unknown; pure?: boolean; origin?: unknown }
+export interface CallSig<T> extends Params<T> { typeParams?: TypeParam<T>[]; returnType?: T; inferredReturn?: boolean; declScope?: unknown; scope?: unknown; pure?: boolean; origin?: unknown }
 
 export type CallSigParams<T> =
 	|	[CallSig<T>]

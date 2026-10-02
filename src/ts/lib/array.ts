@@ -312,21 +312,22 @@ export class Array<T> extends ArrayBase {
 		}
 		return -1;
 	}
-	// One level, TS's default depth: an element that is itself an array contributes its elements. The element type is
-	// what TS's `FlatArray<T[], 1>` reduces to. `flat(depth)` beyond 1 is not declared, so the checker rejects it.
-	flat(): (T extends readonly (infer U)[] ? U : T)[] {
-		const out: (T extends readonly (infer U)[] ? U : T)[] = [];
-		for (let i = 0; i < this.length; i++) {
-			const el: T = this[i];
-			if (Array.isArray(el)) {
-				// Typed, so its elements are read as an array's: a ref-element Array<T> is compiled as Array<any>, where `el` is `any`.
-				const inner: any[] = el;
-				for (let j = 0; j < inner.length; j++)
-					out.push(inner[j]);
-			} else
-				out.push(el as T extends readonly (infer U)[] ? U : T);	// compiled only when `T` is no array (towasm `staticGuard`), where this is `T`
-		}
+	// TS's `this: A` is unconstrained; bounding it by `readonly T[]` (which every receiver is) lets the body read `this` as one.
+	flat<A extends readonly T[], D extends number = 1>(this: A, depth?: D): FlatArray<A, D>[] {
+		const out: FlatArray<A, D>[] = [];
+		Array._flatInto(out, this, depth ?? 1);
 		return out;
+	}
+	// Instantiated per element type, so `Array.isArray(el)` folds statically where `E` settles it (towasm `staticGuard`).
+	// An array element pushed where TS typed `F` flatter is never reached, but must compile: through `unknown` it is a checked conversion.
+	private static _flatInto<E, F>(out: F[], a: readonly E[], depth: number): void {
+		for (let i = 0; i < a.length; i++) {
+			const el = a[i];
+			if (depth >= 1 && Array.isArray(el))
+				Array._flatInto(out, el, depth - 1);
+			else
+				out.push(el as unknown as F);
+		}
 	}
 	// Grown through `push` rather than sized up front by a first pass: the callback must run exactly ONCE
 	// per element (they have effects), and holding the parts to measure them would need a `U[][]`, whose

@@ -381,6 +381,14 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		b.m();
 		const cp: ConstructorParameters<new (a: string) => void> = [1];
 		const r: Required<{ a?: number }> = {};`, ["not assignable to type 'string'", "not assignable to parameter", "Expected 1 arguments", "not assignable to type", "not assignable to type"]],
+	['a method binds its own type parameters and declared this; a type-parameter argument infers through its constraint', `
+		class C<T> {
+			m<A extends readonly T[]>(a: A): void { const z: number = a; }
+			k<A extends string>(this: A): void { const s: string = this; const n: number = this; }
+		}
+		declare function g<E>(a: readonly E[]): E;
+		function f<T, A extends readonly T[]>(a: A): T { const y: number = g(a); return g(a); }`,
+		["Type 'A' is not assignable to type 'number'", "Type 'A' is not assignable to type 'number'", "Type 'T' is not assignable to type 'number'"]],
 ];
 
 (async () => {

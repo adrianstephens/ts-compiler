@@ -254,21 +254,20 @@ export function patternType(target: JS.BindingTarget): Type {
 // JS.ParamList to TS.ParamList; a defaulted parameter counts as optional
 export function FixParams(params: JS.Params<any>): TS.Params {
 	return {
-		params: params.params.filter(p => p.key !== 'this').map((p): TS.Param => ({
+		params: params.params.map((p): TS.Param => ({
 			key:			typeof p.key === 'string' ? p.key : '_',
 			modifiers:		hasMod(p, 'optional') || !!p.default ? ['optional'] : [],
 			typeAnnotation: p.typeAnnotation as Type ?? (typeof p.key !== 'string' && patternDefaults(p.key) ? patternType(p.key) : widenedDefaultType(p.default)),
 			default:		p.default
 		})),
-		rest: params.rest as JS.Rest<Type>
+		rest:		params.rest as JS.Rest<Type>,
+		thisType:	params.thisType
 	};
 }
 // `declaredReturnType`: the function/arrow's own explicit annotation, captured *before* `checkFunctionBody` runs and overwrites
 // `params.returnType` with a body-inferred type for its own internal checking -- wrong for this value's type as seen externally.
 export function FixSig(params: JS.CallSig<any>, defaultRet?: Type, declaredReturnType?: Type): TS.CallSig {
 	return { ...FixParams(params),
-		// A value-level declaration keeps `this` among its parameters (it binds in the body); a signature names it apart.
-		thisType: params.thisType ?? params.params.find(p => p.key === 'this')?.typeAnnotation,
 		returnType: declaredReturnType ?? params.returnType as Type ?? defaultRet,
 		typeParams: params.typeParams as TS.TypeParam[]
 	};
