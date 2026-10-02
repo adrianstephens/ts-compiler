@@ -2216,6 +2216,17 @@ function readsPastEnd(e: Expr, ctx: FunctionContext): boolean {
 	return T.unionMembers(T.resolve(ctx.scope, ctx.narrowedTypeOf(e)), ctx.scope).some(m => T.isNullish(m, ctx.scope));
 }
 
+// One scalar representation into another. A float meets an int slot SATURATING (never trapping): NaN gives 0, as JS's
+// `ToInt32` does, but +-Infinity the int's limits where JS gives 0 (`emitToInt32` is the exact form, for the bitwise operators).
+const SCALAR_CONVERSIONS: Partial<Record<string, Partial<Record<string, wasm.Instr>>>> = {
+	f64: { i32: I.i32.trunc_sat_f64_s, u32: I.i32.trunc_sat_f64_u, i64: I.i64.trunc_sat_f64_s, f32: I.f32.demote_f64 },
+	f32: { f64: I.f64.promote_f32 },
+	i32: { f64: I.f64.convert_i32_s, f32: I.f32.convert_i32_s, i64: I.i64.extend_i32_s },
+	u32: { f64: I.f64.convert_i32_u, f32: I.f32.convert_i32_u, i64: I.i64.extend_i32_u },
+	i64: { f64: I.f64.convert_i64_s, f32: I.f32.convert_i64_s },
+	u64: { f64: I.f64.convert_i64_u },
+};
+
 // `proven`: the type the result fits. 32-bit `+ - *` stays 32-bit only when that is `i32`/`u32`, else it is the exact `f64`.
 function numericOpInline(method: string, a: W.Type | undefined, b: W.Type | undefined, ctx: FunctionContext, proven?: W.Type): Inline {
 	const at = W.scalarKind(a), bt = W.scalarKind(b);
@@ -4017,19 +4028,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			}
 		}
 
-		if (got === 'f64') {
-			switch (want) {
-				// Direct native saturating conversions -- not an `i64.trunc_sat_f64_s` + `i32.wrap_i64` detour: saturating to
-				// i64's range then wrapping to i32 discards the saturation for any out-of-i32-range input (e.g. `+Infinity`
-				// saturated to `i64::MAX` wraps to `-1`), defeating the point of a saturating conversion (never trapping, e.g.
-				// on `0/0`). `NaN` saturates to `0` like JS's `ToInt32`; `±Infinity` gives `i32::MAX`/`MIN` where JS gives `0` --
-				// the same accepted non-finite gap as a huge finite float, well-defined and non-trapping, not bit-perfect JS.
-				case 'i32': ctx.emit(I.i32.trunc_sat_f64_s); return;
-				case 'u32': ctx.emit(I.i32.trunc_sat_f64_u); return;
-				case 'i64': ctx.emit(I.i64.trunc_sat_f64_s); return;
-				case 'f32':	ctx.emit(I.f32.demote_f64); return;
-			}
-		}
+		const scalar = typeof got === 'string' && typeof want === 'string' ? SCALAR_CONVERSIONS[got]?.[want] : undefined;
+		if (scalar)
+			return void ctx.emit(scalar);
 		// Raw storage meeting a class that adopts it (`adoptingDecl`) -- `[1,2,3]` (physically `{arr:f64}`) where an `Array<number>` is
 		// wanted -- is that class's own constructor call. A literal stays the cheap form and boxes only where a context needs the class.
 		if (W.isArr(got) && W.isRef(want)) {
@@ -4046,29 +4047,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		if (want === 'f64' && isBigLimbs(got)) {
 			ctx.emit(I.call(libFuncIndex('bigToNumber')));
 			return;
-		}
-		if (want === 'f64') {
-			switch (got) {
-				case 'i32':	ctx.emit(I.f64.convert_i32_s); return;
-				case 'u32':	ctx.emit(I.f64.convert_i32_u); return;
-				case 'i64': ctx.emit(I.f64.convert_i64_s); return;
-				case 'u64': ctx.emit(I.f64.convert_i64_u); return;
-				case 'f32':	ctx.emit(I.f64.promote_f32); return;
-			}
-		}
-		if (want === 'f32') {
-			switch (got) {
-				case 'i32':	ctx.emit(I.f32.convert_i32_s); return;
-				case 'u32':	ctx.emit(I.f32.convert_i32_u); return;
-				case 'i64': ctx.emit(I.f32.convert_i64_s); return;
-			}
-		}
-
-		if (want === 'i64') {
-			switch (got) {
-				case 'i32': ctx.emit(I.i64.extend_i32_s); return;
-				case 'u32': ctx.emit(I.i64.extend_i32_u); return;
-			}
 		}
 		// A bigint into a machine slot keeps the low bits of its two's complement, as a `BigInt64Array` element does. Only a range
 		// the checker proved fits gives a bigint an `i32` slot.
@@ -6474,26 +6452,21 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 						coerceTop(src.spreadCls!.fields[idx].wtype, ctx, want);
 						return;
 					}
-					const members = src.unionCls;
-					const arm = (i: number): wasm.Instr[] => {
-						if (i >= members.length)
-							return [I.unreachable];
-						const m = members[i], idx = m.fieldIndex.get(name);
-						ctx.emit(I.local.get(src.spreadLocal!.index), I.ref.test(m.typeIndex));
-						const _cond = ctx.swapOut();
+					const recv	= src.spreadLocal!.index;
+					const read	= () => emitTypeCascade(ctx, recv, src.unionCls!.map(m => ({ heap: m.typeIndex, emit: () => {
+						const idx = m.fieldIndex.get(name);
 						if (idx === undefined) {
+							ctx.emit(I.drop);
 							ctx.emitDefaultValue(want, types, toValType);
 						} else {
-							ctx.emit(I.local.get(src.spreadLocal!.index), I.ref.cast(m.typeIndex));
 							emitFieldRead(m, idx, ctx);
 							coerceTop(m.fields[idx].wtype, ctx, want);
 						}
-						return [..._cond, I.if(toValType(want), ctx.swapOut(), arm(i + 1))];
-					};
+					} })), trap(ctx), want);
 					if (!src.nullable)
-						return void ctx.emit(...arm(0));
-					ctx.emit(I.local.get(src.spreadLocal!.index), I.ref.is_null);
-					ctx.emitIf(toValType(want), () => ctx.emitDefaultValue(want, types, toValType), () => ctx.emit(...arm(0)));
+						return read();
+					ctx.emit(I.local.get(recv), I.ref.is_null);
+					ctx.emitIf(toValType(want), () => ctx.emitDefaultValue(want, types, toValType), read);
 				};
 				// A spread copies VALUES: JS reads each property through [[Get]] into a plain data property, so an accessor's getter never carries over -- the key's own
 				// read (`emitFieldRead`) already called it, and the copy's slot stays empty.
@@ -6829,11 +6802,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 								const recv = ctx.declareLocal(`$in$${ctx.tempCounter++}`, W.REF_ANY_NULLABLE);
 								emitAs(right, ctx, W.REF_ANY_NULLABLE);
 								ctx.emit(I.local.set(recv.index));
-								declaring.forEach((o, i) => {
-									ctx.emit(I.local.get(recv.index), I.ref.test(o.typeIndex));
-									if (i)
-										ctx.emit(I.i32.or);
-								});
+								emitTestsAny(ctx, recv.index, declaring.map(o => o.typeIndex));
 								return 'i32';
 							}
 						}
