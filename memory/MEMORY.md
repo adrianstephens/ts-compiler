@@ -42,6 +42,7 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 ## Project rules
 
 - [track TOTAL size; consolidate every session](feedback_track_total_size.md) — net line delta in every commit, `src` total in the handoff (31,906 at `d4fb83f`); extend the duplicated mechanism, never add a near-copy; 4b lands deletion-first
+- [SIZE REDUCTION PLAN](compiler_size_reduction_plan.md) — **the work queue for cutting thousands of lines**: wasm-backend.ts examined end to end, 7 families it re-derives (bindings, module resolution, literal shapes, two type walks, expandos, type queries, comments), order, gates, progress
 - [no name special-casing in wasm-backend.ts](feedback_no_name_special_casing.md) — find the structural trigger, never hardcode a method/function name
 - [keep the checker stateless](feedback_no_checker_state.md) — prefer untyped AST-node stamping over new checker state
 - [don't simplify deps for self-hosting](feedback_no_simplifying_deps_for_selfhosting.md) — hard constructs need a real compiler feature
@@ -69,6 +70,9 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 - [AST convergence](tison_ast_convergence.md) — 3 parser ASTs converged onto common.ts shapes
 - [py-parser](tison_py_parser.md) — off-side rule done purely in the lexer
 - [jsx-parser](tison_jsx_parser.md) — LALR reduce-lookahead leaks + JSX-vs-generic-arrow ambiguity
+- [glsl-parser](tison_glsl_parser.md) — GLSL over c-parser; the two LALR conflicts (unit-reduction nonterminal, scalar_type reduce/reduce) and the `ArrayDecl` size seam
+- [hlsl-msl-parsers](tison_hlsl_msl_parsers.md) — HLSL/MSL over cpp-parser; the `Definition<S>` statement seam, exported `scope_prefix`/`skip`/`>>` terminals, semantics-vs-bitfield and qualified-name resolutions; Cg/Slang ride HLSL
+- [slang-parser](tison_slang_parser.md) — Slang over hlsl-parser; `interface` as a Definition to dodge chain re-instantiation, and the `__target_switch` label-folding technique (its `case` is token-identical to a `switch` case)
 - [wat-parser exceptions](tison_wat_parser_exceptions.md) — exceptions + multi-value blocktypes, verified vs wasmtime
 
 ## TS-to-wasm compiler
