@@ -3714,7 +3714,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		return { wtype: scalarBinding(e, ctx) ?? typeOf(e.type === 'literal' ? ctx.typeAt(e, false) : t), owner };
 	}
 
-	// The `ClassInfo` a static `Type` dispatches method calls against -- derived directly from the `Type` itself, never by reverse-decoding an already-collapsed `WasmType`
 	// A tuple is an `Array` over REF storage whatever its elements: its element is the union of every position when that is
 	// ref-kind, else `any` (`[number, number]` would otherwise name `f64` storage). Asked of the element -- no class built to ask.
 	function tupleArrayOwner(tuples: TS.Tuple[]): ClassInfo | undefined {
@@ -3723,110 +3722,16 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	}
 
 	function ownerFor(t: Type): ClassInfo | undefined {
-		// An open shape is stored as `any` and may hold any layout, so nothing owns it statically.
 		if (isOpen(t))
 			return undefined;
-		// Same fast path `wasmTypeOf` needs, for the same reason -- a hoisted `builtinTypes` name would
-		// otherwise fully expand via its own `declScope` before reaching the `w.type === 'ref'` check below.
-		if (t.type === 'ref') {
-			const m = T.machineOf(t, global);
-			if (m)
-				return builtinTypeOwner(T.machineRange(m).base);
-			if (builtinTypes.has(t.name))
-				return builtinTypeOwner(t.name);
-/*
-			if (t.typeArgs?.length) {
-				const decl = LIB_DECL_MAP.get(name) ?? userGenericClassDecls.get(name);
-				if (decl?.type === 'class_decl' && decl.typeParams?.length)
-					return ensureClass(name, t.typeArgs);
-			}
-*/
-
-			// Try the raw, unresolved reference's own name directly (via `ensureClass`'s shallow, single-level
-			// `resolveClassAlias` lookup and its own `classes` cache check) before `T.resolve`'s full expansion below: that
-			// no longer just unwraps one alias level (`Uint8Array` -> `TypedArray<u8>`) -- for a name with *both* a real
-			// class and a separate ambient `interface` (`TypedArray`, same dual-declaration pattern as `String`), it fully
-			// expands and merges both into an `intersection` with no traceable class name/typeArgs at all. Safe
-			// unconditionally: `ensureClass` returns `undefined`, no throw, for a name that's neither, so this falls through.
-			const direct = ensureClassRef(t);
-			if (direct)
-				return direct;
-		}
-		// Widening only ever matters for a scalar/array/union/ref shape here (matching `wasmTypeOf`'s own reasoning) --
-		// a real `'object'` shape must NOT be widened: `widenLiterals`'s recursive object case would widen every
-		// member's declared type too, including a discriminant field (`{type:'static_block';...}`'s `type`) down to plain
-		// `string`, corrupting the literal precision `matchObjectShapeByType`'s discriminant tiebreak needs to tell union members apart.
-		// Nor is one that is a union's MEMBER: widened, `{type: 'as'} | {type: 'satisfies'}` became one `{type: string}` object.
-		const resolvedForOwner = T.resolve(global, t);
-		// `obj?.method(...)`'s receiver is nullable by construction -- strip `null`/`undefined` before
-		// dispatching; there's no "owner of `null`", only "owner of the non-nullish part `?.` already guarded".
-		// Before widening: widened, `{type: 'keyof'} | undefined`'s tag became `string` and matched another struct.
-		const nonNullish = resolvedForOwner.type === 'union' ? T.nonNullable(resolvedForOwner, global) : resolvedForOwner;
-		if (nonNullish !== resolvedForOwner)
-			return ownerFor(nonNullish);
-		const widenOwner = (x: Type): Type => x.type === 'object' ? x : x.type === 'union' ? T.combineTypes(x.types.map(widenOwner)) : T.widenLiterals(x, false, true);
-		const w = widenOwner(resolvedForOwner);
-
-		switch (w.type) {
-			case 'union': {
-				// A union of tuples (js-parser.ts `CallSigParams<T>`, a rest's type) is one `arr:ref` whichever member it is.
-				const members = T.unionMembers(w, global).map(m => T.resolve(global, m));
-				if (members.every(m => m.type === 'tuple'))
-					return tupleArrayOwner(members as TS.Tuple[]);
-				// Members all owned alike (`assignableOps | ''`, string literals behind an alias beside another): that owner.
-				const owners = new Set(members.map(ownerFor));
-				return owners.size === 1 ? [...owners][0] : undefined;
-			}
-			case 'array':
-				// `T[]`/`Array<T>`/`ReadonlyArray<T>` all resolve to `Array`'s own methods -- `ReadonlyArray` has no
-				// separate lib declaration, it's a checker-only "readonly view" of the same structural shape.
-				return ensureClass('Array', [w.element]);
-			case 'tuple':
-				return tupleArrayOwner([w]);
-
-			case 'ref': {
-				const mutable = READONLY_ALIAS.get(w.name);
-				if (mutable)
-					return ensureClass(mutable, w.typeArgs);
-				if (w.name === 'Array')
-					return ensureClass('Array', w.typeArgs);
-				// A plain lib class (or alias -- `resolveClassAlias`) not reached by the raw-`t.name` `ensureClass` try above,
-				// e.g. a param typed `Uint8Array` with no earlier `new Uint8Array(...)` to have lazily populated `classes`.
-				// Safe to call unconditionally: `ensureClass` returns `undefined`, no throw, for a name that's neither.
-				// `w.typeArgs`, not just `w.name`: `global` now sees lib type aliases, so `T.resolve` can already expand a
-				// bare alias (`Uint8Array` -> `TypedArray<u8>`), and a generic class needs them to resolve at all, same
-				// as the `Array`/`ReadonlyArray` case just above.
-				return builtinTypeOwner(w.name) ?? ensureClass(w.name, w.typeArgs);
-			}
-
-			case 'object': {
-				const vt = indexSignatureValueType(w);
-				if (vt)
-					return ensureClass('DynamicObject', [vt]);
-				// Genuinely last resort, same guard as `typeOf`'s own -- only reached once `t.type === 'ref'` had its shot
-				// above (a plain class/interface ref, even one mid-construction resolving its own name, is *never* funneled
-				// here: that early check returns first). A generic parameter's structural bound substituted with a real
-				// interface-typed argument is the one case anonymous by construction (`matchObjectShapeByType`'s own
-				// comment). ...and when nothing declared matches either, synthesize the shape -- the same last resort
-				// `matchObjectShape` applies on the literal side, so a bare anonymous object (an inferred field, a spread
-				// result) has an owner to read fields off.
-				return objectShapeOf(t, w);
-			}
-			// An interface `extends`ing another (`Method<T> extends CallSig<T>`) resolves to an intersection, not an
-			// 'object'; `resolveObjectType` flattens+merges it into the flat object `matchObjectShapeByType` expects.
-			case 'intersection': {
-				// See `arrayPartOf` -- an array carrying extra properties dispatches against `Array` itself.
-				const arr = arrayPartOf(w, global);
-				if (arr)
-					return ensureClass('Array', [arr.element]);
-				const prim = primitivePart(w, global);
-				if (prim)
-					return ownerFor(prim);
-				const merged = T.resolveObjectType(w, global);
-				return merged && objectShapeOf(t, merged);
-			}
-		}
-		return undefined;
+		const n		= T.nonNullable(t, global);
+		const prim	= T.typeofName(n, global);
+		if (prim && builtinTypes.get(prim)?.class)
+			return builtinTypeOwner(prim);
+		// By name first: a class held as raw storage (`RawArray`) has no struct reference to find it by.
+		const named	= n.type === 'ref' ? ensureClassRef(n) : undefined;
+		const w		= named ? undefined : typeOf(n);
+		return named ?? (W.isRef(w) ? classes.get(w.ref) : undefined);
 	}
 
 
