@@ -20,3 +20,8 @@ metadata:
   SKIPS `postbuild` entirely when `tsc -b` exits nonzero. Both fixed 2026-09-15 -- `ts/wasm-backend.ts` reads that
   lib at runtime, so a stale copy silently shifts checker/towasm results (it moved test-ts-parser's counts).
 - One tsconfig now (the old `src/examples` needed its own invocation; that trap is gone with the split).
+- **A hand-patched `dist/*.js` SURVIVES `build:emit`** (2026-10-02): `tsc` is incremental and re-emits only files whose
+  source changed, so a debug line dropped into `dist/ts/type-core.js` outlived several rebuilds. Deleting the `.js` is NOT
+  enough (`composite`: `tsconfig.tsbuildinfo` still marks it emitted, so it is not regenerated and imports fail): delete
+  `tsconfig.tsbuildinfo` too, rebuild, then `grep` dist for the marker. A string `throw` has no stack: patch it to `throw new Error(...)`.
+  Some instruments (`esnext-snippet.ts`, `check-one-file.ts`, `diag-snippet.ts`) import `src/`, not `dist/`: patch accordingly.

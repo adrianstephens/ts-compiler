@@ -114,9 +114,16 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
    `8a4ffd8` numbers print as JS does (Burger & Dybvig over bigints, 0/4,424 vs node; ~30 us per fraction -- a machine-int
    Ryu is the speed-up), `toExponential()` no-arg; IIFE parameters typed by their arguments (checker); **`this` parameters**
    (`CallSig.thisType`, inferred from the receiver -- binary's `WithStaticGet.get<X>(this: X)`), lib InstanceType/
-   ConstructorParameters/Required. Not done: TS2684 (receiver fits `this`). Left: `flat(depth)` (now feasible: `this: A` + `FlatArray`)
-   (needs `FlatArray`); `toExponential()` no-arg (shortest digits); Promise chaining/`all` (Promise is no PromiseLike); `Map/Set.keys()`
-   return arrays (deliberate, accepts more than TS). The "Missing" section is runtime coverage, not this audit.
+   ConstructorParameters/Required. Not done: TS2684 (receiver fits `this`). **2026-10-02 `flat(depth)` DONE** (TS's
+   `FlatArray`; `_flatInto<E, F>` recurses per element type). It forced five general fixes: a value-level `this:` is lifted
+   into `thisType` by `JS.Params` (9 `key !== 'this'` filters deleted; codegen counted it as an argument); `stampScope` stamped
+   a generic METHOD member's own type params with the class scope, so every method's `<A>` was an undeclared, anything-relating
+   name (now real -- surfaced a true TS2322 in the corpus); TS's apparent-type inference (a type-param argument infers through
+   its constraint); `related` recursed with the RESOLVED other side, losing the by-name Array fast path (corpus GAP -6);
+   codegen's `staticGuard` folds `&&`/`||`; a cast through `unknown`/`any` is a checked scalar<->ref conversion (`coerceValue`).
+   Left: Promise chaining/`all` (Promise is no PromiseLike); `Map/Set.keys()` return arrays (deliberate, accepts more than TS);
+   `divideAndConquerIntersections.ts` now GAPs (a TS perf stress test whose generic method was vacuous before). The audit's
+   `?` rows are static fields typed by initializer, an instrument blind spot. The "Missing" section is runtime coverage.
 
 ## Waiting on the user
 
