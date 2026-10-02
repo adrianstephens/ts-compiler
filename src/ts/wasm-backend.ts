@@ -315,7 +315,7 @@ class FunctionContext extends W.FunctionContext {
 	// Populated once by `collectDefinePropertyTargets`: the plain local names (not full scope-aware identity like the checker's range widening, an accepted simplification)
 	// ever used as `Object.defineProperty`'s own target later in this same body, so that declarator can allocate its class's own extension subclass instead of the plain one.
 
-	// This function's own top-level statement list (not descending into a nested closure's own body -- the same boundary `ownBoundNames`/`collectFreeVars` use), consulted only by `ensureForwardHolder`.
+	// This function's own top-level statement list (not descending into a nested closure's own body -- the same boundary `ownBoundNames`/`freeIn` use), consulted only by `ensureForwardHolder`.
 	// It finds a sibling `const`/`let` declared LATER in this same body that an EARLIER closure literal needs to forward-reference; set once after construction.
 	ownBody?:			Stmt[];
 	readonly vars		= new Set<string>();
@@ -864,59 +864,49 @@ function ownBoundNames(names: string[], body: Stmt[] | Expr, selfName?: string):
 	return bound;
 }
 
-// Recursively collects free variables into `free`. A nested closure's bound names merge into `bound`
-// before recursing, so a level-2 capture of a level-0 variable transitively appears in level-1's set.
-function collectFreeVars(bound: Set<string>, body: Stmt[] | Expr, free: Set<string>) {
+type Closure = { params: JS.Param<Type>[]; rest?: JS.Rest<Type>; body?: Stmt[] | Expr; name?: string };
+
+// The names `body` reads that `bound` does not cover, `this` included, in first-use order. A nested closure contributes
+// what it reads from outside itself; an object literal's method reads its own `this`.
+function freeIn(body: Stmt[] | Expr, bound: ReadonlySet<string> = new Set()): Set<string> {
+	const free	= new Set<string>();
+	const add	= (names: Iterable<string>) => {
+		for (const n of names)
+			if (!bound.has(n))
+				free.add(n);
+	};
 	walkerB(
-		(s, process) => {
-			// Mirrors the `arrow`/`function` expression handling below, but for a nested function
-			// *declaration* statement -- its own name is already bound (see `ownBoundNames`), so this only
-			// needs to stop descent and collect its body's free vars under its own (merged) bound set.
-			if (s.type === 'function_decl') {
-				collectClosureFreeVars(bound, s, s.name, free);
-				return false;
-			}
-			return process(s);
-		},
+		(s, process) => s.type === 'function_decl' ? (add(closureFree(s)), false) : process(s),
 		(e, process) => {
-			if (e.type === 'identifier') {
-				if (!bound.has(e.name))
-					free.add(e.name);
-				return false;
-			}
-			if (e.type === 'this') {
-				if (!bound.has('this'))
-					free.add('this');
-				return false;
-			}
-			if (e.type === 'arrow' || e.type === 'function') {
-				collectClosureFreeVars(bound, e, e.type === 'function' ? e.name : undefined, free);
-				return false;
-			}
-			if (e.type === 'object') {
-				for (const p of e.properties) {
-					if (p.type !== 'spread' && typeof p.key === 'object')
-						collectFreeVars(bound, p.key.computed, free);
-					if (p.type === 'spread') {
-						collectFreeVars(bound, p.operand, free);
-					} else if (p.type !== 'field') {
-						// A method's `this` is the literal's, not the enclosing closure's.
-						const own = new Set<string>();
-						collectClosureFreeVars(bound, p, undefined, own);
-						own.delete('this');
-						own.forEach(n => free.add(n));
-					} else if (p.value) {
-						collectFreeVars(bound, p.value, free);
-					}
-				}
-				return false;
-			}
-			return process(e);
+			if (e.type === 'identifier' || e.type === 'this')
+				add([e.type === 'this' ? 'this' : e.name]);
+			else if (e.type === 'arrow' || e.type === 'function')
+				add(closureFree(e));
+			else if (e.type !== 'object')
+				return process(e);
+			else
+				for (const p of e.properties)
+					add(p.type === 'spread' ? freeIn(p.operand)
+						: p.type !== 'field' ? [...closureFree(p)].filter(n => n !== 'this')
+						: [...typeof p.key === 'object' ? freeIn(p.key.computed) : [], ...p.value ? freeIn(p.value) : []]);
+			return false;
 		}
 	).body(body);
+	return free;
 }
 
-const usesThis = (fn: { body?: Stmt[] }) => walkerB(undefined, (x, process) => x.type === 'this' || process(x)).statements(fn.body ?? []);
+// What a closure reads from outside itself: its body's free names and its parameter defaults' (a default runs in the callee).
+const closureFrees = new WeakMap<Closure, Set<string>>();
+function closureFree(fn: Closure): Set<string> {
+	let free = closureFrees.get(fn);
+	if (!free) {
+		const body	= fn.body ?? [];
+		const bound	= ownBoundNames(paramNames(fn.params, fn.rest), body, fn.name);
+		free		= new Set([body, ...fn.params.flatMap(p => p.default ? [p.default] : [])].flatMap(b => [...freeIn(b, bound)]));
+		closureFrees.set(fn, free);
+	}
+	return free;
+}
 
 // `this` is a real object only once every required field has a value (`ensureCtor`'s `materializeThis`) -- until then the
 // constructor holds them in locals and a direct `this.f` is served from `f`'s own local. What needs the OBJECT is a nested
@@ -965,117 +955,50 @@ function ctorNeedsEarlyThis(decl: TS.Class): boolean {
 	return false;
 }
 
-// Whether a nested function's body names it other than as the callee of a direct self-call: a value use, or any mention
-// inside a closure within it (a capture). Such a body needs its own name bound (`emitClosureLiteral`).
+// Whether a nested function's body names it other than as the callee of a direct self-call: a value use, or a capture by
+// a closure within it. Such a body needs its own name bound (`emitClosureLiteral`).
 function namesSelfAsValue(body: Stmt[] | Expr, name: string): boolean {
 	let found = false;
-	const inClosure = (fn: Parameters<typeof collectClosureFreeVars>[1], self: string | undefined) => {
-		const free = new Set<string>();
-		collectClosureFreeVars(new Set(), fn, self, free);
-		return free.has(name);
-	};
 	walkerB(
-		(st, process) => {
-			if (found)
-				return false;
-			if (st.type === 'function_decl') {
-				found = inClosure(st, st.name);
-				return false;
-			}
-			return process(st);
-		},
+		(st, process) => found ? false : st.type === 'function_decl' ? (found = closureFree(st).has(name), false) : process(st),
 		(e, process) => {
 			if (found)
 				return false;
-			if (e.type === 'identifier') {
+			if (e.type === 'identifier')
 				found = e.name === name;
-				return false;
-			}
-			if (e.type === 'arrow' || e.type === 'function') {
-				found = inClosure(e, e.type === 'function' ? e.name : undefined);
-				return false;
-			}
-			if (e.type === 'call' && e.callee.type === 'identifier' && e.callee.name === name) {
+			else if (e.type === 'arrow' || e.type === 'function')
+				found = closureFree(e).has(name);
+			else if (e.type === 'call' && e.callee.type === 'identifier' && e.callee.name === name)
 				found = e.arguments.some(a => namesSelfAsValue(a as Expr, name));
-				return false;
-			}
-			return process(e);
+			else
+				return process(e);
+			return false;
 		}
 	).body(body);
 	return found;
 }
 
-// A closure's free variables: its body's and its parameter defaults', since a default runs inside the callee.
-function collectClosureFreeVars(outer: Set<string>, fn: { params: JS.Param<Type>[]; rest?: JS.Rest<Type>; body?: Stmt[] | Expr }, selfName: string | undefined, free: Set<string>) {
-	const body = fn.body ?? [];
-	const bound = new Set([...outer, ...ownBoundNames(paramNames(fn.params, fn.rest), body, selfName)]);
-	collectFreeVars(bound, body, free);
-	for (const p of fn.params)
-		if (p.default)
-			collectFreeVars(bound, p.default, free);
-}
-
-// Names this body declares that a nested closure captures AND something assigns -- the locals that must
-// become shared heap holders rather than plain wasm locals. A closure captures a BINDING in JS, not a
-// value: `let n = 1; const f = () => n + 1; n = 4;` must have `f()` see 4, and a write inside the
-// closure must be visible outside it (the counter idiom). Copying the value into the env struct gives
-// neither. `ensureForwardHolder` already builds exactly the right thing -- and `emitClosureLiteral`
-// already captures the HOLDER rather than its contents -- but only ever fired for a name used before its
-// own declaration ran, so a local declared before the closure was silently captured by value.
-// Deliberately over-approximate: a name assigned anywhere at all (including only inside the closure, or
-// only before it is ever captured) is holder-backed, and an outer-scope name reaching the set is harmless
-// because the answer is only ever consulted when DECLARING a local of that name here. A needless holder
-// costs an allocation and an indirection; a missing one is a wrong answer.
-// Not yet applied to a captured+mutated PARAMETER, which has the same problem and no `var_decl` to hang
-// the holder off.
+// The names this body declares that a nested closure captures AND something assigns: shared heap holders, since a closure
+// captures the BINDING (`let n = 1; const f = () => n; n = 4;` sees 4). Over-approximate: a needless holder costs an indirection.
+// A `for (let i ...)` binding is per iteration, so each closure's copy is right; a `var`'s one shared binding is a holder.
 function collectCapturedMutables(body: Stmt[]): Set<string> {
-	const captured	= new Set<string>();
-	const assigned	= new Set<string>();
-	// A `for (let i = ...)` binding is PER-ITERATION in JS: every iteration gets a fresh one, so each
-	// closure created in the loop captures its own. Copying the value into the env -- what capture already
-	// did -- is therefore already right, and one shared holder is actively wrong: every closure would then
-	// see the loop's final value. `Promise.all`'s own `promises[i].then(v => { values[i] = v; })` is
-	// exactly this, and a shared holder had it writing past the end of `values`.
-	// (A body that REASSIGNS the variable after creating the closure still isn't modelled -- that needs a
-	// fresh holder per iteration, which is the real general answer.)
-	// `var` is the exact opposite and must NOT be listed here: it is function-scoped, so the whole loop
-	// shares ONE binding and every closure sees its final value -- the shared holder is the correct answer
-	// there, and copying by value gave `for (var i...) fs.push(() => i)` a 0 where JS says 3.
-	const perIteration = new Set<string>();
+	const captured		= new Set<string>(), assigned = new Set<string>(), perIteration = new Set<string>();
+	const nested		= (fn: Closure) => {
+		closureFree(fn).forEach(n => captured.add(n));
+		walkerB(undefined, (x, p) => (noteAssignExpr(x, assigned), p(x))).body(fn.body ?? []);
+	};
 	walkerB(
 		(st, process) => {
-			// A nested function is a closure boundary: everything free in it is captured from here (or
-			// from further out, which is harmless -- an outer name simply isn't one of our locals).
-			if (st.type === 'for' && st.init && !Array.isArray(st.init) && st.init.type === 'var_decl' && st.init.kind !== 'var') {
-				for (const d of st.init.declarations)
-					if (typeof d.name === 'string')
-						perIteration.add(d.name);
-			}
-			if (st.type === 'function_decl') {
-				const nested = st.body ?? [];
-				collectFreeVars(ownBoundNames(paramNames(st.params, st.rest), nested, st.name), nested, captured);
-				walkerB(undefined, (e, p) => { noteAssignExpr(e, assigned); return p(e); }).statements(nested);
-				return false;
-			}
-			return process(st);
+			if (st.type === 'for' && st.init && !Array.isArray(st.init) && st.init.type === 'var_decl' && st.init.kind !== 'var')
+				st.init.declarations.forEach(d => typeof d.name === 'string' && perIteration.add(d.name));
+			return st.type === 'function_decl' ? (nested(st), false) : process(st);
 		},
 		(e, process) => {
-			if (e.type === 'arrow' || e.type === 'function') {
-				const nested = e.body ?? [];
-				collectFreeVars(ownBoundNames(paramNames(e.params, e.rest), nested, e.type === 'function' ? e.name : undefined), nested, captured);
-				// ...and assignments INSIDE the closure count too: `() => { n = n + 1; }` is the whole point.
-				walkerB(undefined, (x, p) => { noteAssignExpr(x, assigned); return p(x); }).body(nested);
-				return false;
-			}
-			// An object literal's METHOD closes over this scope exactly as an arrow does -- a `defineProperty` accessor
-			// (`get() { resolving = true; ... }`) mutates the very locals it closes over, and a copy loses the write.
+			if (e.type === 'arrow' || e.type === 'function')
+				return nested(e), false;
+			// An object literal's METHOD closes over this scope as an arrow does (a `defineProperty` accessor mutating its locals).
 			if (e.type === 'object')
-				for (const m of e.properties)
-					if (m.type === 'method' || m.type === 'get' || m.type === 'set') {
-						const nested = m.body ?? [];
-						collectFreeVars(ownBoundNames(paramNames(m.params, m.rest), nested, undefined), nested, captured);
-						walkerB(undefined, (x, p) => { noteAssignExpr(x, assigned); return p(x); }).statements(nested);
-					}
+				e.properties.forEach(m => (m.type === 'method' || m.type === 'get' || m.type === 'set') && nested(m));
 			noteAssignExpr(e, assigned);
 			return process(e);
 		}
@@ -2058,24 +1981,6 @@ function substituteEarlierParamRefs(e: Expr, rename: ReadonlyMap<string, string>
 	}
 }
 
-// A CLOSURE default (`sort(compareFn = (a, b) => ...)`) is judged by what it CAPTURES: only its own params and the earlier
-// params the call site already passes -- anything else is an enclosing local re-emitted out of scope.
-function closureDefaultIsSelfContained(e: Expr, earlierNames?: ReadonlySet<string>): boolean {
-	if (e.type !== 'arrow' && e.type !== 'function')
-		return false;
-	const bound = new Set<string>(earlierNames);
-	for (const p of e.params)
-		if (typeof p.key === 'string')
-			bound.add(p.key);
-	let ok = true;
-	walker(undefined, (x, process) => {
-		if (x.type === 'identifier' && !bound.has(x.name))
-			ok = false;
-		return process(x);
-	}).body(e.body);
-	return ok;
-}
-
 // A default is re-emitted verbatim at each omitted call site (`emitCallArgs`), so it may reference only literals or an *earlier*
 // parameter (`len = b.length`); anything else would resolve against the call site's scope, so it is applied in the callee instead.
 function isReemittableDefault(e: Expr, earlierNames?: ReadonlySet<string>): boolean {
@@ -2083,7 +1988,8 @@ function isReemittableDefault(e: Expr, earlierNames?: ReadonlySet<string>): bool
 		// `undefined` is a language CONSTANT, not a name to resolve: self-contained and side-effect-free, which is the property this predicate actually tests.
 		// The AST has a `null` literal but no `undefined` one, so it arrives as an identifier -- and `defaultsWithImplicitUndefined` synthesizes exactly this node.
 		|| (e.type === 'identifier' && e.name === 'undefined')
-		|| closureDefaultIsSelfContained(e, earlierNames)
+		// A closure, by what it reads from outside: only the earlier parameters the call site already has.
+		|| ((e.type === 'arrow' || e.type === 'function') && [...closureFree(e)].every(n => !!earlierNames?.has(n)))
 		|| (e.type === 'array' && e.elements.every(el => el !== undefined && el.type !== 'spread' && isReemittableDefault(el, earlierNames)))
 		// Same reasoning as the array case, and `{}` -- an all-defaults options bag -- is the common one.
 		|| (e.type === 'object' && e.properties.every(pr => pr.type === 'field' && typeof pr.key !== 'object' && !!pr.value && isReemittableDefault(pr.value, earlierNames)))
@@ -2496,7 +2402,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			// A namespace import binds a compile-time namespace, not a value, so it never needs a capture slot:
 			// without this, `TS.parse(...)` inside a callback read as a free variable and threw "unresolved identifier".
 			|| !!moduleScopeOf(homeModule)?.namespace(name)
-			// A class name is a declaration, not a value, resolved at its own use site -- `collectFreeVars` cannot
+			// A class name is a declaration, not a value, resolved at its own use site -- `freeIn` cannot
 			// tell the two apart, so without this ANY closure or nested function mentioning a module-level class threw.
 			|| moduleScopeOf(homeModule)?.decl(name)?.type === 'class_decl'
 			// An ENUM name, for the same reason: every read of it folds to a constant at its own site.
@@ -5100,7 +5006,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			throw "'Object.defineProperty': a descriptor's `value` must be a plain property";
 		if (!valueExpr && !getProp && !setProp)
 			throw "'Object.defineProperty': the descriptor needs a `value`, a `get` or a `set`";
-		if ([getProp, setProp].some(p => p?.type === 'method' && usesThis(p)))
+		if ([getProp, setProp].some(p => p?.type === 'method' && closureFree(p).has('this')))
 			throw "'Object.defineProperty': an accessor method that uses `this` is not supported -- its `this` is the target, which a closure cannot bind";
 		const emitHalf = (p: NonNullable<typeof getProp>, want: W.Type) => {
 			if (p.type === 'method')
@@ -5733,15 +5639,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			params.push({key: e.rest.key, wtype: wt, tsType: e.rest.typeAnnotation });
 		}
 
-		const free = new Set<string>();
-		collectClosureFreeVars(new Set(), e, e.name, free);
+		const free = closureFree(e);
 
 		if (e.type !== 'arrow' && free.has('this') && !thisHolder)
 			throw "'this' inside a function expression is not supported -- only an arrow function's lexical 'this' is";
 
 		for (const name of free) {
 			// `undefined`/`NaN`/`Infinity` are always-valid identifiers `case 'identifier'` handles directly (`isNullLiteral` for
-			// `undefined` specifically), not real bindings `collectFreeVars` should have marked for capture/resolution -- treating
+			// `undefined` specifically), not real bindings `freeIn` should have marked for capture/resolution -- treating
 			// them as free vars made any nested closure using one (e.g. `extra !== undefined`) throw here unconditionally.
 			if (name === 'undefined' || name === 'NaN' || name === 'Infinity' || (name === 'this' && thisHolder))
 				continue;
@@ -6594,14 +6499,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				// read (`emitFieldRead`) already called it, and the copy's slot stays empty.
 				const copiesGetter = (f: { name: string }) => f.name.startsWith('#get:') || f.name.startsWith('#set:');
 				// A method that uses `this` captures a holder the finished object is stored into, since the closure is built before the struct it belongs to.
-				const thisHolder = [...sources.values()].some(c => c.some(s => s.method && usesThis(s.method)))
+				const thisHolder = [...sources.values()].some(c => c.some(s => s.method && closureFree(s.method).has('this')))
 					? { holder: declareHolder(ctx, `#this$${ctx.tempCounter++}`, owner.thisWtype!, owner.thisTsType!), tsType: owner.thisTsType! }
 					: undefined;
 				const emitOne	= (src: FieldSource, f: { name: string; wtype: W.Type }) => {
 					if (!src.expr && !src.method && copiesGetter(f))
 						return void ctx.emitDefaultValue(f.wtype, types, toValType);
 					if (src.method) {
-						coerceTop(emitClosureLiteral(src.method, ctx, false, f.wtype, usesThis(src.method) ? thisHolder : undefined), ctx, f.wtype);
+						coerceTop(emitClosureLiteral(src.method, ctx, false, f.wtype, closureFree(src.method).has('this') ? thisHolder : undefined), ctx, f.wtype);
 					} else if (src.expr) {
 						// The field's declared type is the value's context: a nested literal picks its union member from it.
 						ctx.withContext(owner.fieldDeclaredType(f.name, global), () => emitAs(src.expr!, ctx, f.wtype));
@@ -7178,14 +7083,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// statement in its list that mentions it -- closure creation has no side effects, and forward holders cover later siblings.
 	function emitStmts(stmts: readonly Stmt[], ctx: FunctionContext) {
 		const pending = new Map(stmts.flatMap(s => s.type === 'function_decl' && s.body ? [[s.name, s] as const] : []));
-		const freeNames = (s: Stmt) => {
-			const free = new Set<string>();
-			collectFreeVars(new Set(), [s], free);
-			return free;
-		};
 		const materialize = (fn: Extract<Stmt, { type: 'function_decl' }>) => {
 			pending.delete(fn.name);
-			const free = freeNames(fn);
+			const free = freeIn([fn]);
 			for (const other of [...pending.values()])
 				if (pending.has(other.name) && free.has(other.name))
 					materialize(other);
@@ -7193,7 +7093,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		};
 		for (const st of stmts) {
 			if (pending.size) {
-				const free = freeNames(st);
+				const free = freeIn([st]);
 				for (const fn of [...pending.values()])
 					if (fn !== st && pending.has(fn.name) && free.has(fn.name))
 						materialize(fn);
