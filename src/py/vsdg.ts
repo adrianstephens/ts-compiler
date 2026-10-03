@@ -1,27 +1,11 @@
 // ===================================================================
 //  The Python half of the language-neutral VSDG.
 // ===================================================================
-// Same three pieces as ts/vsdg.ts: `PYDialect` (walk + the few shape facts the core asks about),
-// `PYBuilder` (this AST's tags onto graph nodes), `PYEmitter` (graph nodes back onto this AST,
-// printed by py/printer.ts) -- plus, at the bottom, the pipeline entry points this language exposes:
-//
-//     BuildVSDG(ast) -> Optimize(graph) -> applyGlobalCodeMotion(graph) -> BuildProgram(graph, ...)
-//
-// Where Python's AST differs from TS's, the difference is absorbed here rather than in the core:
-//
-//   * assignment is a STATEMENT, not an expression, so a mutation rebuilds as its own statement
-//     (rebuildMutationStatement) and an assignment read as a VALUE only exists as `(x := v)`;
-//   * there is no declaration syntax -- the FIRST assignment to a name in a function IS its
-//     declaration (see bindTarget), and there is no `let x;` to fall back on;
-//   * control-flow bodies are statement ARRAYS (common.ts's `If<Expr, Stmt[]>`), which is why the
-//     core's statement constructors take arrays and this dialect passes them straight through;
-//   * no `switch`, no do-while, no postfix `++/--`, no destructuring, no `try` without `except`.
-//
-// Deliberately NOT modelled yet (each degrades to a `passthru` that prints verbatim, so output stays
-// correct but the construct's interior isn't scheduled):
-//   `with`, `del`, `assert`, `global`/`nonlocal`, `import`-bound names inside the interior,
-//   `for`/`while` `else:` clauses, multiple `except` clauses, `try/else`, class bases beyond the
-//   first, decorators, comprehensions' own loop structure, and parameter defaults.
+// The same three pieces as ts/vsdg.ts (`PYDialect`, `PYBuilder`, `PYEmitter`, printed by py/printer.ts) and the pipeline entry points.
+// Where Python differs: assignment is a STATEMENT (a value only as `(x := v)`); the FIRST assignment to a name is its declaration (`bindTarget`);
+//   bodies are statement ARRAYS, passed straight through; no switch, do-while, postfix `++/--`, destructuring, or `try` without `except`.
+// Not modelled, printed verbatim: `with`, `del`, `assert`, `global`/`nonlocal`, loop `else:`, several `except`s, `try/else`, class bases past
+//   the first, decorators, comprehensions' loop structure, parameter defaults.
 
 import * as PY from './py-parser';
 import { printer as PYPrinter } from './printer';
@@ -63,9 +47,7 @@ const pyDialect: Dialect<Expr, Stmt, Expr> = {
 		return pyPrinter().statement(s);
 	},
 	isCSEUnsafe(node: N): boolean {
-		// A `list`/`set`/`dict`/comprehension gets a fresh identity per evaluation, and `tuple` at
-		// least a fresh `is`-identity, so merging two textually-identical occurrences changes what
-		// the program observes. An `index`/`member` read can see an intervening mutation.
+		// A `list`/`set`/`dict`/comprehension is a fresh identity per evaluation, a `tuple` at least for `is`; an `index`/`member` read may see a mutation.
 		return node.type === 'floating' && ['list', 'set', 'dict', 'tuple', 'index', 'listcomp', 'setcomp', 'dictcomp', 'genexp'].includes(node.expr.type);
 	},
 	foldable(e) {
@@ -80,14 +62,13 @@ const pyDialect: Dialect<Expr, Stmt, Expr> = {
 			:	e.type === 'compare' && e.ops.length === 1 ? MaybeLiteral(calcCompare(e.ops[0], ops[0], ops[1]))
 			:	undefined;
 	},
-	// A plain literal's value is its own `value`; an f-string is a literal with interpolation holes and
-	// so is NOT a constant, and an imaginary number is just its own value.
+	// A plain literal's value is its `value`; an f-string has interpolation holes and is NOT a constant.
 	literalValue(e) {
 		return	e.type === 'imaginary' ? e.value
 			:	e.type === 'literal' && !Array.isArray(e.value) ? e.value
 			:	undefined;
 	},
-	// Python falsiness of a constant -- its `0`/`''`/`False` coincide with js's, and the kinds that don't (a list, a tuple) are never `literalValue`'s answer in the first place.
+	// Python falsiness of a constant: `0`/`''`/`False` coincide with js's, and the kinds that differ are never constants.
 	truthy(value) {
 		return !!value;
 	},
@@ -101,8 +82,7 @@ const pyDialect: Dialect<Expr, Stmt, Expr> = {
 //  Lowering
 // ===================================================================
 
-// Flattens this language's own parameter list into the core's neutral slots. `/` and a bare `*` are
-// positional-only / keyword-only MARKERS, not parameters, and carry no name.
+// This language's parameter list as the core's slots; `/` and a bare `*` are markers, not parameters.
 function paramSlots(params: readonly PY.Param[] | undefined): ParamSlot[] | undefined {
 	if (!params)
 		return undefined;
@@ -117,9 +97,7 @@ function posCall(callee: string, args: Expr[]): Expr {
 	return { type: 'call', callee: Identifier(callee), arguments: args.map(value => ({ kind: 'pos', value })) } as Expr;
 }
 
-// An f-string's interpolated expressions are the only nested AST a literal can carry. Both the
-// builder (which threads them into the node as value inputs) and the emitter (which puts the
-// resolved ones back) have to walk them in exactly the same order.
+// An f-string's interpolations, the only nested AST a literal carries: builder and emitter walk them in the same order.
 function forEachFStringField(parts: readonly PY.FStringPart[], fn: (e: Expr, port: number) => void): void {
 	let port = 0;
 	for (const part of parts) {
@@ -169,8 +147,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 			}
 
 			case 'return': {
-				// Same shape as TS's own return: the marker carries its value at port 1, and
-				// `exited` makes an enclosing `if` build a real gamma around this path.
+				// As TS's return: the marker carries its value at port 1; `exited` makes an enclosing `if` build a real gamma.
 				if (s.argument)
 					recurse.expression(s.argument);
 				const marker = this.makeMarker('EARLY_RETURN_MARKER');
@@ -181,8 +158,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 				return false;
 			}
 			case 'throw': {
-				// A bare `raise` re-raises the active exception and carries no value at all, and
-				// `raise X from Y` has a second expression this doesn't model -- both stay verbatim.
+				// A bare `raise` re-raises with no value, and `raise X from Y` has an unmodelled second expression: both verbatim.
 				if (!s.argument || s.cause) {
 					console.log(`not handling raise with ${!s.argument ? 'no argument' : 'a cause'}`);
 					return this.lowerVerbatim(s, process);
@@ -215,16 +191,14 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 				return false;
 			}
 			case 'augassign': {
-				// `op` arrives as the whole `+=`; common.ts's Assign stores the BASE operator (`+`),
-				// so nothing downstream has to slice the `=` back off.
+				// `op` arrives as `+=`; the converged Assign stores the BASE operator (`+`).
 				recurse.expression(s.target);
 				recurse.expression(s.value);
 				this.bindTarget(s.target, s.value, this.getExprNode(s.value), s.op.slice(0, -1) as PY.binaryOps, undefined);
 				return false;
 			}
 			case 'annassign': {
-				// A bare `x: int` declares a name with no value -- there is no VSDG binding to make
-				// and no statement to elide, so it stays verbatim.
+				// A bare `x: int` declares a name with no value: nothing to bind or elide, so verbatim.
 				if (s.value === undefined || s.target.type !== 'identifier') {
 					this.lowerVerbatim(s, process);
 					return false;
@@ -238,9 +212,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 				recurse.expression(s.test);
 				const test		= this.getExprNode(s.test);
 				const parent	= this.getState();
-				// Each branch gets its own scope -- not because Python has block scoping (it
-				// doesn't) but because reconcileVariables merges the two branches' BINDINGS, and a
-				// shared scope would already hold the merged answer for both.
+				// Each branch gets its own scope (Python has no block scoping): reconcileVariables merges the two branches' BINDINGS.
 				const trueState		= this.walkBranch(parent, () => { for (const st of s.consequent) recurse.statement(st); });
 				const falseState	= this.walkBranch(parent, () => { for (const st of s.alternate ?? []) recurse.statement(st); });
 				this.mergeState(parent, test, trueState, falseState);
@@ -248,8 +220,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 				return false;
 			}
 			case 'while': {
-				// `else:` on a loop runs iff the loop wasn't broken out of -- a second, non-loop exit
-				// path the graph has no anchor for.
+				// A loop's `else:` runs iff it was not broken out of: an exit path the graph has no anchor for.
 				if (s.orelse?.length) {
 					console.log(`not handling while-else`);
 					return this.lowerVerbatim(s, process);
@@ -267,9 +238,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 			}
 
 			case 'try': {
-				// One typed handler and no `else:` -- the same shape TS's own try/catch uses, plus
-				// the matched type. More than one handler, `except*`, or `else:` need structure the
-				// `except` anchor doesn't have, so those stay verbatim.
+				// One typed handler and no `else:`, as TS's try/catch plus the matched type; anything more stays verbatim.
 				const handler = s.handlers[0];
 				if (!handler || s.handlers.length > 1 || handler.star || s.orelse?.length) {
 					console.log(`not handling ${s.handlers.length > 1 ? 'multiple except clauses' : 'try with an else clause'}`);
@@ -277,17 +246,14 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 				}
 				const parent = this.getState();
 
-				// Each branch gets its own start marker between the shared predecessor and its own
-				// walk, or a branch's first statement needing a real gamma/mu/except anchor would
-				// share the exact same predecessor as the `except` node itself.
+				// Each branch gets its own start marker after the shared predecessor, or a branch's first anchor would share `except`'s.
 				const startMarker = (pred: N, tag: 'TRY_START' | 'CATCH_START' | 'FINALLY_START') => {
 					const marker = this.makeMarker(tag);
 					connectValue(pred, 0, marker, 0);
 					return marker;
 				};
 
-				// Two nested scopes per branch, matching TS: an outer one the reconciliation reads,
-				// and an inner one flushed first so a name bound in the suite itself doesn't leak out.
+				// Two scopes per branch, as in TS: an outer one the reconciliation reads, an inner one flushed first.
 				this.setState(new Scope(parent.scope), startMarker(parent.end, 'TRY_START'));
 				this.scope = new Scope(this.scope);
 				for (const stmt of s.body)
@@ -304,14 +270,12 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 				this.scope = this.scope.closeAndFlush()!;
 				const catchState = this.getState();
 
-				// Unlike an `if`'s gamma this is never skipped, even with no real effect in either
-				// branch -- try/except is observable syntax in its own right.
+				// Never skipped like an `if`'s gamma: try/except is observable syntax.
 				const exc = this.makeNode({ type: 'except' });
 				if (handler.param !== undefined)
 					exc.catchParam = handler.param;
 				if (handler.type) {
-					// Threaded through so a referenced name keeps a real reader; the node itself is a
-					// side channel (see collectProtectedNodeIds), resolved at print time.
+					// Threaded so a referenced name keeps a reader; the node is a side channel (`collectProtectedNodeIds`), resolved at print time.
 					recurse.expression(handler.type);
 					exc.handlerTypeNodeId = this.getExprNode(handler.type).id;
 				}
@@ -320,9 +284,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 				connectValue(catchState.end, 0, exc, 2);
 				this.end = exc;
 
-				// Per-variable merges, mirroring TS: neither branch's binding is ever cleared --
-				// there is no printable condition for a ternary, so each branch keeps (and
-				// force-prints) its own `x = ...;` and the merge just connects both as dependencies.
+				// Per-variable merges as in TS: no binding cleared, each branch force-printing its own `x = ...`, the merge connecting both.
 				this.scope = parent.scope;
 				const diverged = new Set([...tryState.scope.bindings.keys(), ...catchState.scope.bindings.keys()]);
 				for (const name of diverged) {
@@ -341,8 +303,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 					}
 				}
 
-				// `finally` runs after the merge, walked like ordinary code -- reconstructed as a real
-				// `finally` clause, real Python semantics guarantee the rest on their own.
+				// `finally` runs after the merge, walked as ordinary code and reconstructed as a real `finally` clause.
 				let finallyExited = false;
 				let finallyBrokeOut = false;
 				if (s.finalizer?.length) {
@@ -367,9 +328,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 
 			case 'import':
 			case 'importfrom': {
-				// Each bound name gets a declKind-less 'var' node (the same shape an undeclared
-				// global gets), anchored into the state chain by a mutation marker right after the
-				// verbatim import, so GCM can never place a read of it earlier than the import.
+				// Each bound name gets a declKind-less 'var' node, anchored after the verbatim import so GCM never reads it earlier.
 				process(s);
 				this.connectEnd(this.makeNode({type: 'passthru', stmt: s}));
 				const names = s.names === '*' ? [] : s.names;
@@ -382,32 +341,26 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 			}
 
 			case 'expression':
-				// A bare literal statement is a docstring (or a directive), not dead arithmetic --
-				// Python has no other way to write one, so it prints verbatim.
+				// A bare literal statement is a docstring (or a directive): verbatim.
 				if (s.expression.type === 'literal')
 					return this.lowerVerbatim(s, process);
 				break;
 
 			default:
-				// A construct this dialect doesn't model (`with`, `del`, `assert`, `pass`,
-				// `global`/`nonlocal`, ...) prints verbatim, so output stays correct and nothing
-				// inside it runs twice.
+				// An unmodelled construct (`with`, `del`, `assert`, `pass`, `global`/`nonlocal`) prints verbatim.
 				this.lowerVerbatim(s, process);
 				return false;
 		}
 		return process(s);
 	}
 
-	// Turns one assignment target into a binding. The core's `var` tag means "the declaration of a
-	// name" and its `mutation` tag means "an effect that rebinds one" -- Python spells both the same,
-	// so which one this is has to come from whether the name is already bound (there is no
-	// declaration syntax to read it off), and a first assignment is what creates a function local.
+	// One assignment target as a binding: Python spells a declaration (`var`) and a rebinding (`mutation`) alike, so whether the name is already
+	// bound decides; a first assignment creates a function local.
 	private bindTarget(target: Expr, valueExpr: Expr, value: N, operator: PY.binaryOps | undefined, annotation: Expr | undefined) {
 		if (target.type === 'identifier' && operator === undefined) {
 			const fresh = this.scope.get(target.name) === undefined;
 			if (fresh) {
-				// A declaration: an annassign carries the annotation through to the print site; a
-				// plain first assignment has none.
+				// A declaration: an annassign's annotation travels to the print site.
 				const varNode = this.makeNode({ type: 'var', name: target.name });
 				connectValue(value, 0, varNode, 0);
 				varNode.declKind		= annotation ? 'annotate' : 'assign';
@@ -417,40 +370,25 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 			}
 		}
 
-		// A reassignment (or any member/index target). The payload is common.ts's own converged
-		// Assign shape, so the base operator is stored rather than re-derived by slicing `+=`.
+		// A reassignment, or a member/index target, on the converged Assign shape with its base operator.
 		const node = this.makeNode({ type: 'mutation', expr: Assign<Expr, PY.binaryOps>(target, valueExpr, operator) as unknown as Expr });
 		node.plainAssign = operator === undefined;
 		connectValue(this.getExprNode(target), 0, node, 0);
 		connectValue(value, 0, node, 1);
 		if (target.type === 'identifier') {
-			// Assigning a name captured from an enclosing function escapes this function, so a
-			// same-region consumer count can't decide it's dead (see isLocalToCurrentFunction).
+			// Assigning a name captured from an enclosing function escapes it: no same-region consumer count decides (`isLocalToCurrentFunction`).
 			if (!this.scope.isLocalToCurrentFunction(target.name))
 				node.forcedPrint = true;
 			this.rebindVar(target.name, node);
 		} else {
-			// A member/index target mutates something outside this pass's scope tracking -- nothing
-			// reads it back through scope, so it must print regardless of consumer count.
+			// A member/index target mutates outside this pass's scope tracking: it prints whatever its consumer count.
 			node.forcedPrint = true;
 			this.threadMutation(node);
 		}
 	}
 
-	// `for x in it: body` has no single exit CONDITION the graph could rotate a loop around --
-	// exhaustion is signalled by raising -- so it becomes the same explicit-iterator loop TS's own
-	// for-of desugar builds, with a per-loop sentinel object standing in for the exception:
-	//
-	//     __missN = object()
-	//     __itN   = iter(<iter>)
-	//     while True:
-	//         __rN = next(__itN, __missN)
-	//         if __rN is __missN: break
-	//         <target> = __rN
-	//         <body>
-	//
-	// Deliberately NOT a try/except: the target would then be bound in only one of `except`'s two
-	// branches, and no merge can reconcile a name that exists on just one side.
+	// `for x in it:` has no exit CONDITION (exhaustion raises): TS's explicit-iterator loop with a sentinel, not a try/except (binding the target on one
+	// branch only): `__missN = object(); __itN = iter(it); while True: __rN = next(__itN, __missN); if __rN is __missN: break; x = __rN; body`.
 	private lowerFor(recurse: Recurse<Expr, Stmt>, s: PY.Stmt & { type: 'for' }) {
 		const suffix		= String(this.freshId());
 		const missName		= `__miss${suffix}`;
@@ -473,9 +411,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 		this.buildLoop(recurse, Literal(true), () => { for (const st of body) recurse.statement(st); }, false);
 	}
 
-	// Heritage and each method body, resolved through VSDG rather than left in the verbatim stmt --
-	// each resolved value gets a REAL edge into `anchor`, since classInfo's own NodeIds are invisible
-	// to ordinary consumer counting and the value would otherwise look unused.
+	// Heritage and method bodies resolved through VSDG, each with a REAL edge into `anchor` (classInfo's NodeIds are invisible to consumer counting).
 	buildClass(recurse: Recurse<Expr, Stmt>, anchor: N, s: PY.Stmt & { type: 'classdef' }): ClassInfo {
 		let port = 1;
 		let superClassNodeId: NodeId | undefined;
@@ -483,8 +419,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 			recurse.expression(base.value);
 			const node = this.getExprNode(base.value);
 			connectValue(node, 0, anchor, port++);
-			// Only the first base is spliced back at print time; the rest keep their original AST
-			// (the edge still keeps whatever they reference alive).
+			// Only the first base is spliced back at print time; the edge keeps what the others reference alive.
 			superClassNodeId ??= node.id;
 		}
 		return {
@@ -505,9 +440,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 			case 'literal': {
 				process(e);
 				const node = this.makeExprNode(e);
-				// An f-string is a literal WITH interpolation holes, so it is not a constant (see the
-				// dialect's `literalValue`) -- but its fields still have to be real value inputs, or a
-				// binding one reads keeps no consumer and gets elided as dead.
+				// An f-string is no constant, but its fields are real value inputs, or a binding one reads would be elided.
 				if (Array.isArray(e.value))
 					forEachFStringField(e.value, (expr, port) => {
 						recurse.expression(expr);
@@ -555,8 +488,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 				return false;
 			}
 			case 'namedexpr': {
-				// `(x := v)` assigns AND yields -- a mutation whose value is the right-hand side, so
-				// the target is a name (never a member/index) and there is no old-value port at all.
+				// `(x := v)` assigns AND yields: a mutation valued as its right-hand side, its target a name, with no old-value port.
 				process(e);
 				const node = this.makeExprNode(e, 'mutation');
 				connectValue(this.getExprNode(e.value), 0, node, 1);
@@ -596,8 +528,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 				return false;
 			}
 			case 'call': {
-				// Same convention as TS: a callee named `pure...` is the placeholder for real purity
-				// analysis; every other call is an effect and threads the state chain.
+				// As in TS, a callee named `pure...` stands in for purity analysis; every other call is an effect.
 				process(e);
 				const pure = e.callee.type === 'identifier' && e.callee.name.startsWith('pure');
 				const node = pure ? this.makeExprNode(e) : this.makeExprNode(e, 'effect');
@@ -649,9 +580,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 			case 'listcomp':
 			case 'setcomp': {
 				process(e);
-				// The `for`/`if` clauses' TARGET is a binding, not a value, so only `iter`/`test` are
-				// threaded -- but they still have to be, or a variable the comprehension reads could
-				// be elided as unused.
+				// A clause's TARGET is a binding, so only `iter`/`test` are threaded, which they must be, or a variable they read is elided.
 				const node = this.makeExprNode(e);
 				let port = 0;
 				connectValue(this.getExprNode(e.elt), 0, node, port++);
@@ -668,8 +597,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 				return false;
 			}
 			case 'lambda': {
-				// The same 'function' entry a `def` gets, with `.expr` set -- one expression body,
-				// printed verbatim as a value.
+				// A `def`'s 'function' entry with `.expr` set: one expression body, printed verbatim as a value.
 				recurse.expression(e.body);
 				const entry = this.buildFunctionBody(recurse, paramSlots(e.params), e.body);
 				entry.expr = e;
@@ -679,9 +607,7 @@ export class PYBuilder extends VSDGBuilder<Expr, Stmt, Expr> {
 			}
 
 			default:
-				// An expression form this dialect doesn't model: descend into it for any nested
-				// expression, but treat the whole thing as an effect (the only safe assumption about
-				// a value whose evaluation order and purity are unknown).
+				// An unmodelled expression form: descended into, but an effect, the only safe assumption about unknown order and purity.
 				console.log(`not handling expression ${(e as {type: string}).type}`);
 				process(e);
 				this.connectEnd(this.makeExprNode(e, 'effect'));
@@ -708,15 +634,12 @@ export class PYEmitter extends Emitter<Expr, Stmt, Expr> {
 		super(graph, pyDialect, blocks, blockIds);
 	}
 
-	// ---- statement constructors ----
-	// Python's suites ARE statement lists, so the arrays the core hands over go straight in. Only an
-	// EMPTY one needs spelling out -- Python has no `{}` to say "nothing here".
+	// Python's suites ARE statement lists, passed straight in; only an EMPTY one needs spelling (no `{}`).
 
 	makeBlock(body: Stmt[] | undefined): Stmt[] | undefined { return body === undefined ? undefined : body.length ? body : [{ type: 'pass' }]; }
 
 	makeIf(test: Expr, consequent: Stmt[], alternate?: Stmt[]): Stmt {
-		// An empty `else:` prints as nothing at all (see the printer's own elseChain), which is
-		// exactly right here -- Python has no declaration for a block to be needed for.
+		// An empty `else:` prints as nothing (the printer's elseChain).
 		return { type: 'if', test, consequent: this.makeBlock(consequent), alternate } as Stmt;
 	}
 	makeSwitch(): Stmt							{ throw new Error('vsdg/py: Python has no switch'); }
@@ -759,17 +682,15 @@ export class PYEmitter extends Emitter<Expr, Stmt, Expr> {
 		return { ...(node.stmt as Stmt & { type: 'funcdef' }), body } as Stmt;
 	}
 
-	// The first assignment to a name IS its declaration in Python, so a `var` node prints as a plain
-	// assignment -- there is no `let x;` form and nothing to leave bare.
+	// The first assignment IS the declaration in Python: a `var` prints as a plain assignment.
 	emitNamedSlot(name: string, node: N): Stmt | undefined {
 		this.names.add(name);
 
 		if (node.type === 'var') {
 			if (!node.inputs[0])
 				return undefined;
-			// Nothing reads the name: either the value is dead, or its own reader can recompute the
-			// pure initializer inline. A forced sibling reads it by name, and then the binding has
-			// to exist -- `name = None` is the only way Python says "declared, no value yet".
+			// Nothing reads the name (dead, or its reader recomputes the pure initializer). A forced sibling reads it by name, so it must exist:
+			// `name = None` is Python's "declared, no value yet".
 			if (!this.graph.hasRealConsumer(node) || (this.isInlinableVarDecl(node) && !this.hasForcedSibling(name, node.id)))
 				return this.hasForcedSibling(name, node.id)
 					? { type: 'assign', targets: [Identifier(name)], value: Literal(null) } as Stmt
@@ -866,14 +787,12 @@ export class PYEmitter extends Emitter<Expr, Stmt, Expr> {
 		return Literal(null);
 	}
 
-	// An assignment read as a VALUE. Python has no `x = v` expression, so the only shape that could
-	// reach here is `(x := v)`.
+	// An assignment read as a VALUE: in Python only `(x := v)`.
 	rebuildMutationValue(node: NOf<'mutation'>): Expr {
 		const e = node.expr;
 		if (e.type === 'namedexpr')
 			return { ...e, value: this.resolveOperand(node.id, 1) };
-		// The converged Assign payload a plain `x = v` was lowered onto: read as a value it is just
-		// the right-hand side (a compound `x += v` has no value form in Python at all).
+		// The converged Assign of a plain `x = v`: as a value, its right-hand side (`x += v` has no value form).
 		const assign = e as unknown as { type: 'assign', operator?: PY.binaryOps };
 		if (assign.type === 'assign') {
 			const right = this.resolveOperand(node.id, 1);
@@ -888,8 +807,7 @@ export class PYEmitter extends Emitter<Expr, Stmt, Expr> {
 	rebuildMutationStatement(node: NOf<'mutation'>): Stmt {
 		const e = node.expr;
 		if (e.type === 'namedexpr') {
-			// As a statement, `x := v` and `x = v` are the same assignment -- and `x := v` isn't even
-			// legal Python outside parentheses, which is what a bare statement would print as.
+			// As a statement `x := v` is `x = v`, and it is not even legal unparenthesized.
 			const name = slotName(node) ?? e.target;
 			return { type: 'assign', targets: [Identifier(name)], value: this.resolveOperand(node.id, 1) } as Stmt;
 		}
@@ -920,9 +838,7 @@ export class PYEmitter extends Emitter<Expr, Stmt, Expr> {
 					from:		e.from    ? this.resolveOperand(node.id, 2) : undefined,
 				};
 			case 'call': {
-				// The callee is normally left raw; only a callee that embeds a real effect (or was
-				// hoisted into a temp) has to be resolved, or printing the raw source would duplicate
-				// its execution. Reuses the same edge added for consumer-counting.
+				// The callee prints raw, unless it embeds an effect (or was hoisted into a temp), which raw source would run again.
 				const calleeEdge	= node.inputs[e.arguments.length + 1];
 				const calleeNode	= calleeEdge && this.graph.get(calleeEdge.nodeId);
 				const calleeTemp	= calleeNode && this.nodeVariableNames.get(calleeNode.id);
