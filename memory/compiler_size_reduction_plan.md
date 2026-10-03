@@ -79,3 +79,31 @@ then checker, cpp-backend, difftest; the survey once per family. A WAT change is
   spread, typeof, switch, entries, defaults) build AST the checker never saw. Checking each synthesized statement in `ctx.scope`
   (muted, stamping) would make stamps complete and let those go. Architectural: put to the user before doing it.
 
+## Generated code (user decisions, 2026-10-02)
+
+The user: codegen should not synthesize AST and re-lower it. Two kinds, both decided:
+- **Kind 2 -- AST as a macro assembler inside codegen** (built over values codegen already holds, typed through made-up scope
+  names): **emit directly**, even where that costs lines ("direct emission is simpler and has already found a bug").
+- **Kind 1 -- language lowerings** (for-of, destructuring, switch comparisons, `**`, `+str`, string `+`, tagged templates, delete,
+  Object.assign, parameter defaults, super(...) binding): move into **transform.ts**, and the result is **checked** with
+  `checkSynthesized` (checker.ts) before codegen compiles it literally. VSDG's pre-check rewrites exist too (`ts/vsdg.ts`).
+
+Primitives built for this (wasm-backend.ts): `emitCallOn(cls, name, HeldArg[])` (receiver on the stack; overload by the args' TS
+types via `overloadByTypes`, virtual via `methodFor`, `__asm` via `inlineFor`), `HeldArg`/`localArg`/`stringArg`/`fieldArg`,
+`emitMemberRead`, `emitKeyedField`/`emitKeyEq`, `emitBoxedField`/`emitBoxedFieldWrite`, `coerceAs`/`canonicalFor` (box into, or
+unbox out of, `any` by a DECLARED type -- a number is the f64 box), `elementTypeOf`. Lib: `DynamicObject.spread`.
+`checkSynthesized(stmts, scope)` stamps only unstamped statements/expressions in a child scope, over parts' stamps; user code
+(already stamped) is skipped, so nesting costs nothing.
+
+Done (each WAT-verified; most WAT-identical): keyed field access, dynamic-object dispatcher arms, bounded reads, Object.entries,
+constructor field writes, `.call`, typeof-as-value, place stores, dynamic-object literal, overload by types, ensureAnyIndex,
+copyElements, method-value wrapper, switch slot, `#ext` read; kind 1: for...of (`lowerForOf`). Size: 31,658 -> 31,799 (+141).
+
+Left, kind 2: the union-shaped object literal (`emitUnionShapedLiteral`: needs `case 'object'` to take pre-held spread operands,
+Tested-style) and compound assignment (`$compound$`: needs `case 'binary'` to take a held left operand). Left, kind 1: destructuring
+-- THREE lowerings (transform.ts `patternBindings`, used pre-check by VSDG and index-only; ts/vsdg.ts's lenient wrapper; the
+backend's `emitPatternBinding`, per-level temps and the iterator protocol); unifying needs each nested level's checked type
+(index vs protocol) and changes VSDG's printed output. Then switch, drainIterator/spreadSource, the expression rewrites, params.
+Measured: the fallback typing that exists ONLY for synthesized nodes is small (most of the 47 `checkerTypeOf` calls query source
+nodes); kind 1's gain is architectural, not lines.
+
