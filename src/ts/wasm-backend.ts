@@ -4891,10 +4891,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			return emitInline(name, inline(args.map(a => operandInfo(a, ctx)), ctx, typeArgs), args, ctx);
 		}
 
-		// `owner.decl.name`, not `owner.name`: `hasDeclaredOverride` is keyed by the bare declared name, while a generic
-		// instantiation's `owner.name` is a mangled composite -- which `ensureVirtualDispatch` doesn't support, so it never matches.
-		const method = !bypassVirtual && !typeArgs && owner.decl.name && hasDeclaredOverride(owner.decl.name + moduleTag(stmtHomeModule.get(owner.decl)), name) ? ensureVirtualDispatch(owner, name, ctx)
-			: ensureMethod(owner, name, call, ctx);
+		const method = methodFor(owner, name, call, ctx, bypassVirtual || !!typeArgs);
 		if (!method) {
 			// Not a declared method -- a closure-typed *field* called via member syntax ('this.step(v)') is a real, general
 			// capability: read the field off the receiver already on the stack, then the same call_ref dance `case 'call'` does.
@@ -4911,6 +4908,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		emitCallArgs(name, method.params, method.defaults, !!method.hasRest, args, ctx, method.resolvedParams);
 		ctx.emit(I.call(method.funcIndex));
 		return method.result;
+	}
+
+	// `owner`'s method `name` as a call reaches it: through virtual dispatch where a subclass overrides it. Keyed by the bare declared
+	// name, which a generic instantiation's mangled `owner.name` is not (`ensureVirtualDispatch` does not support one).
+	function methodFor(owner: ClassInfo, name: string, call: CallSite, ctx: FunctionContext, direct = false): FuncInfo | undefined {
+		return !direct && owner.decl.name && hasDeclaredOverride(owner.decl.name + moduleTag(stmtHomeModule.get(owner.decl)), name)
+			? ensureVirtualDispatch(owner, name, ctx) : ensureMethod(owner, name, call, ctx);
 	}
 
 	// `Object.entries(x)` -- a known, fixed-identity global intrinsic (`declare var Object` in lib.d.ts), not a name to special-case
@@ -4937,26 +4941,29 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		return emitEntriesOf(owner, which, ctx);
 	}
 
-	// The projection itself, for a receiver whose concrete struct type is already known and on the stack: `owner.fields` is a
-	// compile-time-known list, so this synthesizes a real array literal and hands it to the ordinary array-literal codegen.
-	// Shared by the static path and every `ensureAnyEntries` arm, so the two cannot disagree about a class's entries.
+	// The projection itself, the receiver's struct known and on the stack; shared by the static path and every `ensureAnyEntries` arm.
+	// Each entry is a `[key, value]` pair array, an `Array` as a literal's would be; a value is boxed as an `any` slot holds it.
 	function emitEntriesOf(owner: ClassInfo, which: 'entries' | 'keys' | 'values', ctx: FunctionContext): W.Type {
-		const objName	= `#objEntries$${ctx.tempCounter++}`;
-		const objLocal	= ctx.declareValue(objName, owner.thisWtype!, owner.thisTsType!);
-		ctx.emit(I.local.set(objLocal.index));
-
-		// The outer array's own kind is always `ref` (a boxed tuple per field), known outright, so this calls `emitArrayElements`
-		// directly rather than routing through `emitAs`/`arrayKindOf` inference. Each tuple element stays a real `Expr` so the usual
-		// per-element coercion delegates back to `case 'array'`, reusing the logic every other array literal already relies on.
-		if (which === 'keys') {
-			emitArrayElements(owner.fields.map((f): Expr => Literal(f.name)), ctx, W.ARRAY.i16, 'ref', types.array('ref'));
-			return W.ARRAY.ref;
+		const obj	= ctx.temp(`$entries$${ctx.tempCounter++}`, owner.thisWtype!);
+		const named	= owner.fields.flatMap((f, i) => f.name.startsWith('#') ? [] : [i]);
+		const pair	= ensureClass('Array', [T.ANY])!.thisType;
+		const value	= (idx: number) => {
+			ctx.emit(I.local.get(obj));
+			emitBoxedField(owner, idx, ctx, W.REF_ANY_NULLABLE);
+		};
+		ctx.emit(I.local.set(obj));
+		for (const idx of named) {
+			if (which !== 'values')
+				emitStringConst(owner.fields[idx].name, ctx);
+			if (which === 'entries') {
+				value(idx);
+				ctx.emit(I.array.new_fixed(types.array('ref'), 2));
+				coerceTop(W.ARRAY.ref, ctx, pair);
+			} else if (which === 'values') {
+				value(idx);
+			}
 		}
-		const value = (f: { name: string }): Expr => JS.Member(Identifier(objName), f.name);
-		emitArrayElements(owner.fields.map((f): Expr => which === 'values' ? value(f) : ({
-			type: 'array',
-			elements: [Literal(f.name), value(f)],
-		})), ctx, W.REF_ANY_NULLABLE, 'ref', types.array('ref'));
+		ctx.emit(I.array.new_fixed(types.array('ref'), named.length));
 		return W.ARRAY.ref;
 	}
 
@@ -5298,9 +5305,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				const setIndex	= () => ctx.emit(I.local.set(ctx.temp(indexName, getSig.params[0])));
 				const operands	= [expr(target.object, cls.thisWtype!), expr(target.index, getSig.params[0])];
 				const bounded	= readsPastEnd(target, ctx) && isPositional(cls, ctx) ? (resultWtype: W.Type) => void emitBoundedRead(target, cls.thisWtype!, resultWtype, ctx, (obj, idx) => {
-					ctx.emit(I.local.get(obj.index));
-					coerceValue(target, emitMethodCall(cls, getter, [Identifier(idx.name)], ctx), ctx, resultWtype);
-				}) : undefined;
+					ctx.emit(I.local.get(obj));
+					coerceValue(target, emitCallOn(cls, getter, [localArg(ctx, idx, 'i32')], ctx), ctx, resultWtype);
+				}, cls) : undefined;
 				// A read evaluates the index as the call's own argument; only a write, which may read first, holds it.
 				if (!write)
 					return { wtype: getSig.result, operands: [operands[0]], bounded, load: () => void emitMethodCall(cls, getter, [target.index], ctx) };
@@ -5387,7 +5394,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				load:		() => ctx.emit(I.array.get(typeIndex)),
 				store:		() => ctx.emit(I.array.set(typeIndex)),
 				bounded:	readsPastEnd(target, ctx) ? resultWtype => void emitBoundedRead(target, W.ARRAY[kind], resultWtype, ctx, (obj, idx) => {
-					ctx.emit(I.local.get(obj.index), I.local.get(idx.index), I.array.get(typeIndex));
+					ctx.emit(I.local.get(obj), I.local.get(idx), I.array.get(typeIndex));
 					coerceTop(wtype, ctx, resultWtype);
 				}) : undefined };
 		}
@@ -5954,21 +5961,19 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	}
 
 
-	// `e.object[e.index]` held in locals, `read` run only when the index is below the length (unsigned, so a negative index is past the end too), `null` otherwise.
-	function emitBoundedRead(e: Expr & { type: 'index' }, objWtype: W.Type, resultWtype: W.Type, ctx: FunctionContext, read: (obj: W.Local, idx: W.Local & { name: string }) => void): W.Type {
+	// `e.object[e.index]` held in locals, `read` run only when the index is below the length (unsigned, so a negative index is past the end too),
+	// `null` otherwise. Raw storage is its own bound; a class (`owner`) answers through its own `length`, as JS reads it.
+	function emitBoundedRead(e: Expr & { type: 'index' }, objWtype: W.Type, resultWtype: W.Type, ctx: FunctionContext, read: (obj: number, idx: number) => void, owner?: ClassInfo): W.Type {
 		const n		= ctx.tempCounter++;
-		const objName	= `$bobj$${n}`;
-		const obj		= ctx.declareValue(objName, objWtype, ctx.narrowedTypeOf(e.object));
-		const idx		= Object.assign(ctx.declareValue(`$bidx$${n}`, 'i32', T.NUMBER), { name: `$bidx$${n}` });
+		const obj	= ctx.temp(`$bobj$${n}`, objWtype), idx = ctx.temp(`$bidx$${n}`, 'i32');
 		emitAs(e.object, ctx, objWtype);
-		ctx.emit(I.local.set(obj.index));
+		ctx.emit(I.local.set(obj));
 		emitAs(e.index, ctx, 'i32');
-		ctx.emit(I.local.set(idx.index), I.local.get(idx.index));
-		// Raw storage is its own bound; anything else answers through its own `length`, as JS reads it.
-		if (W.isArr(objWtype))
-			ctx.emit(I.local.get(obj.index), I.array.len);
+		ctx.emit(I.local.set(idx), I.local.get(idx), I.local.get(obj));
+		if (owner)
+			coerceTop(emitMemberRead(owner, 'length', ctx), ctx, 'i32');
 		else
-			emitAs(JS.Member(Identifier(objName), 'length'), ctx, 'i32');
+			ctx.emit(I.array.len);
 		ctx.emit(I.i32.lt_u);
 		ctx.emitIf(toValType(resultWtype), () => read(obj, idx), () => ctx.emitDefaultValue(resultWtype, types, toValType));
 		return resultWtype;
@@ -9364,7 +9369,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// `cls`'s one-body (or `__asm`) method `name` on the receiver on the stack: no call site to pick an overload by.
 	function emitCallOn(cls: ClassInfo, name: string, args: HeldArg[], ctx: FunctionContext): W.Type {
 		const inline	= cls.inlineMethods?.get(name)?.(args.map(a => ({ wtype: a.wtype })), ctx);
-		const method	= inline ? undefined : ensureMethod(cls, name, [], ctx);
+		const method	= inline ? undefined : methodFor(cls, name, [], ctx);
 		const sig		= inline ?? method;
 		if (!sig)
 			throw `internal: '${cls.name}' has no method '${name}'`;
@@ -9374,6 +9379,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		});
 		ctx.emit(...inline?.inline ?? [I.call(method!.funcIndex)]);
 		return sig.result;
+	}
+	// `cls`'s member `name` read off the receiver on the stack: its getter, else its field.
+	function emitMemberRead(cls: ClassInfo, name: string, ctx: FunctionContext): W.Type {
+		const idx = cls.fieldIndex.get(name);
+		if (!cls.getterNames?.has(name) && idx === undefined)
+			throw `internal: '${cls.name}' has no member '${name}'`;
+		return cls.getterNames?.has(name) ? emitCallOn(cls, accessorKey('get', name), [], ctx) : emitFieldRead(cls, idx!, ctx);
 	}
 	const distinctHeaps = <R extends { heap: wasm.HeapType }>(rs: R[]) => rs.filter((r, i) => rs.findIndex(s => s.heap === r.heap) === i);
 	const depthOf = (c: ClassInfo): number => c.superClass ? 1 + depthOf(c.superClass) : 0;
