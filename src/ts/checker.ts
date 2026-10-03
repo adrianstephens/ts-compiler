@@ -1173,6 +1173,8 @@ export interface FlowSlot { type: Type; element?: boolean }
 export const flowSlotOf = (e: Expr): FlowSlot | undefined => (e as { flowSlot?: FlowSlot }).flowSlot;
 // The type the check pass gave `e`, precise (unwidened) and narrowed where it stands; `??=`, so the first real check wins.
 export const checkedTypeOf = (e: Expr): Type | undefined => (e as { checkedType?: Type }).checkedType;
+// The contextual type the check pass typed `e` against (its slot, parameter, element or member), taken with `checkedType`.
+export const expectedTypeOf = (e: Expr): Type | undefined => (e as { expectedType?: Type }).expectedType;
 // The signature a call or `new` resolved to -- the chosen overload as declared -- and the type arguments it was instantiated with.
 // `lifted`: the parameters higher-order inference made the result's own (`liftGeneric`), which `typeArgs` may name.
 export interface CheckedCall { sig: TS.CallSig; typeArgs?: Map<string, Type>; lifted?: TS.TypeParam[] }
@@ -1184,10 +1186,63 @@ export const checkedCallOf = (e: Expr): CheckedCall | undefined => (e as { check
 function stampFlow(value: Expr | undefined, type: Type | undefined, scope: Scope, element?: boolean) {
 	if (!value || !type)
 		return;
+	if (!trying && !flowSlotOf(value))
+		restampFlow(value, type, scope, element);
+}
+
+// `value` as built for `type`, its literal parts too. Codegen re-stamps a call's arguments where it instantiates a generic otherwise.
+export function restampFlow(value: Expr, type: Type, scope: Scope, element?: boolean) {
 	// An object literal's real slot is the union member it discriminates to -- the one it is BUILT as, here and in codegen.
 	const slot = value.type === 'object' ? discriminateContext(type, value, scope) : type;
-	if (!trying)
-		(value as { flowSlot?: FlowSlot }).flowSlot ??= { type: T.stampScope(slot, scope), element };
+	(value as { flowSlot?: FlowSlot }).flowSlot = { type: T.stampScope(slot, scope), element };
+	stampParts(value, slot, scope);
+}
+
+// What a literal's elements and properties are built for: their part of the slot it flows into, INSTANTIATED, where the check's own
+// context may still name a generic callee's unsolved parameters (`[K, V]`). Parts past a spread have no known position.
+function stampParts(value: Expr, slot: Type, scope: Scope) {
+	if (value.type === 'array') {
+		const spread = value.elements.findIndex(el => el?.type === 'spread');
+		value.elements.slice(0, spread < 0 ? undefined : spread).forEach((el, i) => el && stampContext(el, positionContext(slot, i, scope), scope));
+	} else if (value.type === 'object') {
+		for (const p of value.properties) {
+			const key = p.type === 'field' && p.value ? T.memberKey(p.key) : undefined;
+			if (key !== undefined)
+				stampContext((p as JS.Field<Type>).value!, contextualMember(slot, key, scope), scope);
+		}
+	} else if (value.type === 'conditional') {
+		stampContext(value.consequent, slot, scope);
+		stampContext(value.alternate, slot, scope);
+	} else if (value.type === 'binary' && (value.operator === '&&' || value.operator === '||' || value.operator === '??')) {
+		// Each operand that may BE the result lands in the slot.
+		if (value.operator !== '&&')
+			stampContext(value.left, slot, scope);
+		stampContext(value.right, slot, scope);
+	} else if (value.type === 'sequence') {
+		stampContext(value.expressions[value.expressions.length - 1], slot, scope);
+	} else if ((value.type === 'arrow' || value.type === 'function') && value.inferredReturn) {
+		// A function whose return was only inferred returns what the slot's signature does, as its caller reads the value.
+		const ret = T.findFunctionType(slot, scope)?.returnType;
+		if (ret)
+			returnedValues(value.body).forEach(r => stampContext(r, T.unwrapIfAsync(ret, scope, hasMod(value, 'async')), scope));
+	}
+}
+// The values a body returns: an expression body, or each `return`'s argument outside a nested function.
+function returnedValues(body: JS.Stmt<any>[] | Expr | undefined): Expr[] {
+	if (!body)
+		return [];
+	if (!Array.isArray(body))
+		return [body];
+	const out: Expr[] = [];
+	walkerB((s, process) => (s.type === 'return' && s.argument && out.push(s.argument), s.type !== 'function_decl' && s.type !== 'class_decl' && process(s)),
+		(e, process) => e.type !== 'arrow' && e.type !== 'function' && e.type !== 'class' && process(e)).statements(body);
+	return out;
+}
+function stampContext(e: Expr, t: Type | undefined, scope: Scope) {
+	if (!t)
+		return;
+	(e as { expectedType?: Type }).expectedType = t;
+	stampParts(e, e.type === 'object' ? discriminateContext(t, e, scope) : t, scope);
 }
 
 // A numeric `let`/`var`'s representation must hold everything its binding is given or read as: the hull of those stamps,
@@ -1824,7 +1879,9 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 		const result = recurseUncached(e, expected);
 		// Unlike a scope stamp, a type stamp is taken in a generic template too: an instance is a substituted COPY, re-checked, so it never inherits one.
 		if (stamp && !narrowing) {
-			(e as { checkedType?: Type }).checkedType ??= result;
+			const node = e as { checkedType?: Type; expectedType?: Type };
+			node.checkedType	??= result;
+			node.expectedType	??= expected;
 			if (e.type === 'identifier')
 				foldFlow(scope, e.name, result);
 		}
@@ -2652,8 +2709,11 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 					return T.freeze(recurse(e.expression, constContext(expected)));
 				// The check pass types the operand so it carries a stamp (`(m as any).kind` reads `m`). Not against `anno`, which would drive a generic call's
 				// inference from the assertion (`xs.flatMap(...) as C[]`).
-				if (stamp)
+				if (stamp) {
 					recurse(e.expression);
+					// What the operand is BUILT as, though not typed against: `{ type: 'array', ... } as Expr` names the union member.
+					stampContext(e.expression, anno, scope);
+				}
 				return T.freeze(anno);
 			}
 			case 'satisfies': {

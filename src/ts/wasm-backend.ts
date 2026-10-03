@@ -5,7 +5,7 @@ import * as JS from './js-parser';
 import * as T from './type-utils';
 import * as W from '../wasm/codegen';
 import { Literal, Identifier, Binary, Assign, hasMod, Module as CModule } from '@isopodlabs/tison/ast';
-import { checkHoisted, checkImported, superClassRef, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, checkedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr, checkMethodInstance } from './checker';
+import { checkHoisted, checkImported, superClassRef, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, restampFlow, checkedTypeOf, expectedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr, checkMethodInstance } from './checker';
 import { Walker, walker, walkerB } from './walker';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
 import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
@@ -148,6 +148,11 @@ const I				= wasm.I;
 // The language-neutral half (physical types, codegen context, module sections) is `../wasm/codegen`, imported as `W`. What is here is a
 // compiled function's shape, or a rule about TypeScript's type spellings; `FuncSig`'s binding data sits beside each closure payload, so `W.Type` names no language type.
 
+// The type the checker built `e` for: the slot it flows into, else the context it was checked against; a const context is what it wraps.
+function contextOf(e: Expr): Type | undefined {
+	const t = flowSlotOf(e)?.type ?? expectedTypeOf(e);
+	return t && isConstContext(t) ? t.typeArgs?.[0] : t;
+}
 // A node codegen synthesized has no stamp of its own, and is typed over its parts' stamps.
 const checkerTypeOf = (e: Expr, scope: Scope, widen = true, expected?: Type) => checkerQuery(e, scope, widen, expected, undefined, undefined, false, !checkedTypeOf(e));
 
@@ -307,12 +312,6 @@ class FunctionContext extends W.FunctionContext {
 	// Declarators whose initializers are compiling right now, innermost last -- see `ensureForwardHolder`.
 	initializing?:		JS.Var<Type>[];
 
-	// A one-shot hint for the next expression compiled: the TS type of the slot it lands in (a declaration's, an array element's, an argument's).
-	// A `call` consumes and clears it on entry (`emitExpr`), so it never leaks into the call's own arguments or a nested literal.
-	contextualReturn?:	Type;
-	// The contextual type of the CALL being compiled, for a generic method's instantiation (`ensureMethod`); every call sets it afresh, so a nested one never reads its parent's.
-	callContext?:		Type;
-
 
 	constructor(name: string, public scope: Scope, public onReturn: ReturnHandler, public owner?: ClassInfo, public homeModule = '.') {
 		super(name);
@@ -391,26 +390,6 @@ class FunctionContext extends W.FunctionContext {
 	}
 	isNamespaceValue(e: Expr & { type: 'member' }): boolean {
 		return this.isNamespaceQualifier(e.object) && this.scope.namespace(e.object.name)?.decl(e.property)?.type === 'var_decl';
-	}
-
-	withCallContext<R>(callContext: Type | undefined, fn: () => R): R {
-		const saved = this.callContext;
-		this.callContext = callContext;
-		try {
-			return fn();
-		} finally {
-			this.callContext = saved;
-		}
-	}
-
-	withContext<R>(contextual: Type | undefined, fn: () => R): R {
-		const saved = this.contextualReturn;
-		this.contextualReturn = contextual;
-		try {
-			return fn();
-		} finally {
-			this.contextualReturn = saved;
-		}
 	}
 
 	// A type guard call (`x is P`, not `asserts`) its argument's type settles: `true` when every value of that type is a `P`,
@@ -1755,7 +1734,7 @@ function substituteTypeParams(map: ReadonlyMap<string, Type>): Walker {
 // A fresh node even where nothing was substituted: the walk hands an untouched node back as itself, and an instance re-check
 // stamps its types ON the node, so two instances sharing one would each read the other's.
 function unstamped<N extends object>(built: N): N {
-	const { scope, checkedType, checkedCall, ...rest } = built as N & { scope?: unknown; checkedType?: unknown; checkedCall?: unknown };
+	const { scope, checkedType, checkedCall, flowSlot, expectedType, ...rest } = built as N & { scope?: unknown; checkedType?: unknown; checkedCall?: unknown; flowSlot?: unknown; expectedType?: unknown };
 	// A declarator is no node of its own: its binding's hull (`flowType`) is the template's too.
 	const decl = rest as { type?: unknown; declarations?: JS.Var<Type>[] };
 	if (decl.type === 'var_decl')
@@ -2383,9 +2362,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			// `if (slot === null) slot = <init>; return slot!;`, hand-emitted: only `d.init` is source the checker saw.
 			ctx.emit(I.global.get(g.index), I.ref.is_null);
 			ctx.emitIf(undefined, () => {
-				// The declared type is the initializer's context, as for a local: `[{...}]` builds `Rules<Mod>`'s own shape. Built as the
-				// VALUE type, then boxed into the slot: a bigint literal only takes an `i64` form when that is what it is built as.
-				ctx.withContext(checkedType, () => emitAs(d.init!, ctx, wt));
+				// Built as the VALUE type, then boxed into the slot: a bigint literal only takes an `i64` form when that is what it is built as.
+				emitAs(d.init!, ctx, wt);
 				coerceValue(d.init!, wt, ctx, g.wtype);
 				ctx.emit(I.global.set(g.index));
 			});
@@ -2793,7 +2771,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 	// Type arguments for a `new C(...)` that spells none out: the checker's, solved from the constructor's arguments, and the context's
-	// (`ctx.contextualReturn`, all a bare `new Map` has), merged per position. Neither knowing leaves `ensureClass`'s "needs N type arguments" throw.
+	// (all a bare `new Map` has), merged per position. Neither knowing leaves `ensureClass`'s "needs N type arguments" throw.
 	function newTypeArgs(name: string, explicit: Type[] | undefined, e: Expr, ctx: FunctionContext, want?: W.Type): Type[] | undefined {
 		if (explicit?.length)
 			return explicit;
@@ -2808,7 +2786,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			:	t?.type === 'ref' && t.name === name ? t.typeArgs
 			:	undefined;
 		const solved		= argsFor(checkerTypeOf(e, ctx.scope));
-		const contextual	= argsFor(ctx.contextualReturn);
+		const contextual	= argsFor(contextOf(e));
 		const merged: Type[] = [];
 		for (let i = 0; i < Math.max(solved?.length ?? 0, contextual?.length ?? 0); i++) {
 			const s = solved?.[i];
@@ -2818,11 +2796,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			merged.push(pick);
 		}
 		return merged.length && !merged.every(t => T.isAny(t)) ? merged : explicit;
-	}
-
-	// A spread operand is read by the spread's copy, through its OWN type: the enclosing literal's context is not its reader's.
-	function emitSpreadOperand(operand: Expr, ctx: FunctionContext, want: W.Type): W.Type {
-		return ctx.withContext(ctx.narrowedTypeOf(operand), () => emitAs(operand, ctx, want));
 	}
 
 	// The keys a spread operand may provide: what its TYPE says a value carries -- of a union, any member's. Not a struct's field
@@ -3001,7 +2974,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		}
 		// Else it is read through its own type, so it is built as that type's owner (`objectShapeOf`), as every reader expects.
 		const fallback = () => anon ? (r => r.type === 'object' && !indexSignatureValueType(r) ? objectShapeOf(r, r) : undefined)(T.resolve(ctx.scope, checkerTypeOf(e, ctx.scope))) : undefined;
-		return declaredShape(props, new Set(props.keys()), fallback, () => !ctx.contextualReturn || T.isAny(ctx.contextualReturn) ? fallback() : undefined);
+		const context = contextOf(e);
+		return declaredShape(props, new Set(props.keys()), fallback, () => !context || T.isAny(context) ? fallback() : undefined);
 	}
 
 	// An object TYPE as a declared shape: an interface's name is gone once `resolve` expands it. One answer per type for the compile,
@@ -3244,16 +3218,18 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// A literal whose CONTEXT is an index-signature type is a `DynamicObject<V>`, read off the context (an optional `Record<...> | undefined`
 	// parameter boxes `want` to `any`). So is an empty literal whose context names no layout (`any`, `{}`, `object`, none).
 	function contextualDynamicOwner(e: JS.ObjectExpr<Type>, ctx: FunctionContext): ClassInfo | undefined {
-		const target	= ctx.contextualReturn && T.resolve(global, T.nonNullable(ctx.contextualReturn, ctx.scope));
+		const context	= contextOf(e);
+		const target	= context && T.resolve(global, T.nonNullable(context, ctx.scope));
 		const value		= target && indexSignatureValueType(target) || (!e.properties.length && (!target || namesNoLayout(target)) ? T.ANY : undefined);
 		return value ? ensureClass('DynamicObject', [value]) : undefined;
 	}
 	const namesNoLayout = (t: Type) => T.isAny(t) || t.type === 'ref' && t.name === 'object' || t.type === 'object' && !t.members.length;
 
-	// The member of the literal's context (`ctx.contextualReturn`) its written keys and discriminants pick, before any structural guess.
+	// The member of the literal's context its written keys and discriminants pick, before any structural guess.
 	// The context may BE its shape, with no name of its own (an arrow's inferred return), where several declared shapes share its field names.
 	function matchContextualUnionMember(e: JS.ObjectExpr<Type>, ctx: FunctionContext): ClassInfo | undefined {
-		if (!ctx.contextualReturn)
+		const context = contextOf(e);
+		if (!context)
 			return undefined;
 		const props = new Map<string, Expr | undefined>();
 		for (const p of e.properties) {
@@ -3268,7 +3244,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const spreads	= e.properties.flatMap(p => p.type === 'spread' ? [spreadKeys(p.operand, ctx)] : []);
 		const supplied	= spreads.every(k => k) ? new Set([...props.keys(), ...spreads.flat()]) : undefined;
 		// With nothing to discriminate by (no written field, no known key), only a context of ONE shape decides (`xs.push({})`).
-		const shapes = T.objectShapes(ctx.contextualReturn, ctx.scope);
+		const shapes = T.objectShapes(context, ctx.scope);
 		if (!props.size && !supplied && shapes.length !== 1)
 			return undefined;
 		const matches = shapes.filter(({ objT }) => {
@@ -3658,7 +3634,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const ownT = checkerTypeOf(unwrapAs(e), ctx.scope);
 				const ownW = typeOf(ownT);
 				const isArrayValue = W.isRef(ownW) && storageKindOf(ownW) !== undefined;
-				const own = owner(ownT) ?? owner(ctx.contextualReturn)
+				const own = owner(ownT) ?? owner(contextOf(e))
 					?? (isArrayValue && (k === 'ref' || k === 'f64') ? owner(TS.ArrayType(k === 'ref' ? T.ANY : T.NUMBER)) : undefined);
 				if (own && !W.typeEq(own, want)) {
 					coerceTop(got, ctx, own);
@@ -3897,10 +3873,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		});
 	}
 
-	// `elementTsType` may name each position separately -- a TUPLE rest parameter's arguments.
-	function emitArrayElements(elements: readonly (Expr | undefined)[], ctx: FunctionContext, want: W.Type, kind: W.ElementI, typeIndex: number, elementTsType?: Type | ((i: number) => Type | undefined)): void {
-		const contextAt		= (el: Expr) => typeof elementTsType === 'function' ? elementTsType(elements.indexOf(el)) : elementTsType;
-		const emitElement	= (el: Expr) => ctx.withContext(contextAt(el), () => emitAs(el, ctx, want));
+	function emitArrayElements(elements: readonly (Expr | undefined)[], ctx: FunctionContext, want: W.Type, kind: W.ElementI, typeIndex: number): void {
+		const emitElement	= (el: Expr) => emitAs(el, ctx, want);
 		if (elements.some(el => el?.type === 'spread')) {
 			// A literal with a spread: every element evaluated once, in order, into a scratch local; the result is then allocated to the total and filled.
 			type Part = { spread: false; value: number } | { spread: true; src: number; len: number };
@@ -3997,8 +3971,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		};
 		// An explicit `undefined` argument applies the parameter's DEFAULT, as omitting it does (`null` does not).
 		const argOrDefault = (i: number, a: Expr): Expr => T.nullLiteralKind(a) === 'undefined' && defaults?.[i] ? defaults[i]! : a;
-		// Each argument's parameter type is its context: a literal or generic call there builds what the callee reads.
-		const emitArg = (i: number, a: Expr) => ctx.withContext(resolvedParams?.[i]?.tsType, () => { const arg = argOrDefault(i, a); return emitAs(arg, ctx, wantForArg(i, arg)); });
+		const emitArg = (i: number, a: Expr) => (arg => emitAs(arg, ctx, wantForArg(i, arg)))(argOrDefault(i, a));
 		if (!hasRest) {
 			if (args.some(a => a.type === 'spread'))
 				args = expandTupleSpreads(args, ctx);
@@ -4046,8 +4019,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const kind = storageKindOf(restArrWtype) ?? elementKindOfType(resolvedParams?.[fixedCount]?.tsType, ctx.scope);
 			if (!kind)
 				throw `internal: '${label}' rest param has a non-array type`;
-			const restTs = resolvedParams?.[fixedCount]?.tsType;
-			emitArrayElements(args.slice(fixedCount), ctx, elementValueType(kind), kind, types.array(kind), restTs && (k => T.restArgType(restTs, k, ctx.scope)));
+			emitArrayElements(args.slice(fixedCount), ctx, elementValueType(kind), kind, types.array(kind));
 			coerceTop(W.ARRAY[kind], ctx, restArrWtype);
 		}
 	}
@@ -4199,7 +4171,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		return cls ? { kind: 'construct', cls, label: name, lowered: true } : { kind: 'function', name, home };
 	}
 
-	function emitCallee(c: Callee, e: CallNode, ctx: FunctionContext, want?: W.Type, callContext?: Type): W.Type {
+	function emitCallee(c: Callee, e: CallNode, ctx: FunctionContext, want?: W.Type): W.Type {
 		switch (c.kind) {
 			case 'asm': {
 				if (e.arguments.some(a => a.type === 'spread'))
@@ -4222,7 +4194,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				return result;
 			}
 			case 'function':
-				return emitCall(c.name, e, ctx, callContext ?? (() => checkerTypeOf(e, ctx.scope)), c.home);
+				return emitCall(c.name, e, ctx, contextOf(e) ?? (() => checkerTypeOf(e, ctx.scope)), c.home);
 			case 'construct': {
 				const ctor = ensureCtor(c.cls, c.lowered ? e.arguments : e, ctx);
 				emitCallArgs(`${c.label}'s constructor`, ctor.params, ctor.defaults, !!ctor.hasRest, e.arguments, ctx, ctor.resolvedParams);
@@ -5101,13 +5073,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		}
 
 		const sig: FuncSig = { params: params.map(p => p.wtype), result, hasRest: !!e.rest || !!restBound.length, defaults: ownParams.map((p, i) => params[i].calleeDefault || (!p.default && hasMod(p, 'optional')) ? Identifier('undefined') : p.default), resolvedParams: params };
-		// Captured now: the body compiles later, once this literal's context is gone. The checker's contextual type wins: it saw the chosen OVERLOAD.
-		const contextFn		= (e as { contextualType?: Type }).contextualType ?? ctx.contextualReturn;
-		const fnContext		= contextFn && T.resolve(ctx.scope, contextFn);
-		// The function's OWN declared return type is the literal's context (`return { type: kind, ...sig }` against a union picks its member). One the
-		// checker only INFERRED yields to the caller's context, which reads the value: `rules<F | H>(rule(x => ({ type: 'f' })))` builds an `F`.
-		const contextReturn	= fnContext?.type === 'function' ? fnContext.returnType : undefined;
-		const returnContext	= overloaded ?? (e.inferredReturn ? contextReturn ?? e.returnType : e.returnType ?? contextReturn);
 		const { funcTypeIndex, structTypeIndex } = ensureClosureType(sig);
 		const { funcIndex, typeIndex }	= types.funcAt(funcTypeIndex);
 		const info: FuncInfo = { ...sig, funcIndex, typeIndex };
@@ -5119,7 +5084,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			: undefined;
 
 		worklist.push(W.withCatchAt(() => {
-			const fnCtx		= new FunctionContext(e.name ?? '<anonymous>', new Scope(moduleScopeOf(ctx.homeModule) ?? libGlobal), plainReturn(result, returnContext), undefined, ctx.homeModule);
+			const fnCtx		= new FunctionContext(e.name ?? '<anonymous>', new Scope(moduleScopeOf(ctx.homeModule) ?? libGlobal), plainReturn(result), undefined, ctx.homeModule);
 			// Env param first (wasm param 0), then the literal's own: `toFuncBody` takes the first `1 + params.length` locals as the params.
 			const envParam	= fnCtx.declareLocal('#envParam', { typeIndex: envBase, nullable: false });
 			const pending	= fnCtx.declareParams(params);
@@ -5469,15 +5434,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 
 	// `want` is a hint only, letting a literal pick its representation directly; the result is always the physical type left on the stack.
-	function emitExpr(e: Expr, ctx: FunctionContext, want?: W.Type, callContext?: Type): W.Type {
-		// A call consumes the hint for its own type-argument inference (`callContext`) and clears it for what it compiles: a literal among its callee
-		// and arguments would read it as its own target.
-		if (e.type === 'call' && ctx.contextualReturn !== undefined) {
-			const saved = ctx.contextualReturn;
-			return ctx.withContext(undefined, () => emitExpr(e, ctx, want, saved));
-		}
-		if (e.type === 'call' && ctx.callContext !== callContext)
-			return ctx.withCallContext(callContext, () => emitExpr(e, ctx, want, callContext));
+	function emitExpr(e: Expr, ctx: FunctionContext, want?: W.Type): W.Type {
 		try {
 			const lowered = lowerExpr(e, x => ctx.narrowedTypeOf(x), ctx.scope);
 			if (lowered) {
@@ -5600,8 +5557,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 			// The asserted type is compile-time only: the operand's own representation passes through.
 			case 'as':
-				// The asserted type is the operand's context: `{ type: 'array', ... } as Expr` names the union member to build. `as const` names no type.
-				return isConstContext(e.typeAnnotation) ? emitExpr(e.expression, ctx, want) : ctx.withContext(e.typeAnnotation, () => emitExpr(e.expression, ctx, want));
+				return emitExpr(e.expression, ctx, want);
 
 			// `f<A>` / `NS.f<A>` read as a VALUE (`export const CallSig = JS.CallSig<Type>`): the generic function instantiated, as a closure.
 			case 'instantiation': {
@@ -5658,10 +5614,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						} else if (p.type !== 'spread') {
 							throw `object literal for '${owner.name}' can only have plain 'key: value' properties (no methods or computed keys)`;
 						} else if (!srcCls || isDynamicObject(srcCls)) {
-							emitCallOn(owner, 'spread', [{ wtype: owner.thisWtype!, push: () => emitSpreadOperand(p.operand, ctx, owner.thisWtype!) }], ctx);
+							emitCallOn(owner, 'spread', [{ wtype: owner.thisWtype!, push: () => emitAs(p.operand, ctx, owner.thisWtype!) }], ctx);
 						} else {
 							const src = ctx.temp(`$spread$${ctx.tempCounter++}`, srcCls.thisWtype!);
-							emitSpreadOperand(p.operand, ctx, srcCls.thisWtype!);
+							emitAs(p.operand, ctx, srcCls.thisWtype!);
 							ctx.emit(I.local.set(src));
 							for (const [key, idx] of srcCls.fieldIndex)
 								if (!key.startsWith('#'))
@@ -5696,7 +5652,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 							if (!unionCls && !dynamic && !anyOperand)
 								throw `object literal for '${owner.name}': a spread operand needs a known object type, got '${T.showType(spreadT)}'`;
 							const spreadLocal = ctx.declareLocal(`$spread$${ctx.tempCounter++}`, W.REF_ANY_NULLABLE);
-							emitSpreadOperand(p.operand, ctx, W.REF_ANY_NULLABLE);
+							emitAs(p.operand, ctx, W.REF_ANY_NULLABLE);
 							ctx.emit(I.local.set(spreadLocal.index));
 							const src: FieldSource = { spreadLocal, unionCls, dynamic: anyOperand ? [] : dynamic, nullable: anyOperand || solid.length < parts.length };
 							const keys = unionCls ? unionCls.flatMap(m => m.fields.map(f => f.name))
@@ -5707,7 +5663,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 							continue;
 						}
 						const spreadLocal = ctx.declareLocal(`$spread$${ctx.tempCounter++}`, spreadCls.thisWtype!);
-						emitSpreadOperand(p.operand, ctx, spreadCls.thisWtype!);
+						emitAs(p.operand, ctx, spreadCls.thisWtype!);
 						ctx.emit(I.local.set(spreadLocal.index));
 						for (const f of spreadCls.fields)
 							addSource(f.name, { spreadLocal, spreadCls });
@@ -5777,8 +5733,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					if (src.method) {
 						coerceTop(emitClosureLiteral(src.method, ctx, false, f.wtype, closureFree(src.method).has('this') ? thisHolder : undefined), ctx, f.wtype);
 					} else if (src.expr) {
-						// The field's declared type is the value's context: a nested literal picks its union member from it.
-						ctx.withContext(owner.fieldDeclaredType(f.name, global), () => emitAs(src.expr!, ctx, f.wtype));
+						emitAs(src.expr!, ctx, f.wtype);
 					} else {
 						readSpread(src, f.name, f.wtype);
 					}
@@ -5823,8 +5778,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				// The wanted STORAGE kind: `want` is the storage, or a class owning some (an `Array<T>`). Into an `any` slot (`const v: any[] = [1, 2]`) it is ref
 				// storage, a scalar array being physically incompatible; as an element of a ref array (`[1,2]` in `number[][]`) only an `any` context forces that.
 				const wantArr = storageKindOf(want);
-				// A union context names the literal's own member, as the checker takes it (`string | number[]`).
-				const contextual	= ctx.contextualReturn && T.resolve(ctx.scope, ctx.contextualReturn);
+				// A union context names the literal's own member, as the checker takes it (`string | number[]`). With no slot, its own type is its context.
+				const context		= contextOf(e) ?? checkedTypeOf(e);
+				const contextual	= context && T.resolve(ctx.scope, context);
 				const arrayMembers	= contextual?.type === 'union' ? T.unionMembers(contextual, ctx.scope).map(m => T.resolve(ctx.scope, m)).filter(m => m.type === 'array') : [];
 				const contextualArr = arrayMembers.length === 1 ? arrayMembers[0] : contextual;
 				// An iterable context names its element too: `[4, 5]` as an `Iterable<number>` is a `number[]`. Not a tuple's, which is always stored boxed.
@@ -5837,7 +5793,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const kind = wantArr === 'ref' || (W.isAny(want) && contextForcesAny) ? 'ref' : wantArr ?? contextKind ?? objectArrayKind(e, ctx);
 				if (!kind)
 					throw 'array literals are only supported for number[]/boolean[]/T[]';
-				emitArrayElements(e.elements, ctx, elementValueType(kind), kind, types.array(kind), contextualElement);
+				emitArrayElements(e.elements, ctx, elementValueType(kind), kind, types.array(kind));
 				return W.ARRAY[kind];
 			}
 
@@ -5947,13 +5903,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					const slot		= emitAssignTarget(target, ctx, operator ? 'discard' : 'none');
 					const wtype		= slot.wtype;
 
-					// The target's declared type is the value's context, as an annotation is for `case 'var_decl'`: a bare `new C` finds its type arguments there.
-					const emitValue = () => {
-						const saved = ctx.contextualReturn;
-						ctx.contextualReturn = checkerTypeOf(target, ctx.scope);
-						emitAs(value, ctx, wtype);
-						ctx.contextualReturn = saved;
-					};
+					const emitValue = () => emitAs(value, ctx, wtype);
 
 					if (operator === '??' && !W.isNullable(wtype))
 						throw "'??=' needs a nullable object-typed target (no boxing in this subset)";
@@ -6014,9 +5964,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						}
 						emitAs(left, ctx, leftWtype);
 						const leftT = ctx.narrowedTypeOf(left);
-						// The checker's context for the right of `??`: `specs ?? []` is built as the left's array, not `never[]`.
-						const emitRight = () => emitAs(right, ctx, wtype);
-						emitShortCircuit(operator, leftWtype, leftT, wtype, operator === '??' ? () => ctx.withContext(T.nonNullable(leftT, ctx.scope), emitRight) : emitRight, held => {
+						emitShortCircuit(operator, leftWtype, leftT, wtype, () => emitAs(right, ctx, wtype), held => {
 							// When the kept part of the left is only null/undefined, the result is its type's own `undefined`, not the left's physical value.
 							if (T.isNullish(T.logicalLeftPart(leftT, operator, ctx.scope), ctx.scope))
 								return void emitAs(Identifier('undefined'), ctx, wtype);
@@ -6207,7 +6155,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 			case 'new':
 			case 'call':
-				return emitCallee(classifyCall(e, ctx, want), e, ctx, want, callContext);
+				return emitCallee(classifyCall(e, ctx, want), e, ctx, want);
 
 			// A closure literal compiles to a `{code, env}` struct; `case 'call'` uses it.
 			case 'arrow':
@@ -6228,8 +6176,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// ===================================================================
 
 	// The ordinary `return`, without a generator, async, constructor or `reassignsThis` override (`ReturnHandler`). `'void'` and an omitted `result`
-	// both mean no value. `context` is the returned value's TS target, so a literal or generic call there builds what the caller reads.
-	function plainReturn(result?: W.Type, context?: Type): ReturnHandler {
+	// both mean no value.
+	function plainReturn(result?: W.Type): ReturnHandler {
 		if (result === 'void')
 			result = undefined;
 		return {
@@ -6247,7 +6195,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						emitExpr(argument, ctx, 'void');
 						ctx.emitDefaultValue(result, types, toValType);
 					} else {
-						ctx.withContext(context, () => emitAs(argument, ctx, result));
+						emitAs(argument, ctx, result);
 					}
 				}
 				ctx.emit(I.return);
@@ -6352,9 +6300,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						throw `local '${d.name}' cannot have type 'void'`;
 					// A generator's hoisted local is a frame struct field, as a closure capture is (`declareCaptured` registered its type).
 					const hoisted = ctx.closureEnv?.fields.get(d.name);
-					// The declaration's type is its initializer's context (`const rules: Expr[] = [makeRule(() => ({...}))]`).
-					const savedContextualReturn = ctx.contextualReturn;
-					ctx.contextualReturn = tsType;
 					const initializing = (ctx.initializing ??= []);
 					initializing.push(d);
 					try {
@@ -6389,7 +6334,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					} finally {
 						initializing.pop();
 					}
-					ctx.contextualReturn = savedContextualReturn;
 				}
 				return;
 
@@ -6890,13 +6834,21 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const want			= typeof expected === 'function' ? expected() : expected;
 		if (want && decl.returnType && !explicit) {
 			const context = checkerInferTypeArgMap({ params: [], returnType: decl.returnType, typeParams }, [], undefined, scope, undefined, want);
+			let changed = false;
 			for (const [name, t] of map) {
 				const wanted = context.get(name);
-				if (wanted && (T.isRef(wanted, 'number') || T.isRef(wanted, 'bigint')) && T.machineOf(t, scope) && T.isAssignable(t, wanted, scope))
+				// A machine type the destination reads as `number`/`bigint`, or an anonymous shape inferred from a literal, which has no layout
+				// worth keeping: the call builds its result as what it lands in.
+				if (wanted && ((T.isRef(wanted, 'number') || T.isRef(wanted, 'bigint')) && T.machineOf(t, scope) && T.isAssignable(t, wanted, scope)
+					|| T.nonNullable(t, scope).type === 'object' && isStructShapes(wanted, scope) && T.isAssignable(t, wanted, scope) && argsFit(decl, new Map([...map, [name, wanted]]), args, scope))) {
 					map.set(name, wanted);
-				// An anonymous shape inferred from a literal has no layout worth keeping: the call builds its result as the struct shapes it lands in.
-				else if (wanted && T.nonNullable(t, scope).type === 'object' && isStructShapes(wanted, scope) && T.isAssignable(t, wanted, scope) && argsFit(decl, new Map([...map, [name, wanted]]), args, scope))
-					map.set(name, wanted);
+					changed = true;
+				}
+			}
+			// The arguments are then built for THIS instantiation, not the checker's.
+			if (changed) {
+				const inst = T.instantiateSig(decl, map);
+				args.forEach((a, i) => (t => t && a.type !== 'spread' && restampFlow(a, t, scope))(T.paramTypeAt(inst, i, scope)));
 			}
 		}
 		return map;
@@ -6971,7 +6923,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const params	= resolveParams(decl, homeScope ?? libGlobal);
 			const info		= declareFunc(homeKey(homeModule, name), decl, params, result);
 			worklist.push(W.withCatchAt(() => {
-				const ctx	= new FunctionContext(name, new Scope(homeScope ?? libGlobal), plainReturn(result, overloaded ?? decl.returnType as Type | undefined), undefined, homeModule);
+				const ctx	= new FunctionContext(name, new Scope(homeScope ?? libGlobal), plainReturn(result), undefined, homeModule);
 				emitFuncBody(ctx, decl.body!, params, result);
 				info.body		= ctx.toFuncBody(params.length, toValType);
 			}, decl, homeModule, name));
@@ -8081,11 +8033,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			// built this class (maybe another module). `libGlobal` for a lib class or a synthesized shape.
 			const ctx		= new FunctionContext(key, new Scope(moduleScopeOf(cls.homeModule) ?? cls.declScope ?? libGlobal), plainReturn(thisWtype), cls, cls.homeModule);
 			beginBody(ctx, ctor.body!, params);
-			// A field of the constructed `this`, the field's declared type the value's context.
 			const writeField = (field: string, value: Expr) => {
 				const idx = cls.fieldIndex.get(field)!, wtype = cls.fields[idx].wtype;
 				ctx.emit(I.local.get(ctx.ctorThis!.index));
-				ctx.withContext(cls.fieldDeclaredType(field, global), () => emitAs(value, ctx, wtype));
+				emitAs(value, ctx, wtype);
 				emitFieldWrite(cls, idx, wtype, ctx);
 			};
 			// A constructor returning its own value (`thisWtype` says so) compiles as ordinary statements, `ctx.ctorThis` unset.
@@ -8178,7 +8129,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		// `ensureGenericFunc` does a function's: signature pieces through `T.substituteType`, the body through `substituteTypeParams`.
 		const instance = decl.typeParams;
 		if (instance?.length) {
-			const map = callTypeArgs(decl, resolvedCall(owner, name, call, callerCtx), callerCtx, !!typeArgsOf(call), Array.isArray(call) ? call : call.arguments, callerCtx.callContext);
+			const map = callTypeArgs(decl, resolvedCall(owner, name, call, callerCtx), callerCtx, !!typeArgsOf(call), Array.isArray(call) ? call : call.arguments, Array.isArray(call) ? undefined : contextOf(call));
 			key		= genericKey(key, instance, map, global);
 			decl	= {
 				...decl,
@@ -8218,7 +8169,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const info			= declareFunc(key, decl, params, result, isStatic ? undefined : thisWtype, reassignsThis);
 		worklist.push(W.withCatch(() => {
 			// A method body resolves in its class's declaring module, as a constructor's does.
-			const ctx	= new FunctionContext(key, new Scope(moduleScopeOf(owner.homeModule) ?? owner.declScope ?? libGlobal), plainReturn(result, decl.returnType as Type | undefined), owner, owner.homeModule);
+			const ctx	= new FunctionContext(key, new Scope(moduleScopeOf(owner.homeModule) ?? owner.declScope ?? libGlobal), plainReturn(result), owner, owner.homeModule);
 			// A declared `this:` types the body's `this` (`flat<A>(this: A)`); the value is still the receiver's struct.
 			if (!isStatic)
 				ctx.declareValue('this', thisWtype, decl.thisType ? T.substituteThisType(decl.thisType, owner.thisTsType) : owner.thisTsType);

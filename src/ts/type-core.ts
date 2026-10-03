@@ -71,7 +71,7 @@ export function typeKey(t: Type) { return tocode.type(t); }
 // (`B<T & F<T>>`, chained) prints 2^n of it. Two independent 53-bit hashes over what `typeKey` prints, memoized on the node.
 // What `typeKey` never prints: scopes, origins, freshness, and the checker's stamps on AST nodes inside a type (a default's `checkedType`).
 const UNPRINTED	= new Set(['declScope', 'origin', 'fresh', 'frozen', 'pos', 'scope', 'memo', 'checkedType', 'checkedCall', 'contextualType',
-	'flowSlot', 'flowType', 'instanceOf', 'inferredReturn', 'testedForAbsence']);
+	'flowSlot', 'flowType', 'instanceOf', 'inferredReturn', 'testedForAbsence', 'expectedType']);
 // Memoized ON the node, under symbols `Object.keys` never lists: a WeakMap entry per node cost more than the node itself.
 const TYPE_ID	= [Symbol('typeId'), Symbol('scopedTypeId')];
 const scopeIds	= new WeakMap<Scope, number>();

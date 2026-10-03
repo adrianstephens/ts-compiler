@@ -1463,7 +1463,7 @@ async function main() {
 
 	{
 		// A flow with no declaration of its own to open (an element, a method parameter, a return) opens every slot of its type instead.
-		const { viaElement, viaMethod, viaReturn } = await compile(`
+		const { viaElement, viaMethod, viaReturn, viaField } = await compile(`
 			function sum(a: u8[]): number { let s = 0; for (let i = 0; i < a.length; i++) s += a[i]; return s; }
 			class H { b: u8[] = [1]; set(v: u8[]): void { this.b = v; } }
 			let kept: u8[] = [300];
@@ -1471,10 +1471,12 @@ async function main() {
 			export function viaElement(): number { const all: u8[][] = []; const xs: number[] = [300, 1]; all.push(xs); const p: u8[] = [300, 2]; all.push(p); return sum(all[0]) * 100 + sum(all[1]); }
 			export function viaMethod(): number { const h = new H(); const xs: number[] = [300, 1]; h.set(xs); const p: u8[] = [300, 2]; return sum(h.b) * 100 + sum(p); }
 			export function viaReturn(): number { const xs: number[] = [300, 1]; kept = xs; const p: u8[] = [300, 2]; return sum(get()) * 100 + sum(p); }
+			export function viaField(): number { return sum(new H().b); }
 		`);
 		check("viaElement() (a number[] pushed into a u8[][])", viaElement(), 30146);
 		check("viaMethod() (a number[] into a u8[] method parameter)", viaMethod(), 30146);
 		check("viaReturn() (an open u8[] returned)", viaReturn(), 30146);
+		check("viaField() (a u8[] field initializer read before any set)", viaField(), 1);
 	}
 
 	{
@@ -4465,7 +4467,7 @@ async function main() {
 		//   3. An EMPTY array literal ignored its contextual element type and always built a boxed-`any` array,
 		//      so `[[], []]` stored a different physical type than `[[1], [2]]` -- reading either back casts to
 		//      the declared element kind, so the empty one trapped ("illegal cast") on a plain read.
-		const { indexTarget, indexLiteralTarget, indexMemberPath, elementMethod, emptyNested } = await compile(`
+		const { indexTarget, indexLiteralTarget, indexMemberPath, elementMethod, emptyNested, unannotatedNested } = await compile(`
 			export function indexTarget(i: number): number {
 				const a: (number[] | undefined)[] = [undefined, undefined, undefined];
 				(a[i] ??= []).push(10);
@@ -4494,12 +4496,18 @@ async function main() {
 				const a: number[][] = [[], [9]];
 				return a[0].length * 10 + a[1][0];
 			}
+			export function unannotatedNested(): number {
+				const a = [[1, 2], [3]];
+				a[0][0] = 8;
+				return a[0][0] + a[1][0];
+			}
 		`);
 		check("'??=' into an array element, then a 'this'-reassigning method on the result", indexTarget(2), 220);
 		check("'??=' into an array element at a literal index", indexLiteralTarget(), 128);
 		check("'??=' into an array element reached by a member path", indexMemberPath(), 26);
 		check("a 'this'-reassigning method on an array element", elementMethod(), 24);
 		check('an empty nested array literal keeps its contextual element kind', emptyNested(), 9);
+		check('an unannotated nested array literal is built as its own type', unannotatedNested(), 11);
 	}
 
 	{
