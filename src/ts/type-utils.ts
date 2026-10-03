@@ -50,7 +50,6 @@ export function literalTypeOf(e: Expr | undefined): Type | undefined {
 			case 'object':	return e.value === null ? Literal(e.value) : Array.isArray(e.value) ? STRING : REGEXP;
 		}
 	}
-//	return e?.type === 'literal' ? TS.RefType(literalType(e)) : undefined;
 }
 
 // ===================================================================

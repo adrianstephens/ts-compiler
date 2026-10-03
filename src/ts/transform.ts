@@ -1283,7 +1283,6 @@ export function TStoDecl(program: Module<Stmt>, opts?: Partial<typeof OutputOpti
 	const stripClassDecl = (stmt: JS.ClassDecl<any>): JS.Declaration<any> => {
 		const setKeys	= new Set(stmt.body.flatMap(m => m.type === 'set' ? JS.keyName(m.key) ?? [] : []));
 		const seen		= new Set<string>();
-//		const extra:	TS.ClassMember[] = [];
 
 		// `extends bin.Class(spec)` (or any non-identifier heritage) can't survive into a `.d.ts` -- there's no runtime call in an ambient declaration.
 		// Hoist its *type* into a synthesized `declare const _base` instead and extend that name instead.
@@ -1317,16 +1316,9 @@ export function TStoDecl(program: Module<Stmt>, opts?: Partial<typeof OutputOpti
 					}
 
 					case 'method': {
-						const extra:	TS.ClassMember[] = [];
-						if (m.key === 'constructor') {
-							for (const p of m.params) {
-								if (T.isParamProperty(p))
-									extra.push(JS.Field(typeof p.key === 'string' ? p.key : '?', undefined, p.typeAnnotation, p.modifiers));
-							}
-							extra.push(JS.Method('method', m.key, {params: m.params.map(stripParam), rest: m.rest, typeParams: m.typeParams}));
-							return extra;
-							//return [JS.Method('method', m.key, {params: m.params.map(stripParam), rest: m.rest, typeParams: m.typeParams})];
-						}
+						if (m.key === 'constructor')
+							return [...m.params.filter(T.isParamProperty).map(p => JS.Field<Type>(typeof p.key === 'string' ? p.key : '?', undefined, p.typeAnnotation, p.modifiers)),
+								JS.Method('method', m.key, {params: m.params.map(stripParam), rest: m.rest, typeParams: m.typeParams})];
 						const params		= m.params.map(stripParam);
 						const returnType	= m.returnType ?? (m.body ? inferReturn(m, m.body, global) : undefined);
 						const expansions	= expandConstrainedGeneric(m.typeParams, params, returnType);
@@ -1337,11 +1329,10 @@ export function TStoDecl(program: Module<Stmt>, opts?: Partial<typeof OutputOpti
 					}
 				}
 				return [];
-			})/*.concat(extra)*/ as JS.ClassMember<any>[],
+			}) as JS.ClassMember<any>[],
 			superClass,
 			ambient: true
 		};
-//		return { ...stmt, body, superClass, ambient: true};
 	};
 
 	// Ambient declarations have no initializer to destructure from -- split a destructured declarator into one

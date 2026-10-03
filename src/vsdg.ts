@@ -1799,7 +1799,6 @@ export abstract class Emitter<E, S extends { type: string }, T> {
 				break;
 		}
 		throw new Error(`not handling value node ${node.type}`);
-		//return this.dialect.literal(null);
 	}
 
 	// ---- this language's reconstruction half ----
