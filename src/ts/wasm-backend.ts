@@ -9397,9 +9397,17 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// What an `any` slot holds for `cls`'s member `name`: its DECLARED type's representation, a number's the `f64` box (`String.length` is an
 	// `array.len`, a literal's `{length: n}` may be an `i32`), or a reader's box cast traps. `T.lookupMember`: an `__asm` accessor has no decl.
 	function canonicalOf(cls: ClassInfo, name: string, physical: W.Type): W.Type {
-		const declared	= typeof physical === 'string' ? T.lookupMember(cls.thisTsType, name, global) : undefined;
-		const canonical	= declared && (T.isNumberLike(declared, global) ? 'f64' : typeOf(declared));
+		return canonicalFor(typeof physical === 'string' ? T.lookupMember(cls.thisTsType, name, global) : undefined, physical);
+	}
+	function canonicalFor(declared: Type | undefined, physical: W.Type): W.Type {
+		const canonical = typeof physical === 'string' && declared && (T.isNumberLike(declared, global) ? 'f64' : typeOf(declared));
 		return canonical && canonical !== 'void' ? canonical : physical;
+	}
+	// What an indexable class's elements are declared as: its `__get`'s result.
+	function elementTypeOf(cls: ClassInfo): Type | undefined {
+		const get = T.lookupMember(cls.thisTsType, '__get', global);
+		const fn = get && T.resolveOwn(get, global);
+		return fn?.type === 'function' ? fn.returnType : undefined;
 	}
 	function emitBoxed(cls: ClassInfo, name: string, physical: W.Type, ctx: FunctionContext, result: W.Type): void {
 		const canonical = canonicalOf(cls, name, physical);
@@ -9489,28 +9497,51 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		return synthesize(`<any index ${kind}>`, () => ({
 			params: [anyParam('recv'), { key: 'idx', wtype: 'f64' as W.Type, tsType: T.NUMBER }, ...(kind === 'set' ? [anyParam('value', W.REF_ANY_NULLABLE)] : [])],
 			result: kind === 'get' ? W.REF_ANY_NULLABLE : 'void' as W.Type,
-		}), (dctx, [recv], { result }) => {
-			const idxId: Expr	= Identifier('$idx');
-			const all			= (tests: Expr[]) => tests.reduce((a, b) => Binary<Expr, '&&'>('&&', a, b));
-			const integral		= [Binary<Expr, '>='>('>=', idxId, Literal(0)), Binary<Expr, '==='>('===', Binary<Expr, '%'>('%', idxId, Literal(1)), Literal(0))];
-			const asKey: Expr	= JS.Index(Identifier('$recv'), JS.Call(Identifier('String'), [idxId]));
-			const elementOf = (heap: wasm.HeapType, wtype: W.Type, tsType: Type) => ({ heap, emit: () => {
-				const name = `$indexed$${heap}`;
-				dctx.emit(I.local.set(dctx.declareValue(name, wtype, tsType).index));
-				const element: Expr = JS.Index(Identifier(name), idxId);
-				if (kind === 'get')
-					emitAs(Conditional<Expr>(all([...integral, Binary<Expr, '<'>('<', idxId, JS.Member(Identifier(name), 'length'))]), element, Identifier('undefined')), dctx, result);
-				else
-					emitStmt({ type: 'if', test: all(integral), consequent: JS.ExprStmt(Assign<Expr, never>(element, Identifier('$value'))), alternate: JS.ExprStmt(Assign<Expr, never>(asKey, Identifier('$value'))) } as Stmt, dctx);
+		}), (dctx, [recv, idx, value], { result }) => {
+			const index		= localArg(dctx, idx, 'f64', T.NUMBER);
+			// JS's array index: non-negative with no fraction (NaN and +-Infinity fail `idx - trunc(idx) == 0`).
+			const integral	= () => dctx.emit(I.local.get(idx), I.f64.const(0), I.f64.ge, I.local.get(idx), I.local.get(idx), I.f64.trunc, I.f64.sub, I.f64.const(0), I.f64.eq, I.i32.and);
+			// `recv[String(idx)]`, through the string-key dispatcher.
+			const asKey		= () => {
+				const str	= ensureClass('String')!;
+				const ctor	= ensureCtorDecl(str, overloadByTypes(str, 'constructor', [T.NUMBER]) ?? str.methodDecls.get('constructor')![0]);
+				dctx.emit(I.local.get(recv), I.local.get(idx));
+				coerceTop('f64', dctx, ctor.params[0]);
+				dctx.emit(I.call(ctor.funcIndex), ...kind === 'set' ? [I.local.get(value)] : [], I.call(ensureAnyKey(kind).funcIndex));
+			};
+			const elementOf	= (r: Receiver) => ({ heap: r.heap, emit: () => {
+				const { cls } = r, obj = dctx.temp(`$indexed$${r.heap}`, cls.thisWtype!);
+				const elementT	= elementTypeOf(cls);
+				dctx.emit(I.local.set(obj));
+				integral();
+				if (kind === 'get') {
+					dctx.emit(I.local.get(obj));
+					coerceTop(emitMemberRead(cls, 'length', dctx), dctx, 'f64');
+					dctx.emit(I.local.get(idx), I.f64.gt, I.i32.and);
+					dctx.emitIf(toValType(result), () => {
+						dctx.emit(I.local.get(obj));
+						const got = emitCallOn(cls, '__get', [index], dctx);
+						coerceTop(got, dctx, canonicalFor(elementT, got));
+						coerceTop(canonicalFor(elementT, got), dctx, result);
+					}, () => dctx.emitDefaultValue(result, types, toValType));
+				} else {
+					const wtype = canonicalFor(elementT, typeOf(elementT ?? T.ANY)!);
+					dctx.emitIf(undefined, () => {
+						dctx.emit(I.local.get(obj));
+						emitCallOn(cls, '__set', [index, { wtype, t: elementT, push: () => {
+							dctx.emit(I.local.get(value));
+							coerceTop(W.REF_ANY_NULLABLE, dctx, wtype);
+						} }], dctx);
+					}, asKey);
+				}
 			} });
 			// A string's storage is also the heap type of a class that owns its methods; the string arm reads it, and a string has nothing to write.
 			const strings	= types.array('i16');
 			const accessor	= kind === 'get' ? '__get' : '__set';
 			const indexable	= distinctHeaps(dynamicReceivers(false).filter(r => r.heap !== strings && (r.cls.methodDecls.has(accessor) || !!r.cls.inlineMethods?.has(accessor))
 				&& !!T.lookupMember(r.cls.thisTsType, 'length', libGlobal)));
-			const arms		= indexable.map(r => elementOf(r.heap, r.cls.thisWtype!, r.cls.thisTsType));
-			emitTypeCascade(dctx, recv, kind === 'get' ? [elementOf(strings, typeOf(T.STRING)!, T.STRING), ...arms] : arms,
-				() => kind === 'get' ? emitAs(asKey, dctx, result) : emitStmt(JS.ExprStmt(Assign<Expr, never>(asKey, Identifier('$value'))), dctx), result);
+			const stringArm	= kind === 'get' ? [elementOf({ heap: strings, cls: builtinTypeOwner('string')! })] : [];
+			emitTypeCascade(dctx, recv, [...stringArm, ...indexable.map(elementOf)], asKey, result);
 		});
 	}
 
