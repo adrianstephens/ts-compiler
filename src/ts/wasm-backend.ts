@@ -9112,6 +9112,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			// `import * as TS` call inside it read as an unresolved identifier.
 			const ctx		= new FunctionContext(key, new Scope(moduleScopeOf(cls.homeModule) ?? cls.declScope ?? libGlobal), plainReturn(thisWtype), cls, cls.homeModule);
 			beginBody(ctx, ctor.body!, params);
+			// A field of the constructed `this`, the field's declared type the value's context.
+			const writeField = (field: string, value: Expr) => {
+				const idx = cls.fieldIndex.get(field)!, wtype = cls.fields[idx].wtype;
+				ctx.emit(I.local.get(ctx.ctorThis!.index));
+				ctx.withContext(cls.fieldDeclaredType(field, global), () => emitAs(value, ctx, wtype));
+				emitFieldWrite(cls, idx, wtype, ctx);
+			};
 			// This constructor supplies `this` directly via its own return value (`ctorReturnsValue`)
 			// `cls`'s own `thisWtype`/`typeIndex` already say so; ordinary statement compilation does the right thing once `ctx.ctorThis` is unset.
 			const last = ctor.body?.at(-1);
@@ -9158,15 +9165,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					materializeThis();
 
 				emitCtorStatements(ctor, cls, ctx, (field: string, value: Expr) => {
-					// `this` genuinely exists (every field collected earlier, or this is a reassignment): an ordinary field write, same as the scalar-only path's `setField`.
-					// Only reachable via `emitCtorStatements`'s explicit-`this.field=value` interception -- a param property/field initializer always precedes an empty `remaining`.
-					if (!ctx.ctorFields) {
-						emitStmt({
-							type: 'expression',
-							expression: Assign<Expr, JS.assignableOps>(Member<Expr>({ type: 'this' }, field), value),
-						}, ctx);
-						return;
-					}
+					// `this` exists already (every field collected, or this is a reassignment): an ordinary field write.
+					if (!ctx.ctorFields)
+						return writeField(field, value);
 					const wtype = cls.fields[cls.fieldIndex.get(field)!].wtype;
 					// An optional field already holds its seeded default, and a field may be assigned twice before `this` exists: one local.
 					// PINNED, as `this` is: a base class's field lands inside the `super(...)` call's scope, whose close would free its slot for the next field.
@@ -9190,10 +9191,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					I.struct.new_default(cls.typeIndex),
 					I.local.set(thisLocal.index),
 				);
-				emitCtorStatements(ctor, cls, ctx, (field: string, value: Expr) => emitStmt({
-					type: 'expression',
-					expression: Assign<Expr, JS.assignableOps>(Member<Expr>({ type: 'this' }, field), value),
-				}, ctx));
+				emitCtorStatements(ctor, cls, ctx, writeField);
 				ctx.emit(I.local.get(ctx.ctorThis!.index), I.return);
 			}
 
