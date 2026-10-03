@@ -4473,21 +4473,16 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					if (!resolvedParams)
 						throw `internal: '${label}' has a non-literal default with no resolved parameter info`;
 					const rename = new Map<string, string>();
-					ctx.openScope();
-					const locals = resolvedParams.map((p, i) => {
-						const a = i < args.length ? args[i] : substituteEarlierParamRefs(missing[i - args.length]!, rename);
-						emitAs(a, ctx, params[i]);
-						const name = `$default$${ctx.tempCounter++}`;
-						const local = ctx.declareLocal(name, params[i]);
-						ctx.scope.addValue(name, p.tsType);
-						ctx.emit(I.local.set(local.index));
-						if (typeof p.key === 'string')
-							rename.set(p.key, name);
-						return local;
+					return ctx.inScope(() => {
+						const { temp, emit, check } = lowering(ctx);
+						resolvedParams.map((p, i) => {
+							const name = temp('default');
+							emit(JS.VarDecl('const', JS.Var(name, i < args.length ? args[i] : substituteEarlierParamRefs(missing[i - args.length]!, rename), p.tsType)));
+							if (typeof p.key === 'string')
+								rename.set(p.key, name);
+							return name;
+						}).forEach((name, i) => emitAs(check(Identifier(name)), ctx, params[i]));
 					});
-					locals.forEach(local => ctx.emit(I.local.get(local.index)));
-					ctx.closeScope();
-					return;
 				}
 
 				args = [...args, ...missing as Expr[]];
