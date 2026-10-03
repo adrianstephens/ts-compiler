@@ -799,6 +799,8 @@ function admitsLiterals(declared: Type | undefined, values: readonly unknown[] |
 	return !values || !declaredVals || declaredVals.some(v => values.includes(v));
 }
 const writtenLiteral = (e: Expr) => e.type === 'literal' ? [e.value] : undefined;
+// A value's member as a candidate shape's field sees it: whether the field takes it, and the literals it may be.
+interface ShapeProp { fits: (declared: Type) => boolean; literals?: readonly unknown[] }
 
 interface LocalField { index: number; wtype: W.Type; tsType: Type }
 
@@ -3158,73 +3160,31 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		return want === got || want === 'any' || got === 'any' || isOpen(declared);
 	}
 
-	// A bare object literal with no single resolvable target type (`case 'object'`'s own `want` doesn't name one class) -- a
-	// last-resort structural match against every reachable, struct-backed class/object-shape (the same "every class ever
-	// discovered" scan `findAnyDispatchCandidates` uses for method dispatch, just picking which shape a literal builds as).
+	// A literal with no single target type (`case 'object'`'s `want` names no class) matched against every built shape. A written
+	// value is built in its field's context; a spread's already has a layout the field must hold, per member of its operand's union.
 	function matchObjectShape(e: JS.ObjectExpr<Type>, ctx: FunctionContext, anon = true): ClassInfo | undefined {
-		// `props`: every key the literal PROVIDES, a spread's included: no class names this literal's target, so it is read
-		// through its own type, and a struct lacking one of its keys would lose it. `explicit`: the fields actually WRITTEN.
-		const props		= new Map<string, Expr>();
-		const explicit	= new Set<string>();
+		const props = new Map<string, ShapeProp>();
 		for (const p of e.properties) {
 			if (p.type === 'spread') {
 				const keys = spreadKeys(p.operand, ctx);
 				if (!keys)
 					return undefined;
-				// Last source wins, in written order, as it does at runtime. A spread-sourced value is never
-				// a literal, so such a key simply takes no part in the discriminant tiebreak below.
 				for (const k of keys)
-					props.set(k, p.operand);
-				continue;
+					props.set(k, { fits: declared => T.unionMembers(ctx.narrowedTypeOf(p.operand), ctx.scope).every(m => (got => !got || holdsLayout(declared, got))(T.lookupMember(m, k, ctx.scope))) });
+			} else if (p.type === 'field' && typeof p.key !== 'object' && p.value) {
+				const value = p.value;
+				props.set(String(p.key), { fits: declared => T.isAssignable(checkerTypeOf(unwrapAs(value), ctx.scope), declared, ctx.scope), literals: writtenLiteral(value) });
+			} else {
+				return undefined;
 			}
-			if (p.type !== 'field' || typeof p.key === 'object' || !p.value)
-				return undefined;
-			props.set(String(p.key), p.value);
-			explicit.add(String(p.key));
 		}
-		// A candidate names every key given, leaves no required field unfilled, and its field types accept the values: a written one is built in its
-		// field's context, a spread's already has a layout the field must hold. `new Set`: one class may be reachable under two keys.
-		const fits = (cls: ClassInfo) => [...props].every(([k, value]) => {
-			const declared = cls.fieldDeclaredType(k, global);
-			if (!declared)
-				return true;
-			if (explicit.has(k))
-				return T.isAssignable(checkerTypeOf(unwrapAs(value), ctx.scope), declared, ctx.scope);
-			// Per member: a key only some members of a union carry has no common type to look up.
-			return T.unionMembers(ctx.narrowedTypeOf(value), ctx.scope).every(m => {
-				const got = T.lookupMember(m, k, ctx.scope);
-				return !got || holdsLayout(declared, got);
-			});
-		});
-		const candidates = [...new Set(classes.values())].filter(cls =>
-			!!laidOut(cls) && !cls.anonymous && [...props.keys()].every(k => cls.fieldIndex.has(k)) && cls.fields.every(f => props.has(f.name) || f.optional) && fits(cls)
-		);
-		if (candidates.length === 1)
-			return candidates[0];
-		// No declared shape fits, or several do with nothing to decide and no context (`any` is none) to read it through: it is
-		// read through its own type, so it is built as that type's owner (`objectShapeOf`, one answer per type) -- what every reader expects.
-		const fallback = () => {
-			if (!anon)
-				return undefined;
-			const resolved = T.resolve(ctx.scope, checkerTypeOf(e, ctx.scope));
-			return resolved.type === 'object' && !indexSignatureValueType(resolved) ? objectShapeOf(resolved, resolved) : undefined;
-		};
-		if (candidates.length === 0)
-			return fallback();
-
-		const matches = candidates.filter(cls => [...props].every(([key, value]) => admitsLiterals(cls.fieldDeclaredType(key, global), writtenLiteral(value))));
-		return matches.length === 1 ? matches[0] : matches.length === 0 || !ctx.contextualReturn || T.isAny(ctx.contextualReturn) ? fallback() : undefined;
+		// Else it is read through its own type, so it is built as that type's owner (`objectShapeOf`), as every reader expects.
+		const fallback = () => anon ? (r => r.type === 'object' && !indexSignatureValueType(r) ? objectShapeOf(r, r) : undefined)(T.resolve(ctx.scope, checkerTypeOf(e, ctx.scope))) : undefined;
+		return declaredShape(props, new Set(props.keys()), fallback, () => !ctx.contextualReturn || T.isAny(ctx.contextualReturn) ? fallback() : undefined);
 	}
 
-	// `matchObjectShape`'s type-level counterpart, used by `typeOf`'s 'object' case when a real object TYPE (not a
-	// literal expression) needs a nominal class: e.g. a generic parameter's structural bound (`Record<string, any>`)
-	// substituted with an interface-typed argument. `ensureClass`/`ownerFor` preserve name identity only for a `class`
-	// ref, never a plain `interface` (a bare `T.resolve` fully expands it), so its name is gone; self-hosting
-	// `walker.ts`'s `mapObject` hit exactly this (`local 'r' has an unsupported type`). Same exact-field-set-then-
-	// literal-discriminant matching as the literal version above, but against declared field *types* not expression
-	// *values*; ambiguous or partial cases (computed/non-string key, non-property member) return `undefined`, never a guess.
-	// One answer per type for the whole compile: which classes exist changes as codegen proceeds, and a value built under
-	// one answer is unconvertible to a later one (a local typed before `FunctionType` was built, read after it was).
+	// An object TYPE as a declared shape: an interface's name is gone once `resolve` expands it. One answer per type for the compile,
+	// since which classes exist changes as codegen proceeds and a value built under one answer could not convert to a later one.
 	function matchObjectShapeByType(t: TS.ObjectType, orElse = () => indexSignatureValueType(t) ? undefined : ensureAnonObjectShape(t)): ClassInfo | undefined {
 		const key	= T.typeKey(t);
 		const found	= classes.get(key) ?? findObjectShapeByType(t, orElse);
@@ -3239,34 +3199,27 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		return t && 'final' in t ? t : undefined;
 	}
 
-	// `orElse` answers when no declared shape has these members; an ambiguous match answers `undefined`.
+	// A shape's field TYPES must agree, not just names (`NodeMap<Obj>`'s `values` is a mapper where `Obj`'s is `number[]`). Asked of the
+	// CHECKER, never `typeOf`, which builds shapes and so re-enters. A required field needs a required member: `Partial<F>` is no `F`.
 	function findObjectShapeByType(t: TS.ObjectType, orElse: () => ClassInfo | undefined): ClassInfo | undefined {
-		const props = new Map<string, Type>();
+		const props = new Map<string, ShapeProp>();
 		for (const m of t.members) {
 			if (m.type !== 'property' || typeof m.key === 'object')
 				return undefined;
-			props.set(String(m.key), m.typeAnnotation);
+			const pt = m.typeAnnotation;
+			props.set(String(m.key), { fits: declared => T.isAssignable(pt, declared, global) && holdsLayout(declared, pt), literals: T.literalValues(pt) });
 		}
-		// See `matchObjectShape`'s own comment -- same optional-field-omission tolerance and the same `new Set` reason.
-		// The field TYPES must agree too, not just their names: `NodeMap<Obj>`'s `values` is a mapper `(x: number[]) =>
-		// number[]` where `Obj`'s own is `number[]`, and the literal was then built against the wrong one. Asked of the
-		// CHECKER, never `typeOf`: this runs while a shape is being resolved, and `typeOf` builds shapes, so asking it
-		// re-enters (ts-parser.ts's `CallSig` -> `Param[]` -> the recursive `Type` union did not terminate). A field
-		// whose declared type is unknown to `fieldDeclaredType` is not judged. Nor may a member's layout differ from its field's (`holdsLayout`).
-		// A required field needs a required member: `Partial<FunctionDecl>` is no `FunctionDecl`.
-		const certain = new Set(t.members.flatMap(m => m.type === 'property' && !hasMod(m, 'optional') ? [T.memberKey(m.key)] : []));
-		const candidates = [...new Set(classes.values())].filter(cls =>
-			!!laidOut(cls) && !cls.anonymous && [...props.keys()].every(k => cls.fieldIndex.has(k)) && cls.fields.every(f => certain.has(f.name) || f.optional)
-			&& [...props].every(([k, pt]) => { const declared = cls.fieldDeclaredType(k, global); return !declared || T.isAssignable(pt, declared, global) && holdsLayout(declared, pt); })
-		);
-		if (candidates.length === 1)
-			return candidates[0];
-		// No declared shape has this field set, or (below) every candidate's discriminant rules it out: the type is anonymous.
-		if (candidates.length === 0)
-			return orElse();
+		return declaredShape(props, new Set(t.members.flatMap(m => m.type === 'property' && !hasMod(m, 'optional') ? [T.memberKey(m.key)] : [])), orElse);
+	}
 
-		const matches = candidates.filter(cls => [...props].every(([key, propType]) => admitsLiterals(cls.fieldDeclaredType(key, global), T.literalValues(propType))));
-		return matches.length === 1 ? matches[0] : matches.length === 0 ? orElse() : undefined;
+	// The built shape a value of these members fits: it names every key, `supplied` fills each required field, and each field takes its value;
+	// several are told apart by literal discriminants. `new Set`: one class may be reachable under two keys.
+	function declaredShape(props: Map<string, ShapeProp>, supplied: ReadonlySet<string | undefined>, orElse: () => ClassInfo | undefined, ambiguous = (): ClassInfo | undefined => undefined): ClassInfo | undefined {
+		const candidates = [...new Set(classes.values())].filter(cls =>
+			!!laidOut(cls) && !cls.anonymous && [...props.keys()].every(k => cls.fieldIndex.has(k)) && cls.fields.every(f => supplied.has(f.name) || f.optional)
+			&& [...props].every(([k, p]) => (declared => !declared || p.fits(declared))(cls.fieldDeclaredType(k, global))));
+		const matches = candidates.length > 1 ? candidates.filter(cls => [...props].every(([k, p]) => admitsLiterals(cls.fieldDeclaredType(k, global), p.literals))) : candidates;
+		return matches.length === 1 ? matches[0] : matches.length ? ambiguous() : orElse();
 	}
 
 	// Index syntax (`a[i]`, `a[i] = v`) calls a class's own INDEX accessor, `__get`/`__set`, never a real API of that name
