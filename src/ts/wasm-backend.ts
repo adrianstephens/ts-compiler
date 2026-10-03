@@ -4919,15 +4919,24 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	}
 
 	// `owner`'s `__asm` method `name`, or the `__asm` overload `call` chooses.
-	function inlineFor(owner: ClassInfo, name: string, call: CallSite, ctx: FunctionContext): Builtin<Inline> | undefined {
+	function inlineFor(owner: ClassInfo, name: string, call: CallSite, ctx: FunctionContext, chosen?: MethodMember): Builtin<Inline> | undefined {
 		const decls = owner.methodDecls.get(name);
-		return owner.inlineMethods?.get(name) ?? (decls && owner.inlineOverloads?.get(implementationOf(owner, name, decls, call, ctx)));
+		return owner.inlineMethods?.get(name) ?? (decls && owner.inlineOverloads?.get(chosen ?? implementationOf(owner, name, decls, call, ctx)));
+	}
+	// The body of `owner.name` (its own or inherited) the argument TYPES fit, for a call of values codegen holds; `undefined` when there is one.
+	function overloadByTypes(owner: ClassInfo, name: string, argTs: Type[]): MethodMember | undefined {
+		const declared	= (c: ClassInfo | undefined): MethodMember[] => !c ? [] : c.methodDecls.get(name) ?? declared(c.superClass);
+		const bodied	= declared(owner).filter(d => d.body);
+		const fits = bodied.length > 1 ? bodied.find(d => T.argsFit(T.FixSig(d, T.ANY), argTs, global)) : undefined;
+		if (bodied.length > 1 && !fits)
+			throw `internal: no overload of '${owner.name}.${name}' takes (${argTs.map(t => T.showType(t)).join(', ')})`;
+		return fits;
 	}
 	// `owner`'s method `name` as a call reaches it: through virtual dispatch where a subclass overrides it. Keyed by the bare declared
 	// name, which a generic instantiation's mangled `owner.name` is not (`ensureVirtualDispatch` does not support one).
-	function methodFor(owner: ClassInfo, name: string, call: CallSite, ctx: FunctionContext, direct = false): FuncInfo | undefined {
+	function methodFor(owner: ClassInfo, name: string, call: CallSite, ctx: FunctionContext, direct = false, chosen?: MethodMember): FuncInfo | undefined {
 		return !direct && owner.decl.name && hasDeclaredOverride(owner.decl.name + moduleTag(stmtHomeModule.get(owner.decl)), name)
-			? ensureVirtualDispatch(owner, name, ctx) : ensureMethod(owner, name, call, ctx);
+			? ensureVirtualDispatch(owner, name, ctx) : ensureMethod(owner, name, call, ctx, chosen);
 	}
 
 	// `Object.entries(x)` -- a known, fixed-identity global intrinsic (`declare var Object` in lib.d.ts), not a name to special-case
@@ -5311,14 +5320,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			const getter	= cls && indexAccessor(cls, target.object, 'get', ctx);
 			const getSig 	= cls && getter && methodSig(cls, getter, ctx);
 			if (cls && getter && getSig) {
-				// The index is held by name, typed for overload resolution: an overloaded accessor is chosen by its arguments' types.
-				const indexName	= `$index$${ctx.tempCounter++}`;
-				ctx.scope.addValue(indexName, ctx.narrowedTypeOf(target.index));
-				const idxExpr: Expr	= Identifier(indexName);
+				// The index held for the accessor call, typed: an overloaded accessor is chosen by its arguments' types.
+				const indexName	= `$index$${ctx.tempCounter++}`, indexT = ctx.narrowedTypeOf(target.index);
 				const setIndex	= () => {
 					const index = ctx.temp(indexName, getSig.params[0]);
 					ctx.emit(I.local.set(index));
-					return localArg(ctx, index, getSig.params[0]);
+					return localArg(ctx, index, getSig.params[0], indexT);
 				};
 				const operands	= [expr(target.object, cls.thisWtype!), expr(target.index, getSig.params[0])];
 				const bounded	= readsPastEnd(target, ctx) && isPositional(cls, ctx) ? (resultWtype: W.Type) => void emitBoundedRead(target, cls.thisWtype!, resultWtype, ctx, (obj, idx) => {
@@ -5334,13 +5341,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				// What a write STORES is the setter's value parameter for the overload the element's type picks (a typed array's
 				// `__set` takes a `number` or a `bigint`), not the getter's result.
 				const elementT	= ctx.narrowedTypeOf(target);
-				const probe		= `$set$${ctx.tempCounter++}`;
-				ctx.scope.addValue(probe, elementT);
-				const setSig	= cls.inlineMethods?.has(setter) ? methodSig(cls, setter, ctx) : ensureMethod(cls, setter, [idxExpr, Identifier(probe)], ctx);
+				const setSig	= cls.inlineMethods?.has(setter) ? methodSig(cls, setter, ctx) : ensureMethod(cls, setter, [], ctx, overloadByTypes(cls, setter, [indexT, elementT]));
 				const wtype		= setSig ? setSig.params[setSig.params.length - 1] : getSig.result;
 				return { wtype, operands,
-					load:	() => void coerceValue(target, emitCallOn(cls, getter, [setIndex()], ctx, [idxExpr]), ctx, wtype),
-					store:	storeByCall(wtype, value => emitCallOn(cls, setter, [setIndex(), value], ctx, [idxExpr, Identifier(probe)])) };
+					load:	() => void coerceValue(target, emitCallOn(cls, getter, [setIndex()], ctx), ctx, wtype),
+					store:	storeByCall(wtype, value => emitCallOn(cls, setter, [setIndex(), { ...value, t: elementT }], ctx)) };
 			}
 
 			// A union of indexable classes (`Uint8Array | number[]`): the element's dispatch picks the class's `__get` at run time.
@@ -6399,7 +6404,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 								addSource(name, src);
 							continue;
 						}
-						const spreadLocal = ctx.declareValue(`$spread$${ctx.tempCounter++}`, spreadCls.thisWtype!, spreadCls.thisTsType!);
+						const spreadLocal = ctx.declareLocal(`$spread$${ctx.tempCounter++}`, spreadCls.thisWtype!);
 						emitSpreadOperand(p.operand, ctx, spreadCls.thisWtype!);
 						ctx.emit(I.local.set(spreadLocal.index));
 						for (const f of spreadCls.fields)
@@ -9182,15 +9187,15 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	}
 
 	// An empty argument list only probes a one-body method's signature.
-	function ensureMethod(owner: ClassInfo, name: string, call: CallSite, callerCtx: FunctionContext): FuncInfo | undefined {
+	function ensureMethod(owner: ClassInfo, name: string, call: CallSite, callerCtx: FunctionContext, chosen?: MethodMember): FuncInfo | undefined {
 		const decls		= owner.methodDecls.get(name);
 		const fullName	= `${owner.name}.${name}`;
 		// Not overridden by `owner` itself: delegate straight to the ancestor's own compiled function (cached under *its* key, e.g. `A.greet`, not `owner.name`'s) rather
 		// than recompiling a duplicate. Sound and free: wasm-GC struct subtyping (`ensureClass`'s own `supertypes`) makes a `(ref Derived)` value directly callable
 		// wherever `(ref A)` is declared, no cast needed -- this is why a non-overridden inherited method stays a single, plain `call`.
 		if (!decls)
-			return owner.superClass && ensureMethod(owner.superClass, name, call, callerCtx);
-		let decl = implementationOf(owner, name, decls, call, callerCtx);
+			return owner.superClass && ensureMethod(owner.superClass, name, call, callerCtx, chosen);
+		let decl = chosen ?? implementationOf(owner, name, decls, call, callerCtx);
 		// Qualified so it can share `funcs` with plain top-level functions (bare identifiers can't contain
 		// '.') without colliding; only suffixed when there's a real overload set to disambiguate.
 		let key = decls.length > 1 ? `${fullName}#${decls.indexOf(decl)}` : fullName;
@@ -9341,14 +9346,15 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	function dynamicObjectArms(use: (cls: ClassInfo) => void) {
 		return [...new Set(classes.values())].filter(cls => isDynamicObject(cls) && cls.typeIndex !== -1).map(cls => ({ heap: cls.typeIndex, emit: () => use(cls) }));
 	}
-	// An argument the caller already holds, in its physical representation.
-	interface HeldArg { wtype: W.Type; push(): void }
-	const localArg	= (ctx: FunctionContext, index: number, wtype: W.Type): HeldArg => ({ wtype, push: () => ctx.emit(I.local.get(index)) });
-	const stringArg	= (ctx: FunctionContext, s: string): HeldArg => ({ wtype: W.ARRAY.i16, push: () => emitStringConst(s, ctx) });
-	// `cls`'s method `name` on the receiver on the stack, the overload `call` (a source call's arguments) chooses: by default none, so one body.
-	function emitCallOn(cls: ClassInfo, name: string, args: HeldArg[], ctx: FunctionContext, call: CallSite = []): W.Type {
-		const inline	= inlineFor(cls, name, call, ctx)?.(args.map(a => ({ wtype: a.wtype })), ctx);
-		const method	= inline ? undefined : methodFor(cls, name, call, ctx);
+	// An argument the caller already holds, in its physical representation; its TS type `t`, where it picks an overload.
+	interface HeldArg { wtype: W.Type; push(): void; t?: Type }
+	const localArg	= (ctx: FunctionContext, index: number, wtype: W.Type, t?: Type): HeldArg => ({ wtype, t, push: () => ctx.emit(I.local.get(index)) });
+	const stringArg	= (ctx: FunctionContext, s: string): HeldArg => ({ wtype: W.ARRAY.i16, t: T.STRING, push: () => emitStringConst(s, ctx) });
+	// `cls`'s method `name` on the receiver on the stack, the overload its arguments' types fit (`overloadByTypes`).
+	function emitCallOn(cls: ClassInfo, name: string, args: HeldArg[], ctx: FunctionContext): W.Type {
+		const chosen	= overloadByTypes(cls, name, args.map(a => a.t ?? T.ANY));
+		const inline	= inlineFor(cls, name, [], ctx, chosen)?.(args.map(a => ({ wtype: a.wtype })), ctx);
+		const method	= inline ? undefined : methodFor(cls, name, [], ctx, false, chosen);
 		const sig		= inline ?? method;
 		if (!sig)
 			throw `internal: '${cls.name}' has no method '${name}'`;
