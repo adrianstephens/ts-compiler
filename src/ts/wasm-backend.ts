@@ -4892,8 +4892,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	function emitMethodCall(owner: ClassInfo, name: string, call: CallSite, ctx: FunctionContext, bypassVirtual?: boolean): W.Type {
 		const args		= argsOf(call);
 		const typeArgs	= typeArgsOf(call);
-		const decls		= owner.methodDecls.get(name);
-		const inline	= owner.inlineMethods?.get(name) ?? (decls && owner.inlineOverloads?.get(implementationOf(owner, name, decls, call, ctx)));
+		const inline	= inlineFor(owner, name, call, ctx);
 		if (inline) {
 			if (args.some(a => a.type === 'spread'))
 				throw 'spread call arguments are not supported';
@@ -4919,6 +4918,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		return method.result;
 	}
 
+	// `owner`'s `__asm` method `name`, or the `__asm` overload `call` chooses.
+	function inlineFor(owner: ClassInfo, name: string, call: CallSite, ctx: FunctionContext): Builtin<Inline> | undefined {
+		const decls = owner.methodDecls.get(name);
+		return owner.inlineMethods?.get(name) ?? (decls && owner.inlineOverloads?.get(implementationOf(owner, name, decls, call, ctx)));
+	}
 	// `owner`'s method `name` as a call reaches it: through virtual dispatch where a subclass overrides it. Keyed by the bare declared
 	// name, which a generic instantiation's mangled `owner.name` is not (`ensureVirtualDispatch` does not support one).
 	function methodFor(owner: ClassInfo, name: string, call: CallSite, ctx: FunctionContext, direct = false): FuncInfo | undefined {
@@ -5163,11 +5167,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 
 	// One classification for reads and writes, so the two cannot drift; a kind whose type differs by direction (getter vs setter) picks by `write`.
 	function resolvePlace(target: Expr, ctx: FunctionContext, write = false): Place | undefined {
-		// The value into a named local, for a store that calls a method with it; a chainable result (`Map.set`'s `this`) is dropped.
-		const storeByCall = (wtype: W.Type, call: (name: string) => W.Type) => () => {
-			const name = `$new$${ctx.tempCounter++}`;
-			ctx.emit(I.local.set(ctx.temp(name, wtype)));
-			if (call(name) !== 'void')
+		// The value into a local, for a store that calls a method with it; a chainable result (`Map.set`'s `this`) is dropped.
+		const storeByCall = (wtype: W.Type, call: (value: HeldArg) => W.Type) => () => {
+			const value = ctx.temp(`$new$${ctx.tempCounter++}`, wtype);
+			ctx.emit(I.local.set(value));
+			if (call(localArg(ctx, value, wtype)) !== 'void')
 				ctx.emit(I.drop);
 		};
 		const fixed	= (wtype: W.Type, emit: () => void): Operand => ({ wtype, emit });
@@ -5218,14 +5222,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 
 			// A dynamic object (`{[k: string]: V}`, a `Map`): `o.a` is the key's entry, never one of the map's own members.
 			if (cls && !isOptionalChainLink(target) && indexSignatureValueType(T.resolve(ctx.scope, ctx.narrowedTypeOf(target.object))) && methodSig(cls, 'get', ctx)) {
-				const key: Expr = Literal(prop);
+				const get = () => emitCallOn(cls, 'get', [stringArg(ctx, prop)], ctx);
 				if (!write)
-					return { wtype: methodSig(cls, 'get', ctx)!.result, operands: [receiver(cls.thisWtype!)], load: () => void emitMethodCall(cls, 'get', [key], ctx) };
+					return { wtype: methodSig(cls, 'get', ctx)!.result, operands: [receiver(cls.thisWtype!)], load: () => void get() };
 				const wtype = methodSig(cls, 'set', ctx)?.params[1];
 				if (!wtype)
 					throw `internal: '${cls.name}' has a 'get' but no 'set(key, value)'`;
-				return { wtype, operands: [receiver(cls.thisWtype!)], load: () => coerceValue(target, emitMethodCall(cls, 'get', [key], ctx), ctx, wtype),
-					store: storeByCall(wtype, name => emitMethodCall(cls, 'set', [key, Identifier(name)], ctx)) };
+				return { wtype, operands: [receiver(cls.thisWtype!)], load: () => coerceValue(target, get(), ctx, wtype),
+					store: storeByCall(wtype, value => emitCallOn(cls, 'set', [stringArg(ctx, prop), value], ctx)) };
 			}
 
 			// An accessor, before the field: a real getter (`Array<T>.length`) wins over any field of the name.
@@ -5241,7 +5245,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					throw `internal: accessor '${prop}' has no signature`;
 				const wtype = write ? sig.params[0] : sig.result;
 				return { wtype, operands: [receiver(cls!.thisWtype!)], load: getLoad,
-					store: write ? storeByCall(wtype, name => emitMethodCall(cls!, set, [Identifier(name)], ctx)) : undefined };
+					store: write ? storeByCall(wtype, value => emitCallOn(cls!, set, [value], ctx)) : undefined };
 			}
 
 			const fieldIdx = cls?.fieldIndex.get(prop);
@@ -5311,7 +5315,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				const indexName	= `$index$${ctx.tempCounter++}`;
 				ctx.scope.addValue(indexName, ctx.narrowedTypeOf(target.index));
 				const idxExpr: Expr	= Identifier(indexName);
-				const setIndex	= () => ctx.emit(I.local.set(ctx.temp(indexName, getSig.params[0])));
+				const setIndex	= () => {
+					const index = ctx.temp(indexName, getSig.params[0]);
+					ctx.emit(I.local.set(index));
+					return localArg(ctx, index, getSig.params[0]);
+				};
 				const operands	= [expr(target.object, cls.thisWtype!), expr(target.index, getSig.params[0])];
 				const bounded	= readsPastEnd(target, ctx) && isPositional(cls, ctx) ? (resultWtype: W.Type) => void emitBoundedRead(target, cls.thisWtype!, resultWtype, ctx, (obj, idx) => {
 					ctx.emit(I.local.get(obj));
@@ -5331,12 +5339,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				const setSig	= cls.inlineMethods?.has(setter) ? methodSig(cls, setter, ctx) : ensureMethod(cls, setter, [idxExpr, Identifier(probe)], ctx);
 				const wtype		= setSig ? setSig.params[setSig.params.length - 1] : getSig.result;
 				return { wtype, operands,
-					load:	() => { setIndex(); coerceValue(target, emitMethodCall(cls, getter, [idxExpr], ctx), ctx, wtype); },
-					store:	storeByCall(wtype, name => {
-						setIndex();
-						ctx.scope.addValue(name, elementT);
-						return emitMethodCall(cls, setter, [idxExpr, Identifier(name)], ctx);
-					}) };
+					load:	() => void coerceValue(target, emitCallOn(cls, getter, [setIndex()], ctx, [idxExpr]), ctx, wtype),
+					store:	storeByCall(wtype, value => emitCallOn(cls, setter, [setIndex(), value], ctx, [idxExpr, Identifier(probe)])) };
 			}
 
 			// A union of indexable classes (`Uint8Array | number[]`): the element's dispatch picks the class's `__get` at run time.
@@ -9377,10 +9381,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	interface HeldArg { wtype: W.Type; push(): void }
 	const localArg	= (ctx: FunctionContext, index: number, wtype: W.Type): HeldArg => ({ wtype, push: () => ctx.emit(I.local.get(index)) });
 	const stringArg	= (ctx: FunctionContext, s: string): HeldArg => ({ wtype: W.ARRAY.i16, push: () => emitStringConst(s, ctx) });
-	// `cls`'s one-body (or `__asm`) method `name` on the receiver on the stack: no call site to pick an overload by.
-	function emitCallOn(cls: ClassInfo, name: string, args: HeldArg[], ctx: FunctionContext): W.Type {
-		const inline	= cls.inlineMethods?.get(name)?.(args.map(a => ({ wtype: a.wtype })), ctx);
-		const method	= inline ? undefined : methodFor(cls, name, [], ctx);
+	// `cls`'s method `name` on the receiver on the stack, the overload `call` (a source call's arguments) chooses: by default none, so one body.
+	function emitCallOn(cls: ClassInfo, name: string, args: HeldArg[], ctx: FunctionContext, call: CallSite = []): W.Type {
+		const inline	= inlineFor(cls, name, call, ctx)?.(args.map(a => ({ wtype: a.wtype })), ctx);
+		const method	= inline ? undefined : methodFor(cls, name, call, ctx);
 		const sig		= inline ?? method;
 		if (!sig)
 			throw `internal: '${cls.name}' has no method '${name}'`;
