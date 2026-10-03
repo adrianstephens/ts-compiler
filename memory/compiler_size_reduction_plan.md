@@ -100,10 +100,14 @@ constructor field writes, `.call`, typeof-as-value, place stores, dynamic-object
 copyElements, method-value wrapper, switch slot, `#ext` read; kind 1: for...of (`lowerForOf`). Size: 31,658 -> 31,799 (+141).
 
 Left, kind 2: the union-shaped object literal (`emitUnionShapedLiteral`: needs `case 'object'` to take pre-held spread operands,
-Tested-style) and compound assignment (`$compound$`: needs `case 'binary'` to take a held left operand). Left, kind 1: destructuring
--- THREE lowerings (transform.ts `patternBindings`, used pre-check by VSDG and index-only; ts/vsdg.ts's lenient wrapper; the
-backend's `emitPatternBinding`, per-level temps and the iterator protocol); unifying needs each nested level's checked type
-(index vs protocol) and changes VSDG's printed output. Then switch, drainIterator/spreadSource, the expression rewrites, params.
+Tested-style) and compound assignment (`$compound$`: needs `case 'binary'` to take a held left operand). Kind 1 destructuring DONE (`lowerPattern` in transform.ts, one lowering: `PatternLowering` empty for VSDG -- unchanged output,
+`patternBindings` collects it -- or a temp per level plus the checked "iterates?"/"absent?" answers for codegen; each declaration is
+`emit`ted in order and codegen's emit checks then compiles it; `drainIterator` moved too). `checkSynthesized` checks INTO the scope
+it is given (callers make the child). **Rule for every lowering: never reuse a node object -- a checked node holds ONE stamp**, so a
+shared `elem`/`r`/`i` read in a narrowed branch got the unnarrowed type (found on patternDefaults; temps are now node factories).
+Left, kind 1: switch comparisons, the expression rewrites (`**`, `+str`, string `+`, tagged templates, delete), Object.assign,
+parameter defaults/binding, super(...) binding. Commit-message deltas for 3ac24ad (-4, truly -2) and the fresh-node commit (+3, truly
++1) are off; this log is right.
 Measured: the fallback typing that exists ONLY for synthesized nodes is small (most of the 47 `checkerTypeOf` calls query source
 nodes); kind 1's gain is architectural, not lines.
 
