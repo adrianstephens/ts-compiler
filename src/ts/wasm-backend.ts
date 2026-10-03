@@ -3441,27 +3441,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 
-	// An object literal assigned against a real union target (`const m: ClassMember = {type:'field', ...}`) must pick
-	// the ONE member it represents first: `matchObjectShape` only scans already-*registered* classes (`classes`), so the
-	// first literal of a shape (nothing yet built the interface's "official" struct via `ownerFor`) would build a
-	// narrower anon struct from its written properties than `ownerFor` later builds -- the exact mismatch that makes
-	// The context may BE this literal's shape, with no name of its own: a field's declared type, an unannotated arrow's inferred
-	// return (`{ sig: { params, result }, typeIndex }`). Resolved by TYPE, which settles declared-vs-anonymous the same way a
-	// named target does -- `matchObjectShape` cannot, since several declared shapes may carry the same field NAMES.
-	function contextualShapeOwner(e: JS.ObjectExpr<Type>, ctx: FunctionContext): ClassInfo | undefined {
-		const target	= ctx.contextualReturn && T.nonNullable(ctx.contextualReturn, ctx.scope);
-		const shape		= target && T.resolveObjectType(target, ctx.scope);
-		if (!shape || indexSignatureValueType(shape))
-			return undefined;
-		// Only where the context accounts for every key WRITTEN here: a literal carrying more than it declares (`{...}` into a
-		// wider member, `Other` into `Sig`) is the shape that has them, not the context's. A spread's keys are its operand's.
-		const declares = new Set(shape.members.flatMap(m => m.type === 'property' || m.type === 'method' ? JS.keyName(m.key) ?? [] : []));
-		if (e.properties.some(p => p.type === 'spread' || typeof p.key === 'object' || !declares.has(String(p.key))))
-			return undefined;
-		// Its OWN shape where several declared ones share these field names: the context is anonymous, so that is what it says.
-		return matchObjectShapeByType(shape) ?? ensureAnonObjectShape(shape);
-	}
-
 	// A literal whose CONTEXT is an index-signature type is the dynamic object `typeOf` routes one to (`DynamicObject<V>`). Read through
 	// the context, not `want`: an optional parameter's `Record<...> | undefined` boxes to `any`, which names no shape at all.
 	// So is an empty literal whose context names no layout (`any`, `unknown`, `{}`, `object`, none): any key it gets is added later.
@@ -3472,18 +3451,19 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 	const namesNoLayout = (t: Type) => T.isAny(t) || t.type === 'ref' && t.name === 'object' || t.type === 'object' && !t.members.length;
 
-	// The declared union member (`ctx.contextualReturn`) the literal's written discriminants pick, before any structural guess.
+	// The member of the literal's context (`ctx.contextualReturn`) its written keys and discriminants pick, before any structural guess.
+	// The context may BE its shape, with no name of its own (an arrow's inferred return), where several declared shapes share its field names.
 	function matchContextualUnionMember(e: JS.ObjectExpr<Type>, ctx: FunctionContext): ClassInfo | undefined {
 		if (!ctx.contextualReturn)
 			return undefined;
-		const props = new Map<string, Expr>();
+		const props = new Map<string, Expr | undefined>();
 		for (const p of e.properties) {
 			// A spread is never excess-checked (as in TS): only the fields written out must fit and discriminate.
 			if (p.type === 'spread')
 				continue;
-			if (p.type !== 'field' || typeof p.key === 'object' || !p.value)
+			if (typeof p.key === 'object' || p.type === 'field' && !p.value)
 				return undefined;
-			props.set(String(p.key), p.value);
+			props.set(String(p.key), p.type === 'field' ? p.value : undefined);
 		}
 		// ...but it does supply required fields. Unknown keys may supply any: the context can't make `{ modifiers }` a `Method`.
 		const spreads	= e.properties.flatMap(p => p.type === 'spread' ? [spreadKeys(p.operand, ctx)] : []);
@@ -3493,13 +3473,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (!props.size && !supplied && shapes.length !== 1)
 			return undefined;
 		const matches = shapes.filter(({ objT }) => {
-			const fieldNames = new Set(objT.members.flatMap(m => m.type === 'property' ? JS.keyName(m.key) ?? [] : []));
+			const fieldNames = new Set(objT.members.flatMap(m => m.type === 'property' || m.type === 'method' ? JS.keyName(m.key) ?? [] : []));
 			// Excess-property style: the literal names no field this member doesn't declare, and a declared discriminant admits its value.
 			const required = objT.members.flatMap(m => m.type === 'property' && !hasMod(m, 'optional') ? [T.memberKey(m.key)] : []);
 			return [...props.keys()].every(k => fieldNames.has(k)) && (!supplied || required.every(k => supplied.has(k)))
-				&& [...props].every(([key, value]) => admitsLiterals(objT.members.find((m): m is TS.TypeMember & { type: 'property' } => m.type === 'property' && m.key === key)?.typeAnnotation, writtenLiteral(value)));
+				&& [...props].every(([key, value]) => admitsLiterals(objT.members.find((m): m is TS.TypeMember & { type: 'property' } => m.type === 'property' && m.key === key)?.typeAnnotation, value && writtenLiteral(value)));
 		});
-		const owners = matches.map(m => ownerFor(m.raw) ?? matchObjectShapeByType(m.objT));
+		const owners = matches.map(m => ownerFor(m.raw) ?? matchObjectShapeByType(m.objT) ?? ensureAnonObjectShape(m.objT));
 		if (owners.length === 1)
 			return owners[0];
 		// Several fit (`{params, rest}` for `CallSig | Params`): the one that is a SUBTYPE of all the others is
@@ -6065,7 +6045,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const declared = (W.isRef(want) ? ensureClass(want.ref) : undefined)
 					?? contextualDynamicOwner(e, ctx)
 					?? matchContextualUnionMember(e, ctx)
-					?? contextualShapeOwner(e, ctx)
 					?? spreadOwner(e, ctx)
 					?? matchObjectShape(e, ctx, false);
 				if (!declared) {
