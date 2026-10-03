@@ -110,3 +110,11 @@ LOCAL'S REPRESENTATION, not its type -- switching them to stamps took difftest 7
 (`cannot convert ref:Array<any> to ref:Array<number>`, `arr:f64` vs `arr:ref`). They keep reading the statement
 stamp until representation is explicit. Same tension: `ctx.scope` holds the backend's own range-widened `i32`
 bindings, which is why a stamp (`number`) and a query (`i32`) legitimately differ.
+
+## Contextual types (2026-10-03)
+
+`expectedType` (set with `checkedType`, first real check wins) is the context `typeOf` checked a node against. `restampFlow`'s
+`stampParts` pushes a flow slot, instantiated, into literal elements/fields, conditional arms, logical operands, a sequence's last
+expression and an inferred-return callback's returns (`stampContext` overwrites `expectedType` there); `as` stamps its operand.
+The backend's only contextual channel is `contextOf(e)` in wasm-backend.ts; it re-stamps args via `restampFlow` where `callTypeArgs`
+instantiates differently from the checker.

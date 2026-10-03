@@ -74,11 +74,11 @@ then checker, cpp-backend, difftest; the survey once per family. A WAT change is
   object literal's union context (`discriminateContext`) and stamps the member; a literal with that stamp gets the same owner the
   backend finds. But a literal under a GENERIC return (`rule<T>(x => ({params}))`) has no flow (its slot is `T`), and its context
   (`{params} | {params; rest}`, inferred) has no unit discriminant -- only the backend's required-field match picks a layout, which TS
-  never needs to. Recursing `stampFlow` into a literal's elements and property values (tried, reverted) adds stamps but deletes nothing.
+  never needs to. (Recursing `stampFlow` into a literal's parts alone deleted nothing; it paid off once the contextual channel went.)
 - **`collectExpandoFields`' Container/Binding tree -> checker `declarator()`/`decl()` saves only ~25 lines**: a named function
   expression's own name has no declarator (`addLazyValue` only), and imports copy `decl` (the statement), not the declarator.
 - **The deep lever is the SYNTHESIZED node.** Most fallback typing (`checkerTypeOf` on unstamped nodes, `typeAt`'s query path,
-  `ctx.contextualReturn` writes at ~12 sites, `var_decl`'s `!stamped` branch) exists because desugarings (for-of, destructuring,
+  `var_decl`'s `!stamped` branch) exists because desugarings (for-of, destructuring,
   spread, typeof, switch, entries, defaults) build AST the checker never saw. Checking each synthesized statement in `ctx.scope`
   (muted, stamping) would make stamps complete and let those go. Architectural: put to the user before doing it.
 
@@ -161,9 +161,15 @@ Then type-core: holdsZero = rangeIncludesZero, the XK debug hook and dead cases 
   keys rename every class (all WAT names) for ~30-40 lines.
 - type-core.ts read to ~1,790 (`resolve` included): dense, little duplication left; the fat is long historical comments.
 - Checker `case 'call'` special-cases `new Promise(...)` BY NAME (infers T from the executor's `resolve` calls; TS gives `unknown`).
-**What is left that is big is architectural:** (1) the backend's own contextual-type channel (`ctx.contextualReturn`/`withContext`/
-`callContext`, ~25 sites) replaced by the checker stamping the expected type each expression was checked against -- but codegen's
-`callTypeArgs` deliberately instantiates by flow, unlike the checker, so expect many WAT diffs; (2) comments (user declined a pass).
+**Contextual-type channel replaced (2026-10-03, user: "for simplicity and consistency"):** `ctx.contextualReturn`/`withContext`/
+`callContext` deleted; codegen reads `contextOf(e)` = the checker's `flowSlot` ?? `expectedType` (see [[tison-checker-type-stamps]]).
+Net src +11 (checker +60, wasm-backend -49): a consistency win, not a size one. The WAT moved only where an old writer was missing (field
+initializers on the collecting-ctor path, `xs.push({})` into `Opt[]`).
+What it took, each found by a DBG_CTX probe diffing backend context vs stamp: stamps on a first check made with no `expected`;
+template stamps leaking into instance copies (`unstamped`); nested contexts instantiated (`stampParts`); `as` operands;
+inferred-return callbacks' returned values; codegen's own `callTypeArgs` instantiation re-stamping the args (`restampFlow`);
+an array literal with no slot built as its own checked type (the old `var_decl` writer did that; difftest `nestedLiteral` caught it,
+the towasm suite did not); and a checker bug (`in`'s false branch narrowed an index signature / optional member to `never`).
 **Comment pass (2026-10-03, user chose it over the architectural options):** narration out, the why kept, <= 2 lines, per file with a
 printer-proven code identity ([[tison_comment_pass_tooling]]): wasm-backend -567, vsdg -451, checker -392, type-core -299, ts/vsdg -146,
 cpp/vsdg -114, wasm/codegen -109, transform -85, py/vsdg -84, type-utils -56. Stale facts corrected on the way: checker's "Known gaps"
