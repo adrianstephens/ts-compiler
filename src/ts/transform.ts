@@ -439,6 +439,32 @@ export function nextCall(iterator: TS.Expr, it: T.IterationTypes, scope: Scope):
 	return JS.Call(JS.Member(iterator, 'next'), T.isNullish(it.next, scope) ? [] : [Identifier('undefined')]);
 }
 
+// An expression codegen compiles as a plainer one, its parts reused (`typeOf` answers a part's checked type); `undefined`: as it is.
+// A `string | number` operand of `+` is decided at run time, which this cannot model, so only all-string members concatenate.
+export function lowerExpr(e: TS.Expr, typeOf: (e: TS.Expr) => Type, scope: Scope): TS.Expr | undefined {
+	const isString = (x: TS.Expr) => (ms => ms.length > 0 && ms.every(m => T.isStringLike(m, scope)))(T.unionMembers(T.resolve(scope, typeOf(x)), scope));
+	switch (e.type) {
+		case 'literal':
+			return e.value instanceof RegExp ? { type: 'new', callee: Identifier('RegExp'), arguments: [Literal(e.value.source), Literal(e.value.flags)] } : undefined;
+		case 'unary':
+			return e.operator === '+' && T.typeofName(typeOf(e.operand), scope) === 'string' ? JS.Call(Identifier('Number'), [e.operand]) : undefined;
+		case 'binary':
+			// `**` has no instruction: a number's is `Math.pow`, a bigint's its own `pow`. `+` with one string side is the template `${a}${b}`.
+			return e.operator === '**' && !T.isBigint(typeOf(e.left), scope) ? JS.Call(JS.Member(Identifier('Math'), 'pow'), [e.left, e.right])
+				: e.operator === '+' && isString(e.left) !== isString(e.right) ? Literal([{ str: '', exp: e.left }, { str: '', exp: e.right }])
+				: undefined;
+		case 'tagged_template': {
+			// A template ending in `${...}` has no trailing text part, yet the strings array has one more entry than the values.
+			const strings = e.quasi.map(p => Literal(p.str));
+			if (e.quasi[e.quasi.length - 1].exp)
+				strings.push(Literal(''));
+			return JS.Call(e.tag, [JS.ArrayLit(strings), ...e.quasi.flatMap(p => p.exp ? [p.exp] : [])]);
+		}
+		default:
+			return undefined;
+	}
+}
+
 // How a destructuring is lowered for its consumer. Codegen names each level (`temp`), so each value is read once, and asks the
 // checked types how a level iterates (`iterates`: by the protocol, else by position) and whether a position may hold `undefined`.
 export interface PatternLowering {

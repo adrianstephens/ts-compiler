@@ -3282,6 +3282,9 @@ export function checkSynthesized(stmts: Stmt[], scope: Scope): void {
 	}
 }
 
+// A lowered expression (`lowerExpr`), checked and stamped over its parts' stamps.
+export const checkSynthesizedExpr = (e: Expr, scope: Scope) => typeOf(e, scope, true, undefined, undefined, MUTED, true, true);
+
 // An index read is possibly-absent exactly when the program TESTS it: `a[i]` is typed `T` -- by TS and by
 // this checker alike -- yet JS really does answer `undefined` past the end, so the test is the only evidence
 // there is. A marked read then types as `T | undefined` (`case 'index'`), which is what makes the test

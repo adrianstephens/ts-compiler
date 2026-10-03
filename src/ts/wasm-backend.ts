@@ -5,10 +5,10 @@ import * as JS from './js-parser';
 import * as T from './type-utils';
 import * as W from '../wasm/codegen';
 import { Literal, Identifier, Binary, Assign, Conditional, Member, hasMod, Module as CModule } from '@isopodlabs/tison/ast';
-import { checkHoisted, checkImported, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, checkedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized } from './checker';
+import { checkHoisted, checkImported, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, checkedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr } from './checker';
 import { Walker, walker, walkerB } from './walker';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
-import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator } from './transform';
+import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator, lowerExpr } from './transform';
 import * as wasm from '@isopodlabs/binary_libs/wasm';
 import * as WAT from '../wasm/wat-parser';
 
@@ -6057,7 +6057,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		}
 		if (e.type === 'call' && ctx.callContext !== callContext)
 			return ctx.withCallContext(callContext, () => emitExpr(e, ctx, want, callContext));
-		try { switch (e.type) {
+		try {
+			const lowered = lowerExpr(e, x => ctx.narrowedTypeOf(x), ctx.scope);
+			if (lowered) {
+				checkSynthesizedExpr(lowered, ctx.scope);
+				return emitExpr(lowered, ctx, want);
+			}
+			switch (e.type) {
 			case 'literal':
 				switch (typeof e.value) {
 					case 'number':
@@ -6118,14 +6124,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					}
 
 					case 'object':
-						if (e.value instanceof RegExp) {
-							// desugars to an ordinary `new RegExp(source, flags)` against `lib/regexp.ts`'s own self-hosted class
-							return emitExpr({
-								type: 'new',
-								callee: Identifier('RegExp'),
-								arguments: [Literal(e.value.source), Literal(e.value.flags)],
-							}, ctx, want);
-						}
 						if (Array.isArray(e.value)) {
 							if (e.value.length === 1 && !e.value[0].exp) {
 								emitStringConst(e.value[0].str, ctx);
@@ -6564,8 +6562,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				}
 
 				// `+s` is ToNumber, which for a string is exactly `Number(s)`: the lib wrapper's string constructor parses it (trimmed, '' is 0, trailing junk is NaN).
-				if (e.operator === '+' && T.typeofName(ctx.narrowedTypeOf(e.operand), ctx.scope) === 'string')
-					return emitExpr(JS.Call(Identifier('Number'), [e.operand]), ctx, want);
 				const t = W.notUnsigned(W.scalarKind(info.wtype));
 				if (t) {
 					switch (e.operator) {
@@ -6824,21 +6820,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 						if (equality && (isRuntimeEq(leftInfo.wtype) || isRuntimeEq(rightInfo.wtype)))
 							return identity(W.REF_ANY_NULLABLE, () => ctx.emit(I.call(ensureAnyStrictEq().funcIndex)));
 
-						// `**` has no instruction, so a numeric one is `Math.pow`; an owner with its own `pow` (`BigInt`) dispatches to it below.
-						if (method === 'pow' && !leftInfo.owner?.methodDecls?.get(method))
-							return emitExpr(JS.Call(JS.Member(Identifier('Math'), 'pow'), [left, right]), ctx, want);
-
-						// `+` concatenates when exactly one side is a string, as the template literal `${a}${b}` does, through its one stringifier.
-						// A `string | number` operand is decided at run time, which this cannot model, so only all-string members count.
-						if (method === 'add') {
-							const definitelyString = (x: Expr) => {
-								const ms = T.unionMembers(T.resolve(ctx.scope, ctx.narrowedTypeOf(x)), ctx.scope);
-								return ms.length > 0 && ms.every(m => T.isStringLike(m, ctx.scope));
-							};
-							if (definitelyString(left) !== definitelyString(right))
-								return emitExpr(Literal([{ str: '', exp: left }, { str: '', exp: right }]), ctx, want);
-						}
-
 						const nativeBig = emitNativeBigint(method, [{ expr: left, wtype: leftInfo.wtype }, { expr: right, wtype: rightInfo.wtype }], e, ctx);
 						if (nativeBig)
 							return nativeBig;
@@ -6899,22 +6880,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			case 'new':
 			case 'call':
 				return emitCallee(classifyCall(e, ctx, want), e, ctx, want, callContext);
-
-			// `` tag`Hello ${name}` `` -- synthesized as `tag(strings, ...values)` and re-entered via `emitExpr`, so it reuses the
-			// ordinary `case 'call'` path below and coercion comes free from `emitCallArgs`.
-			// `.raw` isn't modeled: the strings are a plain cooked-text `string[]` (`case 'literal'`'s own untagged handling),
-			// so a tag typed against `TemplateStringsArray` isn't supported -- typing the parameter `string[]` works.
-			case 'tagged_template': {
-				// `e.quasi` has no trailing empty-string part when the template ends right after a `${...}` (no text after) -- the
-				// same gap `case 'literal'`'s own untagged handling pads for (`hasTrailingLiteral`), so `strings.length` is interpolation count + 1.
-				const strings = e.quasi.map(p => Literal(p.str));
-				if (e.quasi[e.quasi.length - 1].exp)
-					strings.push(Literal(''));
-				return emitExpr(JS.Call(
-					e.tag,
-					[JS.ArrayLit(strings), ...e.quasi.filter(p => p.exp).map(p => p.exp!)],
-				) as Expr, ctx, want);
-			}
 
 			// Closures: a captured arrow/function-expression literal compiles to a 2-field `{code, env}`
 			// wasm-GC struct -- building it here is "closure creation"; `case 'call'` handles *using* the result. v1 restrictions are all explicit throws, never silent misbehavior.
