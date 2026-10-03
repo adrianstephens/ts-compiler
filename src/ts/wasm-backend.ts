@@ -3207,17 +3207,17 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				const openAt	= owners.findIndex(o => !o || o.typeIndex === -1);
 				if (members.length < 2 || owners.filter(o => !o || o.typeIndex === -1).length > 1)
 					continue;
-				const n		= ctx.tempCounter++;
-				const src	= ctx.declareLocal(`$usrc$${n}`, W.REF_ANY_NULLABLE);
-				emitSpreadOperand(p.operand, ctx, W.REF_ANY_NULLABLE);
-				ctx.emit(I.local.set(src.index));
+				// The operand held once; each arm spreads it as the member its test picked (`src as M`, a downcast).
+				const { temp, emit, check } = lowering(ctx);
+				const src	= temp('union');
+				emit(JS.VarDecl('const', JS.Var(src, p.operand)));
 				const buildArm = (k: number) => () => {
-					const name	= `$uvar$${n}$${k}`, o = owners[k];
-					ctx.emit(I.local.get(src.index), o ? I.ref.cast(o.typeIndex) : I.ref.as_non_null, I.local.set(ctx.declareValue(name, o?.thisWtype ?? W.REF_ANY, members[k]).index));
-					coerceTop(emitExpr(withProp(i, JS.Spread(Identifier(name))), ctx), ctx, result);
+					const member = temp('member'), downcast: Expr = { type: 'as', expression: Identifier(src), typeAnnotation: members[k] };
+					emit(JS.VarDecl('const', JS.Var(member, downcast)));
+					coerceTop(emitExpr(check(withProp(i, JS.Spread(Identifier(member)))), ctx), ctx, result);
 				};
 				return emitArms(members.flatMap((_, k) => k === openAt ? [] : [{
-					test: () => ctx.emit(I.local.get(src.index), I.ref.test(owners[k]!.typeIndex)),
+					test: () => ctx.emit(I.local.get(ctx.lookup(src)!.index), I.ref.test(owners[k]!.typeIndex)),
 					build: buildArm(k),
 				}]), openAt >= 0 ? buildArm(openAt) : undefined);
 			}
@@ -3231,13 +3231,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				const literals	= values.flatMap(v => v.type === 'literal' && !Array.isArray(v.value) ? [v.value] : []);
 				if (values.length < 2 || literals.length !== values.length)
 					continue;
-				const name	= `$udisc$${ctx.tempCounter++}`;
-				const wt	= wtypeOf(p.value, ctx) ?? W.REF_ANY;
-				emitAs(p.value, ctx, wt);
-				ctx.emit(I.local.set(ctx.declareValue(name, wt, precise).index));
+				const { temp, emit, check } = lowering(ctx);
+				const disc = temp('discriminant');
+				emit(JS.VarDecl('const', JS.Var(disc, p.value)));
 				return emitArms(literals.map(lit => ({
-					test: () => { emitAs(Binary<Expr, '==='>('===', Identifier(name), Literal(lit)), ctx, 'i32'); },
-					build: () => coerceTop(emitExpr(withProp(i, { ...p, value: Literal(lit) }), ctx), ctx, result),
+					test: () => void emitAs(check(Binary<Expr, '==='>('===', Identifier(disc), Literal(lit))), ctx, 'i32'),
+					build: () => coerceTop(emitExpr(check(withProp(i, { ...p, value: Literal(lit) })), ctx), ctx, result),
 				})));
 			}
 		}
