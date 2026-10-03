@@ -2613,8 +2613,11 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 			return recurse(src.type === 'array' ? src : srcWritten, dst.type === 'array' ? dst : dstWritten, depth - 1);
 
 		// `unknown` is a top type only as a target: as a source it fits nothing but a top type.
-		if (src === dst || isAny(dst) || (isRef(src, 'any') && !precise))
+		if (src === dst || isAny(dst))
 			return true;
+		// Under the subtype relation (`precise`) `any` is below nothing but itself: structurally it would fit every object target.
+		if (isRef(src, 'any'))
+			return !precise;
 		if (isNullOrUndefined(src) && !scope.strictNullChecks())
 			return true;
 
