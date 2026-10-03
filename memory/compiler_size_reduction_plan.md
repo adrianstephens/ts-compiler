@@ -160,7 +160,8 @@ Then type-core: holdsZero = rangeIncludesZero, the XK debug hook and dead cases 
 - Family 2's class identity: `TypeEntry` has no declaring module and the entry/lib keep bare keys on purpose, so per-declaration
   keys rename every class (all WAT names) for ~30-40 lines.
 - type-core.ts read to ~1,790 (`resolve` included): dense, little duplication left; the fat is long historical comments.
-- Checker `case 'call'` special-cases `new Promise(...)` BY NAME (infers T from the executor's `resolve` calls; TS gives `unknown`).
+- (Done 2026-10-03) The checker's by-name `new Promise(...)` special case is gone: it only existed because an uninferred type param
+  fell to `any`; it is `unknown` now, as in TS. Note the wasm lib's own `Promise` (src/ts/lib/promise.ts) is `new Promise<T>(initial)`.
 **Contextual-type channel replaced (2026-10-03, user: "for simplicity and consistency"):** `ctx.contextualReturn`/`withContext`/
 `callContext` deleted; codegen reads `contextOf(e)` = the checker's `flowSlot` ?? `expectedType` (see [[tison-checker-type-stamps]]).
 Net src +11 (checker +60, wasm-backend -49): a consistency win, not a size one. The WAT moved only where an old writer was missing (field
