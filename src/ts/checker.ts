@@ -561,12 +561,9 @@ function classShapes(c: TS.Class, scope: Scope): { instance: Type; value: Type; 
 	}
 
 	const obj = TS.ObjectType(members);
-	// a base the checker can't model (mixin call, namespace member, imported class) leaves the instance unsealed; likewise an inherited constructor accepts any arguments.
+	// A base the checker can't name (a mixin call) leaves the instance unsealed; likewise an inherited constructor accepts any arguments.
 	// Own members come first: lookupMember's first match implements override precedence
-	const superType: Type | undefined =
-			c.superClass?.type === 'identifier' ? TS.RefType(c.superClass.name)
-		:	c.superClass?.type === 'instantiation' && c.superClass.expression.type === 'identifier' ? TS.RefType(c.superClass.expression.name, c.superClass.typeArgs)
-		:	c.superClass ? T.ANY : undefined;
+	const superType: Type | undefined = superClassRef(c.superClass) ?? (c.superClass && T.ANY);
 	const instance		= superType ? TS.IntersectionType([obj, superType]) : obj;
 	// The named ref carries its own type params back as its own typeArgs (`Box<T>` -> `new(...): Box<T>`) -- without this,
 	// a bare `RefType(c.name)` never mentions `T`, so `new Box<number>(...)` produced a `Box` with no type args at all.
@@ -1568,6 +1565,15 @@ function hoist(block: Stmt[], scope: Scope) {
 			scope.addDecl(name, d);
 		}
 	}
+}
+
+// A class's `extends` operand as the type it names: `Base`, a namespace-qualified `NS.Base`, either with type arguments.
+export function superClassRef(e: Expr | undefined): TS.RefType | undefined {
+	const dotted = (x: Expr): string | undefined => x.type === 'identifier' ? x.name
+		: x.type === 'member' ? (o => o && `${o}.${x.property}`)(dotted(x.object)) : undefined;
+	const target	= e?.type === 'instantiation' ? e.expression : e;
+	const name		= target && dotted(target);
+	return name ? TS.RefType(name, e?.type === 'instantiation' ? e.typeArgs : undefined) : undefined;
 }
 
 // TS's auto-typed array: `let x = []` (or `x = []` into an untyped `let x`) evolves by its writes, which `any[]` approximates.

@@ -5,7 +5,7 @@ import * as JS from './js-parser';
 import * as T from './type-utils';
 import * as W from '../wasm/codegen';
 import { Literal, Identifier, Binary, Assign, hasMod, Module as CModule } from '@isopodlabs/tison/ast';
-import { checkHoisted, checkImported, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, checkedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr, checkMethodInstance } from './checker';
+import { checkHoisted, checkImported, superClassRef, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, checkedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr, checkMethodInstance } from './checker';
 import { Walker, walker, walkerB } from './walker';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
 import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
@@ -1806,15 +1806,6 @@ function collectExpandoFields(
 	}
 
 	return { accessorKeys, pendingExtensions };
-}
-
-// A class's `extends` operand as the type it names: `Base`, a namespace-qualified `NS.Base`, either with type arguments.
-function superClassRef(e: Expr | undefined): TS.RefType | undefined {
-	const dotted = (x: Expr): string | undefined => x.type === 'identifier' ? x.name
-		: x.type === 'member' ? (o => o && `${o}.${x.property}`)(dotted(x.object)) : undefined;
-	const target	= e?.type === 'instantiation' ? e.expression : e;
-	const name		= target && dotted(target);
-	return name ? TS.RefType(name, e?.type === 'instantiation' ? e.typeArgs : undefined) : undefined;
 }
 
 function homeKey(homeModule: string, name: string) {
