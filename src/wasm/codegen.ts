@@ -1,17 +1,6 @@
-// The language-neutral half of the wasm backend: what a value physically IS once lowered (`Type` and its
-// pure helpers), the state code generation carries (`FunctionContext`, `ClassInfo`), the module sections it
-// fills (`Types`, `DataSection`, `TagSection`) and the inline-`__asm` island at the end. Nothing here names
-// a language's AST, its type model, or its checker.
-//
-// `ClosureSig` is the seam that makes that possible: `Type`'s `closure` variant names only the
-// PHYSICAL shape, while the binding data that only argument-binding reads (`defaults`/`resolvedParams`/
-// `restElem` -- language exprs and types) lives in `FuncSig` in `wasm-backend.ts`, which extends it.
-// See `memory/tison_towasm_cross_language_plan.md`.
-//
-// Deliberately NOT here, though they have no language types in them: `PRIMITIVE_TAGS`, `READONLY_ALIAS`,
-// `isNullLiteral`, `nullLiteralKind` and `rawElemKind` are rules about TypeScript's own type *spellings*
-// ('string', 'ReadonlyArray', a null literal, a typed-array tag on a declared type), not about
-// representations, so they stay on the language side.
+// The language-neutral half of the wasm backend: what a value physically IS (`Type` and its helpers), codegen state (`FunctionContext`,
+// `ClassInfo`), the module sections (`Types`, `DataSection`, `TagSection`) and the inline-`__asm` island. No language's AST, types or checker.
+// `ClosureSig` names only a closure's PHYSICAL shape; its binding data (defaults, resolved params) is `FuncSig`'s, in the language half.
 
 import * as wasm from '@isopodlabs/binary_libs/wasm';
 import * as WAT from './wat-parser';
@@ -23,11 +12,10 @@ export type ScalarI		= 'i32' | 'i64' | 'f32' | 'f64'
 export type Scalar		= ScalarI | 'u32' | 'u64'
 export type ElementI	= ScalarI | 'i8' | 'i16' | 'ref';
 export type Element		= ElementI | 'u8' | 'u16' | 'u32' | 'u64';
-// The PHYSICAL shape of a closure: what wasm needs to call it, and nothing about the language that produced it. `FuncSig` extends this with the binding data only argument-binding reads.
+// The PHYSICAL shape of a closure, what wasm needs to call it; `FuncSig` extends it with the binding data argument binding reads.
 export interface ClosureSig	{ params: Type[]; result: Type; hasRest?: boolean }
 
-// The physical result of an asm body: a signature and its instructions. `Inline` in the language half is
-// this plus the argument-binding payload an asm body never reads, so this is its projection, not a copy.
+// An asm body's physical result: a signature and instructions (`Inline` in the language half adds the binding payload).
 export interface Inline extends ClosureSig { inline: wasm.Instr[] }
 
 export type Type		= Scalar
@@ -36,10 +24,8 @@ export type Type		= Scalar
 	| { arr:		ElementI; nullable?: boolean }
 	| { closure:	ClosureSig; nullable?: boolean }
 	| { typeIndex:	number; nullable?: boolean }
-	// A boxed nullable primitive ('number | null'/'boolean | null'): a real class/closure env struct
-	// never sets `primKind`, so it's what tells a `typeIndex`-shaped type apart from those -- see
-	// `unboxedPrimitive`. Structural, not a side-table, since `registerType`'s memoization could
-	// otherwise coincidentally share a type index with an unrelated single-scalar-field struct.
+	// A boxed nullable primitive (`number | null`): only it sets `primKind`, which tells it apart from a class or env struct (`unboxedPrimitive`)
+	// even where structural memoization shares a type index with a one-scalar-field struct.
 	| { typeIndex:	number; nullable?: boolean; primKind: ScalarI };
 
 
@@ -57,9 +43,7 @@ export const REF_ANY:			Type = { ref: 'any' };
 export const REF_ANY_NULLABLE:	Type = { ref: 'any', nullable: true };
 export const REF_EXN:			Type = { ref: 'exn', nullable: true };
 
-// The plain scalar kind a value acts as for arithmetic/comparison dispatch -- unwraps a boxed
-// nullable primitive the same way `coerceTop` does, or passes a bare scalar through unchanged.
-// `undefined` for anything else (a real class/array/closure).
+// The scalar kind a value acts as for arithmetic and comparison: a boxed nullable primitive unwrapped, as `coerceTop` does; undefined otherwise.
 export function scalarKind(wtype: Type | undefined): Scalar | undefined {
 	return typeof wtype === 'string' ? (wtype !== 'void' ? wtype : undefined) : wtype && unboxedPrimitive(wtype)?.kind;
 }
@@ -86,12 +70,8 @@ export function isIndexed(w: Type | undefined): w is IndexedType		{ return typeo
 export function isNullable(w: Type | undefined): w is Extract<Type, object> & { nullable: true }	{ return typeof w === 'object' && !!w.nullable; }
 export function isAny(w: Type | undefined): w is RefType & { ref: 'any' }							{ return isRef(w) && w.ref === 'any'; }
 
-// If `wtype` is a boxed nullable primitive (see `Types.nullable`/`Types.box`), its underlying
-// scalar kind and box type index; otherwise `undefined` (a real class/array/closure-env-struct, or
-// already a bare scalar). Structural (checks `primKind` on the object itself), not a lookup table --
-// `registerType`'s structural memoization means an unrelated single-scalar-field struct (e.g. a
-// closure's env struct capturing exactly one `f64`) could otherwise coincidentally share a box's
-// type index, which a table keyed by type index alone couldn't tell apart.
+// A boxed nullable primitive's scalar kind and box type index, else undefined. Read off `primKind` on the object: by type index alone,
+// an env struct capturing one `f64` may share the box's index.
 export function unboxedPrimitive(wtype: Type): { kind: ScalarI; typeIndex: number } | undefined {
 	return typeof wtype !== 'string' && 'primKind' in wtype ? { kind: wtype.primKind, typeIndex: wtype.typeIndex } : undefined;
 }
@@ -114,8 +94,8 @@ export function typeEq(a: Type, b: Type): boolean {
 
 	return false;
 }
-// The machine int a BIGINT of this range fits in, or undefined when it needs the magnitude array. Signed forms only: the
-// widening conversion writes a 32-bit value as one two's-complement limb, so a `u32` at or above 2^31 would read back negative.
+// The machine int a BIGINT of this range fits, or undefined for the limb array. Signed only: a `u32` at or above 2^31 written as one
+// two's-complement limb would read back negative.
 export function bigIntType(min: bigint, max: bigint): Type | undefined {
 	return min >= -0x80000000n && max <= 0x7fffffffn ? 'i32'
 		: min >= -0x8000000000000000n && max <= 0x7fffffffffffffffn ? 'i64'
@@ -131,7 +111,7 @@ export function intType(min: number, max: number): 'i32' | 'u32' | 'f64' {
 	return 'f64';
 }
 
-// Stable structural key for memoizing closure-type registration by TS function signature.
+// A stable structural key for a `Type`.
 export function typeKey(w: Type): string {
 	if (typeof w === 'string')
 		return w;
@@ -146,19 +126,8 @@ export function typeKey(w: Type): string {
 	return '?';
 }
 
-// The one shared `Type` a union of >=2 members' own physical representations collapses to --
-// `typeOf`'s own 'union' case, and `ensureUnionIndexDispatch`'s own per-member `get(i)` result
-// (`case 'member'`'s sibling `ensureUnionFieldDispatch` instead goes through the checker's own
-// `T.lookupMember`, since a named property's type unions cleanly there; indexing has no such
-// checker-side precision for a union receiver yet, so this compares physical wtypes directly, same
-// as before that fix existed). Members that already physically agree stay exactly as they are (a
-// degenerate union like `IteratorResult<Y,R>.value: Y | R` monomorphized with `Y`/`R` both `number`
-// must stay a plain `f64`, not box as `any` just because a union with >1 syntactic member showed up).
-// Members that only differ by a wasm-pseudo-type-vs-real-type spelling of the same scalar (`i32` vs
-// `number`/`f64` -- the top-of-file `WASM_PSEUDO_TYPES` comment's own ternary example, also hit by
-// `Uint8Array.length: i32` vs `Array<T>.length: number`) widen to the one canonical `f64`. Anything
-// else (class vs. class, scalar vs. struct/array, ...) boxes as `any`, the same physical
-// representation this compiler already gives every other "could be one of several shapes" value.
+// The one `Type` a union of >=2 members' representations collapses to: members that physically agree stay so (`IteratorResult<number, number>
+// .value` is `f64`), scalar spellings of a number widen to `f64` (`i32` vs `f64`), and anything else boxes as `any`.
 export function combineUnion(wtypes: readonly Type[]): Type {
 	if (new Set(wtypes.map(w => typeKey(w))).size === 1)
 		return wtypes[0];
@@ -196,7 +165,7 @@ export class Error {
 }
 
 
-// A body compiled later from the worklist, outside its declaration's own catch: names it, and falls back to its position and module for an error raised on a synthesized node that has none.
+// A body compiled later from the worklist, outside its declaration's catch: an error on a synthesized node falls back to this position and module.
 export function withCatchAt(item: ()=>void, node: unknown, module: string, ...scopes: string[]) {
 	return () => {
 		try {
@@ -229,15 +198,8 @@ export interface ClosureEnv {
 	fields:			Map<string, Local>
 };
 
-// Pushed by `case 'try'` while compiling a `try`/`catch` that has a `finally` -- `emitBreak`/
-// `emitContinue` check this first (innermost guard): real JS semantics require `finally` to run
-// before either actually completes, so one whose real target lies outside this specific
-// `try`/`finally`'s own span stashes an action code and branches to the shared landing point
-// instead of exiting directly. Popped before that landing point's own re-dispatch code is built, so
-// a `br` built there targets the next-outer guard (or ordinary behavior once none remain) --
-// composes for nested `try`/`finally` without any extra bookkeeping. `return`'s own equivalent
-// redirect is a temporary `ctx.onReturn` swap instead (see `case 'try'`), not part of this guard --
-// unlike a loop/switch target, there's only ever one "current" return meaning at a time, no stack needed.
+// Pushed by `case 'try'` with a `finally`: `emitBreak`/`emitContinue` check the innermost guard first, and a target outside it stashes an action
+// code and branches to the landing point, so `finally` runs first. Popped before that landing's re-dispatch, so nested guards compose.
 export interface FinallyGuard {
 	actionLocal:				Local;
 	breakTargetsLenAtEntry:		number;
@@ -249,10 +211,8 @@ export interface FinallyGuard {
 // The closure struct's own fields (code, env, length), leading a callable object's struct, immutable as they are there.
 export const CALLABLE_PREFIX = 3;
 
-// A method-bearing struct: a real class, a synthesized object shape, or a builtin operator's owner. Only the
-// physical facts live here. What a method DECLARES (`decl`, `methodDecls`, the TS type it was checked
-// against) stays with the language -- and so must `declScope`, because `Scope` belongs to type-utils, which
-// imports this module.
+// A method-bearing struct (a class, a synthesized shape, a builtin owner): only physical facts. What a method DECLARES, and `declScope`,
+// stay with the language (`Scope` belongs to type-utils, which imports this).
 export class ClassInfo {
 	// `optional` is set only for an object shape's own `key?: T` member; a real class field is never optional.
 	fields:			{ name: string; wtype: Type; optional?: boolean }[] = [];
@@ -260,25 +220,21 @@ export class ClassInfo {
 	getterNames?:	Set<string>;
 	setterNames?:	Set<string>;
 	homeModule?:	string;
-	// This class's own real physical `this`-type -- `thisWtype` is only unset while that constructor is still
-	// being compiled, and `{ref: name}` is the safe answer then.
+	// The class's physical `this` type, unset only while its constructor is compiled (`{ref: name}` is the answer then).
 	thisWtype?:		Type;
-	// `fields`/`fieldIndex` are pre-seeded with the superclass's own, in order, so wasm-GC's ordered-prefix
-	// field-subtyping holds automatically.
+	// `fields`/`fieldIndex` are seeded with the superclass's, in order, so wasm-GC's prefix field subtyping holds.
 	superClass?:	ClassInfo;
 	// A callable object with properties: its struct extends this closure's, whose fields are its first `CALLABLE_PREFIX`.
 	callable?:		ClosureType;
 
-	// `typeIndex` is -1 while this class has no struct type: one is allocated once `fields` is populated, and a
-	// constructor that returns a scalar never gets one at all.
+	// `typeIndex` is -1 until `fields` is populated; a constructor returning a scalar never gets a struct type.
 	constructor(public name: string, public typeIndex: number) {}
 
 	get thisType(): Type {
 		return this.thisWtype ?? { ref: this.name };
 	}
 
-	// The field-table invariant lives with the table: a name that would redeclare an inherited field is an
-	// error rather than a silent second slot. What a declared type RESOLVES to stays the caller's job.
+	// A name redeclaring an inherited field is an error, not a second slot.
 	addField(name: string, wtype: Type, optional = false): void {
 		if (this.fieldIndex.has(name))
 			throw `field '${name}' redeclares an inherited field -- not supported`;
@@ -298,8 +254,7 @@ export class ClassInfo {
 
 }
 
-// Each slot type's zero, as a thunk so no instruction object is shared between emits. `hasDefaultValue` and
-// `emitDefaultValue` read the same table, so they can never disagree about which slots have one.
+// Each slot type's zero, as a thunk so no instruction object is shared; `hasDefaultValue` and `emitDefaultValue` read the same table.
 const SCALAR_ZERO = new Map<string, () => wasm.Instr>([
 	['f64', () => I.f64.const(0)],
 	['f32', () => I.f32.const(0)],
@@ -308,27 +263,21 @@ const SCALAR_ZERO = new Map<string, () => wasm.Instr>([
 ]);
 
 export class FunctionContext {
-	// Declarations (`declareLocal`/`declareValue`, and `local`'s scratch temps), in declaration order. A name may appear
-	// more than once (a closed sibling scope's declaration, or a live nested shadow) -- `lookup` scans
-	// from the end and skips closed entries, so a still-open outer binding resurfaces once an inner one closes.
-	// `pinned`: belongs to the FUNCTION, not to whatever block happened to be open when it was declared,
-	// so `closeScope` leaves it alone. Only `this` in a constructor needs it -- see `materializeThis`.
+	// Declarations in order; a name may repeat (a closed sibling scope's, a live nested shadow): `lookup` scans from the end skipping closed ones.
+	// `pinned`: the FUNCTION's, untouched by `closeScope` (only a constructor's `this`, `materializeThis`).
 	declared:	{ name: string; local: Local; closed: boolean; pinned?: boolean }[] = [];
 	// Watermarks (`declared.length` at open time) for each currently open lexical block -- see `openScope`.
 	scopeStack: number[] = [];
-	// One entry per real wasm local index (params included); a slot's type is fixed for the whole function,
-	// so `freeSlots` (keyed by `wasmTypeKey`) only ever offers back a same-typed index for reuse.
+	// One type per wasm local index (params included), fixed for the function, so `freeSlots` reuses only a same-typed index.
 	slotTypes:	Type[] = [];
 	freeSlots	= new Map<string, number[]>();
-	// One number for every generated scratch-local name in this function (`$anytruthy$3`, `#switch$0`): a local only
-	// has to be unique within its own function, so all the naming purposes share it instead of a module-wide counter each.
+	// One counter for every scratch-local name in this function (`$anytruthy$3`, `#switch$0`): unique per function suffices.
 	tempCounter	= 0;
 	out:		wasm.Instr[]	= [];
 	ctorThis?:	Local;
 
-	// Set only while a struct-collecting constructor (see `ensureCtor`) gathers field values into scratch
-	// locals ahead of `struct.new` -- lets `this.field` resolve to the field's own local, for a field already
-	// collected, before a real `this` exists. Cleared the moment `ctorThis` is set.
+	// Set while a collecting constructor (`ensureCtor`) gathers field values ahead of `struct.new`: `this.field` reads a collected field's local
+	// before a real `this` exists. Cleared once `ctorThis` is set.
 	ctorFields?: Map<string, Local>;
 
 	depth = 0;
@@ -341,7 +290,7 @@ export class FunctionContext {
 	// `collectCapturedMutables(ownBody)`, computed on first use -- see `needsHolder`.
 	holderNames?:		Set<string>;
 
-	// Unset for an ordinary function/method/arrow -- `case 'return'` falls back to `plainReturn` in that case. See `ReturnHandler`'s own comment for who sets this and why.
+	// What `case 'try'` with a `finally` pushes (`FinallyGuard`).
 	finallyGuards:		FinallyGuard[] = [];
 
 	constructor(public name: string) {}
@@ -368,7 +317,7 @@ export class FunctionContext {
 			this.freeSlots.set(key, [index]);
 	}
 
-	// more WAT labels with no `break`/`continue` targets of their own
+	// More levels with no `break`/`continue` target of their own.
 	enterLabel(n = 1)		{ return this.depth += n; }
 	exitLabel(n = 1)		{ this.depth -= n; }
 
@@ -380,14 +329,12 @@ export class FunctionContext {
 	enterContinueTarget()	{ this.continueTargets.push(++this.depth); }
 	exitContinueTarget()	{ this.continueTargets.pop(); this.depth--; }
 
-	// Opens a new lexical scope
 	openScope() {
 		this.scopeStack.push(this.declared.length);
 		return this;
 	}
 
-	// Closes the innermost open scope: every declaration made since its `openScope` becomes invisible to
-	// `lookup` and its wasm slot goes back on the free list for a same-typed declaration to reuse.
+	// Closes the innermost scope: its declarations leave `lookup`, their slots go back on the free list for same-typed reuse.
 	closeScope() {
 		const mark = this.scopeStack.pop();
 		if (mark === undefined)
@@ -423,12 +370,11 @@ export class FunctionContext {
 		else
 			this.emit(I.br(this.depth - this.continueTargets.at(-1)!));
 	}
-	// a still-visible same-name entry is reused rather than rejected
+	// A still-visible same-name, same-typed entry is reused.
 	temp(name: string, wtype: Type): number {
 		const prev = this.lookup(name);
 		if (prev) {
-			// Structurally: two equal types need not be one object -- a fresh `Types.nullable(REF_ANY)` and
-			// the `REF_ANY_NULLABLE` constant.
+			// Structurally: two equal types need not be one object (`Types.nullable(REF_ANY)` and `REF_ANY_NULLABLE`).
 			if (typeKey(prev.wtype) !== typeKey(wtype))
 				throw `local '${name}' redeclared with different type`;
 			return prev.index;
@@ -454,9 +400,7 @@ export class FunctionContext {
 		return this.lookup(name) !== undefined || !!this.closureEnv?.fields.has(name);
 	}
 
-	// The WasmType a name's real, logical VALUE has -- real local/closureEnv field, or (see `Local`'s own
-	// comment) a forward-holder's own inner type once unboxed. This is what any ordinary consumer of a
-	// name's type wants (e.g. deciding how to *call* it) -- `rawWtype`, below, is the one exception.
+	// The type of a name's logical VALUE: a local, an env field, or a forward-holder's inner type once unboxed (`rawWtype` is the exception).
 	resolvedWtype(name: string): Type | undefined {
 		const captured = this.closureEnv?.fields.get(name);
 		if (captured)
@@ -464,10 +408,7 @@ export class FunctionContext {
 		const local = this.lookup(name);
 		return local?.holderInner ?? local?.wtype;
 	}
-	// The WasmType a name's own physical STORAGE slot has -- a forward-holder's own boxed type, never
-	// unboxed. Only ever needed by `emitClosureLiteral`'s own env-capture step: capturing a forward-
-	// holder's real (shared, mutable) storage into an outer closure's env is the one place that needs the
-	// holder ITSELF, not the value it currently (or eventually) holds.
+	// The type of a name's STORAGE slot: a forward-holder's boxed type, which a closure capturing its shared storage needs.
 	rawWtype(name: string): Type | undefined {
 		return this.closureEnv?.fields.get(name)?.wtype ?? this.lookup(name)?.wtype;
 	}
@@ -482,8 +423,7 @@ export class FunctionContext {
 		this.emit(I.local.get(this.lookup(name)!.index));
 	}
 
-	// A holder's field is nullable because it must be allocatable empty, but `holderInner` is the logical
-	// non-null type, so the read unwraps -- sound because the filling declaration always runs first.
+	// A holder's field is nullable, allocatable empty; `holderInner` is the non-null logical type, sound because the filling declaration runs first.
 	emitHolderRead(holderType: number, inner: Type) {
 		this.emit(I.struct.get(holderType, 0));
 		if (typeof inner !== 'string' && !inner.nullable)
@@ -500,13 +440,10 @@ export class FunctionContext {
 		this.out.push(...instr.flat());
 	}
 
-	// Each of the four below owns the wasm levels it opens: `depth` counts them while the body runs, so a
-	// depth-relative `br` built inside one lands where its author meant. Getting that wrong is invisible --
-	// a `break` inside an `if` silently targeted the loop's restart instead of its exit -- so it is not left
-	// to the caller. The wrapper is built AFTER the body, since the body's branches are relative to it.
+	// Each of the four below owns the levels it opens (`depth` counts them while the body runs), so a depth-relative `br` inside lands right;
+	// the wrapper is built AFTER the body, whose branches are relative to it.
 
-	// Emits exactly one of two arms and leaves its value on the stack. Each arm goes into its own instruction
-	// list, so neither can run before the condition's own code has; an omitted (or empty) else stays a 2-arg `if`.
+	// Exactly one arm, its value left on the stack; each arm in its own instruction list, so neither runs before the condition.
 	emitIf(vt: wasm.ValType | undefined, then: () => void, els?: () => void): void {
 		const outer		= this.swapOut();
 		this.enterLabel();
@@ -526,8 +463,7 @@ export class FunctionContext {
 		this.emit(I.block(undefined, this.swapOut(outer)));
 	}
 
-	// A block wrapping `body` that `continue` branches to instead of the enclosing loop's restart -- for a
-	// `for`, whose update step still has to run. Shadows the loop's own target, and only for this body.
+	// A block `continue` branches to instead of the loop's restart, for a `for`, whose update still runs; shadows the loop's target for this body.
 	emitContinueBlock(body: () => void): void {
 		this.emitBlock(() => {
 			this.continueTargets.push(this.depth);
@@ -536,8 +472,7 @@ export class FunctionContext {
 		});
 	}
 
-	// The ordinary breakable loop, `block` around `loop`: `break` leaves by the block, `continue` restarts at
-	// the loop, and both are registered here so a body needs no bookkeeping of its own.
+	// `block` around `loop`: `break` leaves by the block, `continue` restarts at the loop, both registered here.
 	emitLoop(body: () => void): void {
 		const outer = this.swapOut();
 		this.breakTargets.push(++this.depth);
@@ -549,18 +484,16 @@ export class FunctionContext {
 		this.emit(I.block(undefined, [I.loop(undefined, this.swapOut(outer))]));
 	}
 
-	// A non-`void` body doesn't necessarily end in a top-level `return` -- `if`/`while`/`switch` compile to a `void`-typed block wrapping their branches, leaving wasm's trailing-fallthrough check unsatisfied.
-	// No full "does every path return" analysis to avoid it -- a trailing `unreachable` is always safe (dead code whenever a real return already covers every path).
+	// A non-`void` body need not end in a `return` (`if`/`while`/`switch` compile to `void` blocks): a trailing `unreachable` satisfies the
+	// validator, dead wherever a return already covers every path.
 	emitTrailingUnreachable(result: Type): void {
 		if (result !== 'void')
 			this.emit(I.unreachable);
 	}
 
-	// Truthiness of a value whose physical slot is a boxed `any`, decided at RUNTIME -- the checker's type rules nothing out,
-	// so `alwaysTruthy` can never answer. `0n` shares `arr:i32` with `Int32Array` and so reads as truthy: the one wrong answer.
+	// Truthiness of a boxed `any`, decided at RUN TIME. `0n` shares `arr:i32` with `Int32Array` and so reads as truthy: the one wrong answer.
 	emitAnyTruthy(got: Type, types: Types): void {
-		// Always the NULLABLE slot: a non-nullable local is not defaultable, and a null test costs nothing
-		// to skip below when `got` already rules null out.
+		// The NULLABLE slot: a non-nullable local is not defaultable, and the null test is skipped when `got` rules null out.
 		const tmp		= this.temp(`$anytruthy$${this.tempCounter++}`, REF_ANY_NULLABLE);
 		const boxI32	= types.box('i32');
 		const boxF64	= types.box('f64');
@@ -595,13 +528,8 @@ export class FunctionContext {
 		chain(0);
 	}
 
-	// Pushes `want`'s own zero/default value -- an array-literal hole (`[1, , 3]`) reads back as this, close enough to JS's
-	// "hole reads as `undefined`" for a fixed-element-kind array, since there's no way to represent a distinct "empty" slot.
-	// A non-nullable ref/array/closure has no such value, the same restriction as an object-typed class field (`ensureCtor`'s
-	// `struct.new` vs. `struct.new_default` split).
-	// The same question, answered without emitting: asked by a caller that only wants a fallback where one exists
-	// (an absent key read off an `any` spread over a non-nullable slot has none -- the program's own type promised
-	// the key, so the read traps rather than inventing a value).
+	// Pushes `want`'s zero, which an array-literal hole (`[1, , 3]`) reads back as. A non-nullable ref/array/closure has none. `hasDefaultValue` asks
+	// the same without emitting: an absent key read off an `any` spread into a non-nullable slot then traps rather than invent a value.
 	hasDefaultValue(want: Type, toValType: (t: Type) => wasm.ValType): boolean {
 		const vt = toValType(want);
 		return typeof vt === 'string' ? SCALAR_ZERO.has(vt) : !!vt.nullable || vt.ref === 'any';
@@ -620,17 +548,14 @@ export class FunctionContext {
 			this.emit(I.ref.null(heapTypeOf(vt)));
 			return;
 		} else if (vt.ref === 'any') {
-			// A non-nullable `any` slot has no `null` to fall back on, so box a placeholder (already a valid `anyref`). Reached by
-			// a generic type param substituted with `any` for an unrepresentable `void` (see `compileAsyncFunc`'s comment);
-			// nothing reads this placeholder back meaningfully, only that a real value fills the slot.
+			// A non-nullable `any` slot has no `null`, so a placeholder box fills it (a type param at `any` for an unrepresentable `void`); nothing reads it.
 			this.emit(I.f64.const(0), I.struct.new(types.box('f64')));
 			return;
 		}
 		throw `a slot with no value (an array literal hole, an absent spread key) needs a nullable or scalar type, not '${typeKey(want)}'`;
 	}
 
-	// `obj?.method()`'s shape: evaluate the receiver once into a scratch local, and when it is null yield a null result
-	// instead of running the read. Shared so every optional access -- field, call, index -- guards identically.
+	// `obj?.method()`: the receiver once into a scratch local, a null result when it is null. Every optional access guards this way.
 	emitOptionalAccess(objWtype: Type, resultWtype: Type, toValType: (t: Type) => wasm.ValType, readCore: (objLocal: number) => void): Type {
 		const objLocal = this.temp(`$opt$obj$${this.tempCounter++}`, objWtype);
 		const vt = toValType(resultWtype);
@@ -671,8 +596,7 @@ export class Types extends Array<wasm.SubType> {
 	box(kind: ScalarI): number			{ return this.register(this.boxDesc(kind)); }
 	hasBox(kind: ScalarI): boolean		{ return this.has(this.boxDesc(kind)); }
 
-	// The nullable form of a representation. A scalar must BOX -- a nullable f64 is a ref to a one-field
-	// struct, not a nullable value type, and `u32`/`u64` share their signed twin's box; a reference takes the flag.
+	// The nullable form: a scalar BOXES (a ref to a one-field struct; `u32`/`u64` share their signed twin's box); a reference takes the flag.
 	nullable(base: Type): Type {
 		if (typeof base !== 'string')
 			return { ...base, nullable: true };
@@ -682,15 +606,13 @@ export class Types extends Array<wasm.SubType> {
 		return { typeIndex: this.box(kind), nullable: true, primKind: kind };
 	}
 
-	// The common supertype every closure literal's env struct extends: zero fields, non-`final` (wasm-GC
-	// width-subtyping needs the supertype's fields as a prefix, which is vacuous here).
+	// The supertype of every closure env struct: no fields, not final.
 	envBase(): number {
 		return this.register({ final: false, supertypes: [], type: { kind: 'struct', fields: [] } });
 	}
 
-	// The shared prefix of every closure struct: the code pointer, the captured env, and the declared arity. Its
-	// first field is `(ref $itsFuncType)` under a covariant immutable field, so `ref.test` against this type is
-	// exactly "is this value a function" -- nominal, and no unrelated struct can match it.
+	// The prefix of every closure struct (code pointer, env, arity). Its first field is `(ref $itsFuncType)` under a covariant immutable field,
+	// so `ref.test` against it is exactly "is this a function", nominal.
 	closureBase(): number {
 		return this.register({ final: false, supertypes: [], type: { kind: 'struct', fields: [
 			{ type: { ref: 'func', nullable: false }, mut: false },
@@ -699,9 +621,7 @@ export class Types extends Array<wasm.SubType> {
 		] } });
 	}
 
-	// One closure struct per call signature -- `closureBase` plus that signature's own func type, which the
-	// caller renders (a signature's params/results are the language's `Type`s, not the section's).
-	// Not final: a callable object with properties extends it (`ClassInfo.callable`).
+	// One closure struct per call signature, `closureBase` plus its func type (rendered by the caller). Not final: a callable object extends it.
 	closure(funcTypeIndex: number): number {
 		return this.register({ final: false, supertypes: [this.closureBase()], type: { kind: 'struct', fields: [
 			{ type: { ref: funcTypeIndex, nullable: false }, mut: false },
@@ -710,14 +630,12 @@ export class Types extends Array<wasm.SubType> {
 		] } });
 	}
 
-	// The one-field mutable cell a captured binding turns into, so the closure and the declaring scope write
-	// through to the same storage.
+	// The one-field mutable cell a captured binding becomes, shared by the closure and the declaring scope.
 	holder(vt: wasm.ValType): number {
 		return this.register({ final: true, supertypes: [], type: { kind: 'struct', fields: [{ type: vt, mut: true }] } });
 	}
 
-	// Function indices come off the same per-compile counter as the type section, since a func's type is
-	// registered first and its index taken second: `func` is the pair every caller wants.
+	// Function indices come off the type section's counter (a func's type is registered first): `func` is the pair callers want.
 	private nextFunc = 0;
 	funcType(params: wasm.ParamType[], results: wasm.ValType[]): number {
 		return this.register({ final: true, supertypes: [], type: { kind: 'func', params, results } });
@@ -729,10 +647,8 @@ export class Types extends Array<wasm.SubType> {
 		return this.funcAt(this.funcType(params, results));
 	}
 
-	// Rec groups: one per contiguous run of struct/array types, since wasm-GC equivalence is structural ACROSS
-	// groups (singletons would let two identical shapes canonicalize into types `ref.test` cannot tell apart).
-	// Each host-imported func type gets its own singleton (canonicalizing flat: wasmtime rejected WASI's
-	// `fd_write`); splitting at EVERY func type is invalid, since a struct may forward-reference past one.
+	// One rec group per contiguous run of struct/array types: equivalence is structural ACROSS groups, and singletons would canonicalize identical
+	// shapes `ref.test` cannot tell apart. Each host-imported func type is a singleton (wasmtime rejected WASI's `fd_write` otherwise).
 	groupSizes(importedFuncTypes: Set<number>): number[] {
 		const sizes: number[] = [];
 		for (let i = 0, runStart = 0; i <= this.length; i++) {
@@ -755,8 +671,7 @@ export class Types extends Array<wasm.SubType> {
 	}
 
 
-	// The heap type one `typeof` tag's runtime test needs: the box a scalar enters an `any` slot as, an array for a
-	// string/`bigint`, and the closure base for a callable.
+	// The heap type a `typeof` tag's run-time test needs: a scalar's box, a string's or `bigint`'s array, the closure base.
 	heapType(tag: string): number | undefined {
 		switch (tag) {
 			case 'number':		return this.box('f64');
@@ -774,9 +689,7 @@ export class Types extends Array<wasm.SubType> {
 	add(type: wasm.SubType): number {
 		return this.push(type) - 1;
 	}
-	// "Does this module already have this array type" WITHOUT creating it: `ensureArrayType` would register one
-	// as a side effect, and a speculative candidate scan must not add types nothing uses. An absent type means
-	// no value of that kind exists to reach an `any` slot.
+	// Whether this array type exists, WITHOUT creating it: a speculative scan must not add types, and an absent one means no such value exists.
 	has(desc: wasm.SubType): boolean {
 		const key = wasm.typeKey(desc);
 		return key !== undefined && this.typeMap.has(key);
@@ -795,8 +708,7 @@ export class Types extends Array<wasm.SubType> {
 	
 }
 
-// The module's one passive data segment: a growable byte buffer plus the string table over it. Strings are
-// UTF-16LE, matching `charCodeAt`, so an `i16`-element array can be built straight from the bytes.
+// The one passive data segment: bytes plus the string table. Strings are UTF-16LE, matching `charCodeAt`, so an `i16` array builds from them.
 export class DataSection {
 	private buffer	= new Uint8Array(0);
 	private strings	= new Map<string, number>();
@@ -832,8 +744,7 @@ export class DataSection {
 	get bytes(): Uint8Array { return this.buffer; }
 }
 
-// The module's tag section. One tag is enough for a whole language: a throw carries a single boxed `any`,
-// so the tag's type is `(anyref) -> ()` and every `throw`/`try_table` in the module shares it.
+// One tag per language: a throw carries one boxed `any`, so `(anyref) -> ()` serves every `throw`/`try_table`.
 export class TagSection extends Array<wasm.TagType> {
 	private exceptionIndex?: number;
 
@@ -845,19 +756,10 @@ export class TagSection extends Array<wasm.TagType> {
 // ===================================================================
 //  Inline assembly
 // ===================================================================
-// The inline-`__asm` island: from the island's WAT body and the signature its call settled on, to the
-// instructions a wasm function carries. It manipulates WAT instructions and the representations above --
-// the language's own types never appear, and `AsmDecl` is the concrete, already-lowered signature it is
-// handed (the idiom throughout: a base interface the language fills in, never a type parameter over its
-// type -- a seam that needs one is a seam in the wrong place).
-//
-// What is per-language is only the island's SPELLING (recognising `__asm`, reading the WAT text and the
-// declared types off it) and the answers the language alone has: what a declared type lowers to, and what
-// a `TYPEINDEX` operand names. Those are its ordinary type-model operations, not something the island adds.
+// The inline-`__asm` island: from its WAT body and the signature its call settled on to instructions, over the representations above. Only the
+// SPELLING and the type answers are per language (what a declared type lowers to, what a `TYPEINDEX` operand names).
 
-// An island, prepared once. A `$T`-switched body needs no signature at all -- the chosen numeric type IS
-// its signature -- so the two shapes are distinguished here rather than by an optional argument the caller
-// could get wrong.
+// An island, prepared once: a `$T`-switched body's numeric type IS its signature, so the two shapes are distinct types.
 type PreparedAsm =
 	| { switched: true;		render(args: (Type | undefined)[], ctx: FunctionContext): Inline }
 	| { switched: false;	render(args: (Type | undefined)[], ctx: FunctionContext, sig: ClosureSig, typeIndex: (text: string)=> number | undefined): Inline };
@@ -869,8 +771,7 @@ function assertFlatInstrs(instrs: WAT.WatInstr[], asm: string): wasm.Instr[] {
 			throw `inline asm '${asm}': switch '${i.key}' is unresolved -- not a ctx.defines entry, and inline asm has no enclosing macro call to bind it to a $tag argument`;
 		if (i.op === '__local')
 			throw `inline asm '${asm}': local '${i.id}' should already have been hoisted into a separate locals list`;
-		// A `$T.<suffix>` reference with no enclosing `(switch $T ...)` declaring its supported types is a
-		// real authoring error, not a type this body happens to support.
+		// A `$T.<suffix>` reference with no enclosing `(switch $T ...)` is an authoring error.
 		if (i.op === 'local.get' && typeof i.localIndex === 'string' && i.localIndex.startsWith('$T.'))
 			throw `inline asm '${asm}': '${i.localIndex}' needs an enclosing '(switch $T ...)' declaring which types it's for`;
 		return i;
@@ -897,14 +798,8 @@ function resolveAsmLocals(instrs: wasm.Instr[], locals: WAT.WatLocal[], ctx: Fun
 	});
 }
 
-// A `TYPEINDEX("T[]")` operand, resolved AFTER parsing -- the assembler carried the text through opaquely
-// (it knows nothing of source-language types, and `toWasm`'s own note keeps it that way), exactly as it
-// leaves a `$name` for a later pass. The sibling of `resolveAsmLocals`, one operand slot over; the TEXT is
-// handed to the language, which alone can say what it names.
-// Every field a type index can land in -- `array.copy` carries two (`dst`/`src`), not `typeIndex`, and
-// missing them left the sentinel string in place to fail much later as a NaN.
-// Narrowed with `in` before each spread, as `resolveAsmLocals` does: spreading the whole `Instr` union
-// without it is "a union type that is too complex to represent".
+// A `TYPEINDEX("T[]")` operand, resolved after parsing (the assembler carries the text through; only the language can say what it names).
+// Every field a type index lands in, `array.copy`'s `dst`/`src` included; narrowed with `in` before each spread, as `resolveAsmLocals`.
 function resolveTypeExprs(instrs: wasm.Instr[], resolveIndex: (text: string) => number | undefined): wasm.Instr[] {
 	const resolve = (v: unknown): number | undefined =>
 		typeof v === 'string' && v.startsWith(WAT.TYPE_EXPR) ? resolveIndex(v.slice(WAT.TYPE_EXPR.length)) : undefined;
@@ -923,9 +818,8 @@ function resolveTypeExprs(instrs: wasm.Instr[], resolveIndex: (text: string) => 
 	});
 }
 
-// The three shapes an asm body takes. A generic body's signature and type operands depend on the call
-// site's type arguments, so its operands are resolved per call; a `$T` body's signature is the numeric type
-// its arguments agree on; anything else is resolved once.
+// The three shapes an asm body takes: a generic body resolved per call (its operands follow the type arguments), a `$T` body whose signature is
+// the numeric type its arguments agree on, and anything else resolved once.
 export function makeAsm(asm: string, defines: Record<string, string | number> | undefined, paramCount: number, generic = false): PreparedAsm {
 	const parsed = WAT.parseAsmBody(asm, defines);
 
@@ -944,18 +838,15 @@ export function makeAsm(asm: string, defines: Record<string, string | number> | 
 
 	const sw = parsed.body.find((i): i is WAT.SwitchPlaceholder => i.op === '__switch' && i.key === '$T');
 	if (sw) {
-		// The four numeric wasm types, in "widen to me first" preference order when an operand's own type has no
-		// real instruction -- f64 first, since widening i32/i64/f32 up to it is exact or an already-accepted tradeoff.
+		// The numeric types in "widen to me first" order where an operand's own type has no instruction: f64 first, since widening up to it is exact.
 		const NUMERIC_TYPES = ['f64', 'f32', 'i64', 'i32'] as const;
 		type NumericType = typeof NUMERIC_TYPES[number];
 		function isNumericType(t: Type | undefined): t is NumericType { return NUMERIC_TYPES.includes(t as NumericType); }
 		// One numeric type's expansion of a `$T`-switch body.
 		type TypeSwitchVariants = Partial<Record<NumericType, { locals: WAT.WatLocal[]; body: wasm.Instr[] }>>;
 
-		// A `$T`-keyed switch, expanded once per numeric type its arms declare. An arm's own body can declare
-		// further `$T`-typed locals (embedded as `__local` markers in its own body, same as everywhere else --
-		// switch_arm never splits them out) and further `$T.suffix` references, so a winning arm is processed by
-		// recursing back into this same walk, exactly as if the arm's own body were the whole generic body.
+		// A `$T`-keyed switch, expanded once per numeric type its arms declare; an arm may declare further `$T` locals and references, so a winning arm
+		// is processed by recursing as if it were the whole body.
 		const variants: TypeSwitchVariants = {};
 
 		for (const type of new Set(sw.arms.flatMap(a => a.values).filter(a => typeof a === 'string').map(a => a.slice(1) as NumericType))) {
