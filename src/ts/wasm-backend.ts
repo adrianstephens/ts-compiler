@@ -1131,18 +1131,13 @@ function namedBody<M extends JS.CallSig<Type>>(bodies: M[], checked: CheckedCall
 	return body;
 }
 
-function importedFunction(imports: Map<string, Map<string, { module: string; name: string }>>, decls: Map<string, FunctionDecl>, name: string, home: string) {
-	const imported = imports.get(home)?.get(name);
-	return imported && decls.has(homeKey(imported.module, imported.name)) ? imported : undefined;
-}
-
 const ctorsOf = (cls: TS.Class) => (cls.body as TS.ClassMember[]).filter((m): m is MethodMember => m.type === 'method' && m.key === 'constructor' && !!m.body);
 
 function collectOpenShapes(
 	stmtHomeModule: Map<object, string>,
 	moduleBodies: Map<string, Module>,
-	functionDeclByName: Map<string, FunctionDecl>,
-	namedImportsByModule: Map<string, Map<string, {module: string; name: string }>>
+	functions: Iterable<FunctionDecl>,
+	functionOf: (name: string, scope: Scope) => { decl: FunctionDecl } | undefined
 ) {
 	const escaping		= escapingParams();
 	const openShapes	= new Set<string>();
@@ -1328,10 +1323,11 @@ function collectOpenShapes(
 		// A parameter property is stored in its field.
 		for (const c of ctors)
 			escaping.set(c, new Set(c.params.flatMap(p => T.isParamProperty(p) && typeof p.key === 'string' ? [p.key] : [])));
-		const decls: Callable[] = [...[...new Set(functionDeclByName.values())].filter(d => d.body), ...ctors];
-		const calleeOf	= (callee: Expr, home: string) => callee.type === 'identifier'
-			? functionDeclByName.get(homeKey(home, callee.name)) ?? (imp => imp && functionDeclByName.get(homeKey(imp.module, imp.name)))(importedFunction(namedImportsByModule, functionDeclByName, callee.name, home))
-			: undefined;
+		const decls: Callable[] = [...[...new Set(functions)].filter(d => d.body), ...ctors];
+		const calleeOf	= (callee: Expr, home: string) => {
+			const scope = moduleBodies.get(home)?.scope as Scope | undefined;
+			return callee.type === 'identifier' && scope ? functionOf(callee.name, scope)?.decl : undefined;
+		};
 		for (let changed = true; changed; ) {
 			changed = false;
 			for (const decl of decls) {
@@ -1443,17 +1439,15 @@ function collectOpenShapes(
 						const callee		= unwrapAs(e.callee);
 						const calleeDecl	= callee.type === 'identifier' ? scope.decl(callee.name)
 							: callee.type === 'member' && callee.object.type === 'identifier' ? scope.namespace(callee.object.name)?.decl(callee.property) : undefined;
-						const imported		= callee.type === 'identifier' && (!calleeDecl || calleeDecl.type === 'import') ? namedImportsByModule.get(moduleId)?.get(callee.name) : undefined;
-						const monomorphized	= calleeDecl?.type === 'function_decl' || (!!imported && functionDeclByName.has(homeKey(imported.module, imported.name)));
-						if (monomorphized) {
+						const decl			= calleeDecl?.type === 'function_decl' ? calleeDecl : callee.type === 'identifier' ? functionOf(callee.name, scope)?.decl : undefined;
+						if (decl) {
 							// ...except at a FUNCTION-typed parameter: `structuralParams` only ever retypes one whose argument is a
 							// different STRUCT, so a closure argument gets no instance of its own and has to meet the parameter's
 							// declared signature as written -- every layout in that signature is a slot after all.
-							const decl	= calleeDecl?.type === 'function_decl' ? calleeDecl : imported && functionDeclByName.get(homeKey(imported.module, imported.name));
-							const fnAt	= (i: number) => { const a = decl?.params[i]?.typeAnnotation; return !!a && T.resolve(scope, a).type === 'function'; };
-							const escapes = (i: number) => { const k = decl?.params[i]?.key; return typeof k === 'string' && !!escaping.get(decl!)?.has(k); };
+							const fnAt	= (i: number) => { const a = decl.params[i]?.typeAnnotation; return !!a && T.resolve(scope, a).type === 'function'; };
+							const escapes = (i: number) => { const k = decl.params[i]?.key; return typeof k === 'string' && !!escaping.get(decl)?.has(k); };
 							e.arguments.forEach((a, i) => {
-								const p = decl?.params[i];
+								const p = decl.params[i];
 								if (p && typeof p.key === 'string')
 									slotOf.set(a, p);
 								if (a.type !== 'object' && a.type !== 'array' && !fnAt(i) && !escapes(i))
@@ -2392,10 +2386,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			}
 		}
 	}
-	// The one place an unqualified (or namespace-resolved) name turns into a `FunctionDecl` -- a lib
-	// declaration is always homeModule-independent, checked only after the calling module's own.
-	function resolveDecl(homeModule: string, name: string) {
-		return functionDeclByName.get(homeKey(homeModule, name)) ?? LIB_DECL_MAP.get(name);
+	// The module-level function `name` names in `scope`, imports and namespaces included: a declaration, or a `const`'s arrow.
+	function functionOf(name: string, scope: Scope): { name: string; home: string; decl: FunctionDecl } | undefined {
+		const v		= scope.declarator(name);
+		const fn	= moduleFunctions.get(scope.decl(name)) ?? (v && moduleFunctions.get(moduleBindings.get(v)?.d.init));
+		const decl	= fn && functionDeclByName.get(homeKey(fn.home, fn.name));
+		return decl && { ...fn, decl };
 	}
 	// Declared at the module's top level or above it (an import, the lib): reached from anywhere, so never a capture.
 	function resolvesGlobally(ctx: FunctionContext, name: string): boolean {
@@ -5850,21 +5846,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 
 	// A bare `f` or a namespace-qualified `NS.f` read as a VALUE resolves to a top-level function exactly as a call would.
 	function functionValueDecl(e: Expr, ctx: FunctionContext): { name: string; decl: FunctionDecl; module: string } | undefined {
-		if (e.type === 'identifier') {
-			const own = resolveDecl(ctx.homeModule, e.name);
-			if (own)
-				return own.type === 'function_decl' && own.body ? { name: e.name, decl: own, module: ctx.homeModule } : undefined;
-			const imported = namedImportsByModule.get(ctx.homeModule)?.get(e.name);
-			const decl = imported && functionDeclByName.get(homeKey(imported.module, imported.name));
-			return decl?.type === 'function_decl' && decl.body ? { name: imported!.name, decl, module: imported!.module } : undefined;
-		}
-		if (e.type === 'member' && e.object.type === 'identifier' && !ctx.lookup(e.object.name)) {
-			const nsDecl	= ctx.scope.namespace(e.object.name)?.decl(e.property);
-			const module	= nsDecl && stmtHomeModule.get(nsDecl);
-			const decl		= module !== undefined ? functionDeclByName.get(homeKey(module, e.property)) : undefined;
-			return decl?.type === 'function_decl' && decl.body ? { name: e.property, decl, module: module! } : undefined;
-		}
-		return undefined;
+		const lib	= e.type === 'identifier' ? LIB_DECL_MAP.get(e.name) : undefined;
+		const ns	= e.type === 'member' && e.object.type === 'identifier' && !ctx.lookup(e.object.name) ? ctx.scope.namespace(e.object.name) : undefined;
+		const fn	= e.type === 'identifier' ? functionOf(e.name, ctx.scope) : e.type === 'member' && ns ? functionOf(e.property, ns) : undefined;
+		return fn ? { name: fn.name, decl: fn.decl, module: fn.home }
+			: lib?.type === 'function_decl' && lib.body ? { name: lib.name, decl: lib, module: ctx.homeModule } : undefined;
 	}
 
 
@@ -5889,12 +5875,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// A bare name bound to a module-level VALUE, not a function (`walker.ts`'s `export const isJsStatement = guard<TS.Stmt>(...)`,
 	// called by name in `printer.ts`): the call calls the value it holds, as a namespace member's does.
 	function isModuleValue(name: string, ctx: FunctionContext): boolean {
-		if (ctx.resolvesName(name) || resolveDecl(ctx.homeModule, name) || funcs.has(homeKey(ctx.homeModule, name)))
+		if (ctx.resolvesName(name) || functionOf(name, ctx.scope) || LIB_DECL_MAP.has(name) || funcs.has(homeKey(ctx.homeModule, name)))
 			return false;
-		const imported	= namedImportsByModule.get(ctx.homeModule)?.get(name);
-		const decl		= imported ? moduleScopeOf(imported.module)?.decl(imported.name) : moduleScopeOf(ctx.homeModule)?.decl(name);
 		// Not an inline-asm intrinsic (`const loadI32 = __asm<[i32], i32>('i32.load')`): that IS the instruction, not a value.
-		const init		= decl?.type === 'var_decl' ? decl.declarations.find(d => d.name === (imported?.name ?? name))?.init : undefined;
+		const init = moduleVarOf(name, ctx.scope)?.d.init;
 		return !!init && !(init.type === 'call' && isAsm(init));
 	}
 
@@ -9679,7 +9663,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			moduleFunctions.delete(origin);
 
 	// Both read the functions just registered: which parameters escape, and where an imported call lands.
-	const { openShapes, openSlots, openReads: opened, builtShapes } = collectOpenShapes(stmtHomeModule, moduleBodies, functionDeclByName, namedImportsByModule);
+	const { openShapes, openSlots, openReads: opened, builtShapes } = collectOpenShapes(stmtHomeModule, moduleBodies, functionDeclByName.values(), functionOf);
 	openReads = opened;
 	// Stored as `any`: a shape holding several layouts, or a struct shape no literal builds, whose values all arrived through `any` or a
 	// cast (a dynamic object). Its members are reached by the run-time dispatchers.
