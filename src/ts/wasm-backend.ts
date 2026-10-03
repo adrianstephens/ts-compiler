@@ -4399,21 +4399,31 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		return Conditional<Expr>(test, yes, no);
 	}
 
-	// `value`'s elements, read through its own `length` and index and converted to `want`, into new storage `typeIndex` left in
-	// `dst`. Read where `value` is evaluated, so a later element of the same literal (`[...a, a.pop()]`) cannot change them.
+	// `value`'s elements (on the stack as `got`: raw storage of another kind, an indexable class, or a boxed `any`), read through its own
+	// `length` and index and converted to `want`, into new storage `typeIndex` left in `dst` -- read now, so a later element of the
+	// same literal (`[...a, a.pop()]`) cannot change them.
 	function copyElements(value: Expr, got: W.Type, ctx: FunctionContext, want: W.Type, typeIndex: number, dst: number): void {
 		const n			= ctx.tempCounter++;
-		const fromName	= `$spread$from$${n}`, atName = `$spread$at$${n}`;
-		const from		= Identifier(fromName);
-		const slot		= wtypeOf(value, ctx) ?? got;
-		coerceTop(got, ctx, slot);
-		ctx.emit(I.local.set(ctx.declareValue(fromName, slot, ctx.narrowedTypeOf(value)).index));
-		const i = ctx.declareValue(atName, 'i32', T.NUMBER).index;
-		emitAs(JS.Member(from, 'length'), ctx, 'i32');
+		const from		= ctx.temp(`$spread$from$${n}`, got), i = ctx.temp(`$spread$at$${n}`, 'i32');
+		// A string's storage is read as a string, through its class.
+		const cls		= W.isRef(got) && !W.isAny(got) ? classes.get(got.ref) : W.isArr(got) && got.arr === 'i16' ? builtinTypeOwner('string') : undefined;
+		const raw		= W.isArr(got) ? got.arr : undefined;
+		if (!cls && raw === undefined && !W.isAny(got))
+			throw `internal: a spread of '${W.typeKey(got)}' has no elements to copy`;
+		const elementT	= cls ? elementTypeOf(cls) : T.arrayLikeElement(T.resolve(ctx.scope, ctx.narrowedTypeOf(value)));
+		const read		= (dynamic: () => void, storage: (kind: W.ElementI) => void, own: (cls: ClassInfo) => W.Type): W.Type => {
+			ctx.emit(I.local.get(from));
+			return cls ? own(cls) : raw !== undefined ? (storage(raw), elementValueType(raw)) : (dynamic(), W.REF_ANY_NULLABLE);
+		};
+		ctx.emit(I.local.set(from));
+		coerceAs(T.NUMBER, read(() => ctx.emit(I.call(ensureAnyField('length').funcIndex)), () => ctx.emit(I.array.len), c => emitMemberRead(c, 'length', ctx)), ctx, 'i32');
 		ctx.emit(I.array.new_default(typeIndex), I.local.set(dst), I.i32.const(0), I.local.set(i));
 		ctx.emitLoop(() => {
 			ctx.emit(I.local.get(i), I.local.get(dst), I.array.len, I.i32.ge_u, I.br_if(1), I.local.get(dst), I.local.get(i));
-			emitAs(JS.Index(from, Identifier(atName)), ctx, want);
+			coerceAs(elementT, read(
+				() => ctx.emit(I.local.get(i), I.f64.convert_i32_s, I.call(ensureAnyIndex('get').funcIndex)),
+				kind => ctx.emit(I.local.get(i), (kind === 'i8' ? I.array.get_u : I.array.get)(types.array(kind))),
+				c => emitCallOn(c, '__get', [localArg(ctx, i, 'i32', T.NUMBER)], ctx)), ctx, want);
 			ctx.emit(I.array.set(typeIndex), I.local.get(i), I.i32.const(1), I.i32.add, I.local.set(i), I.br(0));
 		});
 	}
@@ -9410,9 +9420,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		return fn?.type === 'function' ? fn.returnType : undefined;
 	}
 	function emitBoxed(cls: ClassInfo, name: string, physical: W.Type, ctx: FunctionContext, result: W.Type): void {
-		const canonical = canonicalOf(cls, name, physical);
-		coerceTop(physical, ctx, canonical);
-		coerceTop(canonical, ctx, result);
+		coerceAs(T.lookupMember(cls.thisTsType, name, global), physical, ctx, result);
+	}
+	// `coerceTop`, a scalar boxed into (or unboxed out of) `any` by its declared type `t`: a number is the `f64` box however compactly held.
+	function coerceAs(t: Type | undefined, got: W.Type, ctx: FunctionContext, want: W.Type): void {
+		const via = W.isAny(want) ? canonicalFor(t, got) : W.isAny(got) ? canonicalFor(t, want) : got;
+		coerceTop(got, ctx, via);
+		coerceTop(via, ctx, want);
 	}
 	// A field read off the receiver on the stack, as an `any` slot holds it.
 	function emitBoxedField(cls: ClassInfo, idx: number, ctx: FunctionContext, result: W.Type): void {
