@@ -8,7 +8,7 @@ import { Literal, Identifier, Binary, Assign, hasMod, Module as CModule } from '
 import { checkHoisted, checkImported, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, checkedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr } from './checker';
 import { Walker, walker, walkerB } from './walker';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
-import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread } from './transform';
+import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
 import * as wasm from '@isopodlabs/binary_libs/wasm';
 import * as WAT from '../wasm/wat-parser';
 
@@ -6572,6 +6572,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 
 			case 'assign': {
 				const { operator, target, value } = e;
+				if (operator && operator !== '&&' && operator !== '||' && operator !== '??') {
+					const { temp, emit, check } = lowering(ctx);
+					return emitExpr(check(lowerCompound(e, operator, temp, emit)), ctx, want);
+				}
 
 				return ctx.inScope((): W.Type => {
 					const slot		= emitAssignTarget(target, ctx, operator ? 'discard' : 'none');
@@ -6586,25 +6590,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 						ctx.contextualReturn = saved;
 					};
 
-					// Both arms unbraced: a braced `if` with a bare `switch` for its `else` is the one shape `custom-control-block-style` rejects.
-					if (!operator)
+					if (operator === '??' && !W.isNullable(wtype))
+						throw "'??=' needs a nullable object-typed target (no boxing in this subset)";
+					if (operator)
+						emitShortCircuit(operator, wtype, ctx.narrowedTypeOf(target), wtype, emitValue, held => ctx.emit(I.local.get(held.index)), ctx);
+					else
 						emitValue();
-					else switch (operator) {
-						case '&&':
-						case '||':
-						case '??':
-							if (operator === '??' && !W.isNullable(wtype))
-								throw "'??=' needs a nullable object-typed target (no boxing in this subset)";
-							emitShortCircuit(operator, wtype, ctx.narrowedTypeOf(target), wtype, emitValue, held => ctx.emit(I.local.get(held.index)), ctx);
-							break;
-
-						default: {
-							// The operator's own decision over the old value held by name, its result typed as the assignment's (a step's range for `+=`).
-							const old = `$compound$${ctx.tempCounter++}`;
-							ctx.emit(I.local.set(ctx.declareValue(old, wtype, ctx.narrowedTypeOf(target)).index));
-							emitAs(Object.assign(Binary(operator, Identifier(old), value), { checkedType: ctx.typeAt(e, false) }), ctx, wtype);
-						}
-					}
 
 					const tee = want !== 'void';
 					slot.write(tee);

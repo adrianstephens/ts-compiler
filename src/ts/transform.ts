@@ -3,7 +3,7 @@ import * as JS from './js-parser';
 import * as T from './type-utils';
 import { Module, Location, Identifier, Literal, Binary, Conditional, Assign, Await, Member, ExprStmt, hasMod, dropMod, If, While } from '@isopodlabs/tison/ast';
 import { walker, walkerB, calcUnary, calcBinary } from './walker';
-import { SEVERITY, Err, checkBlock, checkStmt1, exportScope, markAbsenceTests, literalSpecifier, unknownTypeNames, typeOf, typeOf1, inferReturn } from './checker';
+import { SEVERITY, Err, isPurePath, checkBlock, checkStmt1, exportScope, markAbsenceTests, literalSpecifier, unknownTypeNames, typeOf, typeOf1, inferReturn } from './checker';
 import { LoadedModule, ModuleLoader } from './module-loader';
 
 type Expr			= JS.Expr;
@@ -463,6 +463,22 @@ export function lowerExpr(e: TS.Expr, typeOf: (e: TS.Expr) => Type, scope: Scope
 		default:
 			return undefined;
 	}
+}
+
+// `t op= v` as `t = t op v`, `t`'s object and index held first unless re-reading them is pure, so each is evaluated once.
+export function lowerCompound(e: Extract<TS.Expr, { type: 'assign' }>, op: JS.assignableOps, temp: (role: string) => string, emit: (s: Stmt) => void): TS.Expr {
+	const hold = (x: TS.Expr): (() => TS.Expr) => {
+		if (isPurePath(x) || x.type === 'literal')
+			return () => x;
+		const name = temp('compound');
+		emit(JS.VarDecl('const', JS.Var(name, x)));
+		return () => Identifier(name);
+	};
+	const t = e.target;
+	const place: () => TS.Expr = t.type === 'member' ? (o => () => JS.Member(o(), t.property))(hold(t.object))
+		: t.type === 'index' ? ((o, i) => () => JS.Index(o(), i()))(hold(t.object), hold(t.index))
+		: () => t;
+	return Assign<TS.Expr, never>(place(), Binary(op, place(), e.value));
 }
 
 // `Object.assign(target, {k: v}, ...)` whose sources write their keys out: the target held, then an ordinary `t.k = v` per key.
