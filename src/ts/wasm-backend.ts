@@ -6973,13 +6973,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 						continue;
 					}
 					// Built straight into the local's representation: its annotation, else its flow's hull (`flowType`, every assignment), else a
-					// const's precise SCALAR (a precise `[1, 2]` would be a tuple), else the initializer's type; one synthesized after the check, where it stands.
-					const stamped	= (s as { scope?: Scope }).scope;
+					// const's precise SCALAR (a precise `[1, 2]` would be a tuple), else the initializer's type.
 					const precise	= () => (t => W.scalarKind(typeOf(t)) ? slotType(t) : undefined)(ctx.typeAt(d.init!, false));
-					let tsType		= d.typeAnnotation ?? slotType(d.flowType) ?? T.literalTypeOf(d.init)
-						?? (s.kind === 'const' ? precise() : undefined) ?? checkerTypeOf(d.init, stamped ?? ctx.scope);
-					if (T.isAny(tsType) && !stamped)
-						tsType = ctx.narrowedTypeOf(d.init);
+					const tsType	= d.typeAnnotation ?? slotType(d.flowType) ?? T.literalTypeOf(d.init)
+						?? (s.kind === 'const' ? precise() : undefined) ?? checkerTypeOf(d.init, (s as { scope?: Scope }).scope ?? ctx.scope);
 
 					// The declared type stays the initializer's context: a literal is built as a `u8[]` even into an open slot.
 					const slotT = openedAs(d, tsType);
