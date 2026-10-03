@@ -4164,10 +4164,15 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 
 	// A runtime TYPE TEST, not a string comparison -- no `typeof` string ever needs to exist. Leaves an `i32` on the stack;
 	// returns false, emitting nothing, when the tag has neither a static answer nor a physical form, so the caller errors.
-	function emitTypeofTest(operand: Expr, tag: string, ctx: FunctionContext): boolean {
-		const t		= ctx.narrowedTypeOf(operand);
+	// The operand `push`es itself into a representation (`'void'` discards it); `t` is its type, `w` its own representation.
+	type Tested = { t: Type; w: () => W.Type | undefined; push(want: W.Type): void };
+	const testedOf = (e: Expr, ctx: FunctionContext): Tested => ({
+		t: ctx.narrowedTypeOf(e), w: () => wtypeOf(e, ctx), push: want => want === 'void' ? emitDiscarded(e, ctx) : void emitAs(e, ctx, want),
+	});
+	function emitTypeofTest(operand: Tested, tag: string, ctx: FunctionContext): boolean {
+		const t		= operand.t;
 		const answer = (v: 0 | 1) => {
-			emitDiscarded(operand, ctx);
+			operand.push('void');
 			ctx.emit(I.i32.const(v));
 			return true;
 		};
@@ -4182,7 +4187,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		if (tag === 'undefined' || nnTag !== undefined) {
 			if (nnTag !== undefined && nnTag !== tag && tag !== 'undefined')
 				return answer(0);
-			emitAs(operand, ctx, W.REF_ANY_NULLABLE);
+			operand.push(W.REF_ANY_NULLABLE);
 			ctx.emit(I.ref.is_null);
 			if (tag !== 'undefined')
 				ctx.emit(I.i32.eqz);
@@ -4192,11 +4197,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		// Only a boxed `any` slot can carry a runtime test: two types sharing a physical form (`number` and `boolean` are both
 		// `f64` here) are indistinguishable at runtime, so anything else would be a WRONG answer, not merely an unsupported one.
 		const heap = types.heapType(tag) ?? builtinTypeOwner(tag)?.typeIndex;
-		const w    = wtypeOf(operand, ctx);
-		if (!W.isAny(w))
+		if (!W.isAny(operand.w()))
 			return false;
 		if (heap !== undefined) {
-			emitAs(operand, ctx, W.REF_ANY_NULLABLE);
+			operand.push(W.REF_ANY_NULLABLE);
 			ctx.emit(I.ref.test(heap));
 			return true;
 		}
@@ -4205,7 +4209,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		// `typeof null === 'object'` is deliberately not reproduced -- that value cannot be told from a real `undefined` either way.
 		if (tag === 'object') {
 			const tmp = ctx.temp(`$typeofobj$${ctx.tempCounter++}`, W.REF_ANY_NULLABLE);
-			emitAs(operand, ctx, W.REF_ANY_NULLABLE);
+			operand.push(W.REF_ANY_NULLABLE);
 			ctx.emit(I.local.set(tmp), I.local.get(tmp), I.ref.is_null);
 			for (const h of [types.box('f64'), types.box('i32'), types.array('i16'), types.closureBase(), builtinTypeOwner('symbol')!.typeIndex])
 				ctx.emit(I.local.get(tmp), I.ref.test(h), I.i32.or);
@@ -4227,20 +4231,25 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		const ALL		= ['undefined', 'number', 'boolean', 'string', 'bigint', 'symbol', 'function', 'object'];
 		const named		= members.map(m => T.isNullish(m, ctx.scope) ? (hasNull ? 'object' : 'undefined') : T.typeofName(m, ctx.scope));
 		const tags		= named.some(n => n === undefined) ? ALL : ALL.filter(tag => named.includes(tag));
-		const held		= `#typeof$${ctx.tempCounter++}`;
-		emitStmt(JS.VarDecl('const', JS.Var(held, operand, t)), ctx);
-		const id: Expr	= Identifier(held);
+		const w			= typeOf(t)!;
+		const held		= ctx.temp(`$typeof$${ctx.tempCounter++}`, w);
+		emitAs(operand, ctx, w);
+		ctx.emit(I.local.set(held));
+		const tested: Tested = { t, w: () => w, push: want => {
+			if (want !== 'void') {
+				ctx.emit(I.local.get(held));
+				coerceValue(operand, w, ctx, want);
+			}
+		} };
 		const str		= typeOf(T.STRING)!;
 		const cascade = (i: number): void => {
 			const tag = tags[i];
-			if (i === tags.length - 1) {
-				emitAs(Literal(tag), ctx, str);
-				return;
-			}
+			if (i === tags.length - 1)
+				return emitStringConst(tag, ctx);
 			// A null slot is tested by `emitTypeofTest('undefined')`; its tag is the type's own null tag.
-			if (!emitTypeofTest(id, tag === 'object' && hasNull ? 'undefined' : tag, ctx))
+			if (!emitTypeofTest(tested, tag === 'object' && hasNull ? 'undefined' : tag, ctx))
 				throw `'typeof' of '${T.showType(t)}' cannot be told apart at run time (tag '${tag}')`;
-			ctx.emitIf(toValType(str), () => emitAs(Literal(tag), ctx, str), () => cascade(i + 1));
+			ctx.emitIf(toValType(str), () => emitStringConst(tag, ctx), () => cascade(i + 1));
 		};
 		cascade(0);
 		return str;
@@ -6718,7 +6727,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					const asTypeof = (a: Expr, b: Expr) => a.type === 'unary' && a.operator === 'typeof'
 						&& b.type === 'literal' && typeof b.value === 'string' ? { operand: a.operand, tag: b.value } : undefined;
 					const test = asTypeof(left, right) ?? asTypeof(right, left);
-					if (test && emitTypeofTest(test.operand, test.tag, ctx)) {
+					if (test && emitTypeofTest(testedOf(test.operand, ctx), test.tag, ctx)) {
 						if (operator === '!==' || operator === '!=')
 							ctx.emit(I.i32.eqz);
 						return 'i32';
