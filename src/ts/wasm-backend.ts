@@ -5303,7 +5303,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 						ctx.emit(I.local.get(local!.index), I.struct.get(physCls.typeIndex, extIdx), I.ref.is_null);
 						ctx.emitIf(toValType(W.REF_ANY), () => emitAs(Identifier('undefined'), ctx, W.REF_ANY), () => {
 							ctx.emit(I.local.get(local!.index), I.struct.get(physCls.typeIndex, extIdx), I.ref.as_non_null);
-							emitMethodCall(mapCls, 'get', [Literal(prop)], ctx);
+							emitCallOn(mapCls, 'get', [stringArg(ctx, prop)], ctx);
 						});
 					} };
 				}
@@ -7375,7 +7375,16 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 							const table = new Array<number>(tableSize).fill(defaultBr);
 							values.forEach((v, i) => table[Math.round((v - sorted[0]) / g)] = i);
 
-							emitAs(JS.JSBinary('*', JS.JSBinary('-', s.discriminant, Literal(sorted[0])), Literal(1 / g)), ctx, 'i32');
+							// The case's slot, `(disc - min) / g`: in i32 when the cases are consecutive integers.
+							if (g === 1 && Number.isInteger(sorted[0])) {
+								emitAs(s.discriminant, ctx, 'i32');
+								if (sorted[0])
+									ctx.emit(I.i32.const(sorted[0]), I.i32.sub);
+							} else {
+								emitAs(s.discriminant, ctx, 'f64');
+								ctx.emit(I.f64.const(sorted[0]), I.f64.sub, I.f64.const(1 / g), I.f64.mul);
+								coerceTop('f64', ctx, 'i32');
+							}
 							ctx.emit(I.br_table(table, defaultBr));
 
 							let content = ctx.out;
