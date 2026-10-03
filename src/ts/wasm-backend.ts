@@ -6339,60 +6339,24 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					const ctor = ensureCtor(owner, [], ctx);
 					emitCallArgs(`${owner.name}'s constructor`, ctor.params, ctor.defaults, !!ctor.hasRest, [], ctx, ctor.resolvedParams);
 					ctx.emit(I.call(ctor.funcIndex));
-					const entry = (p: (typeof e.properties)[number]): Expr[] => {
-						if (p.type !== 'field' || typeof p.key === 'object' || !p.value)
-							throw `object literal for '${owner.name}' can only have plain 'key: value' properties (no methods or computed keys)`;
-						return [Literal(String(p.key)), p.value];
-					};
-					if (!e.properties.some(p => p.type === 'spread')) {
-						for (const p of e.properties)
-							emitMethodCall(owner, 'set', entry(p), ctx);
-						return owner.thisWtype!;
-					}
-					const n			= ctx.tempCounter++;
-					const mapName	= `#dynobj$${n}`;
-					const mapLocal	= ctx.declareValue(mapName, owner.thisWtype!, owner.thisTsType!);
-					ctx.emit(I.local.set(mapLocal.index));
-					let spreadIndex = 0;
+					// Each `set`/`spread` returns the object, the next one's receiver. A struct operand is held once, its fields read off it.
 					for (const p of e.properties) {
-						if (p.type === 'spread') {
-							const srcCls = ownerOf(p.operand, ctx);
-							if (srcCls && !isDynamicObject(srcCls)) {
-								const srcName	= `#spread$${n}$${spreadIndex++}`;
-								const srcLocal	= ctx.declareValue(srcName, srcCls.thisWtype!, srcCls.thisTsType!);
-								emitSpreadOperand(p.operand, ctx, srcCls.thisWtype!);
-								ctx.emit(I.local.set(srcLocal.index));
-								for (const key of srcCls.fieldIndex.keys()) {
-									ctx.emit(I.local.get(mapLocal.index));
-									emitMethodCall(owner, 'set', [Literal(key), JS.Member(Identifier(srcName), key)] as Expr[], ctx);
-								}
-								continue;
-							}
-							const spreadName	= `#spread$${n}$${spreadIndex}`;
-							const kName			= `#spreadkey$${n}$${spreadIndex++}`;
-							const spreadLocal	= ctx.declareValue(spreadName, owner.thisWtype!, owner.thisTsType!);
-							emitSpreadOperand(p.operand, ctx, owner.thisWtype!);
-							ctx.emit(I.local.set(spreadLocal.index));
-							emitStmt({
-								type: 'for', kind: 'of',
-								init: JS.VarDecl('const', JS.Var(kName)),
-								right: JS.Call(JS.Member(Identifier(spreadName), 'keys'), []),
-								body: JS.Block({
-									type: 'expression', expression: {
-										type: 'call',
-										callee: JS.Member(Identifier(mapName), 'set'),
-										arguments: [Identifier(kName), JS.Call(JS.Member(Identifier(spreadName), 'get'), [Identifier(kName)])],
-									},
-								}),
-							} as Stmt, ctx);
-							continue;
+						const srcCls = p.type === 'spread' ? ownerOf(p.operand, ctx) : undefined;
+						if (p.type === 'field' && typeof p.key !== 'object' && p.value) {
+							emitMethodCall(owner, 'set', [Literal(String(p.key)), p.value], ctx);
+						} else if (p.type !== 'spread') {
+							throw `object literal for '${owner.name}' can only have plain 'key: value' properties (no methods or computed keys)`;
+						} else if (!srcCls || isDynamicObject(srcCls)) {
+							emitCallOn(owner, 'spread', [{ wtype: owner.thisWtype!, push: () => emitSpreadOperand(p.operand, ctx, owner.thisWtype!) }], ctx);
+						} else {
+							const src = ctx.temp(`$spread$${ctx.tempCounter++}`, srcCls.thisWtype!);
+							emitSpreadOperand(p.operand, ctx, srcCls.thisWtype!);
+							ctx.emit(I.local.set(src));
+							for (const [key, idx] of srcCls.fieldIndex)
+								if (!key.startsWith('#'))
+									emitCallOn(owner, 'set', [stringArg(ctx, key), fieldArg(ctx, srcCls, src, idx)], ctx);
 						}
-						const args = entry(p);
-						ctx.emit(I.local.get(mapLocal.index));
-						if (emitMethodCall(owner, 'set', args, ctx) !== 'void')
-							ctx.emit(I.drop);
 					}
-					ctx.emit(I.local.get(mapLocal.index));
 					return owner.thisWtype!;
 				}
 
@@ -9394,6 +9358,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		});
 		ctx.emit(...inline?.inline ?? [I.call(method!.funcIndex)]);
 		return sig.result;
+	}
+	// The field `idx` of the struct held in `local`, as an argument: in its canonical representation (`canonicalOf`).
+	function fieldArg(ctx: FunctionContext, cls: ClassInfo, local: number, idx: number): HeldArg {
+		const name = cls.fields[idx].name, wtype = canonicalOf(cls, name, cls.fields[idx].wtype);
+		return { wtype, push: () => {
+			ctx.emit(I.local.get(local));
+			emitBoxed(cls, name, emitFieldRead(cls, idx, ctx), ctx, wtype);
+		} };
 	}
 	// `cls`'s member `name` read off the receiver on the stack: its getter, else its field.
 	function emitMemberRead(cls: ClassInfo, name: string, ctx: FunctionContext): W.Type {

@@ -114,6 +114,13 @@ class DynamicObject<V> {
 	keys(): string[]					{ return this.map_.keys(); }
 	values(): V[]						{ return this.map_.values(); }
 	entries(): [string, V][]			{ return this.map_.entries(); }
+	// `{...from}`: each of its entries, in order.
+	spread(from: DynamicObject<V>): this {
+		const keys = from.map_.keys(), values = from.map_.values();
+		for (let i = 0; i < keys.length; i++)
+			this.map_.set(keys[i], values[i]);
+		return this;
+	}
 
 	// `Object.keys/values/entries` of an erased receiver: the raw `any[]` every representation answers with.
 	anyEntries(which: string): RawArray<any> {
