@@ -253,6 +253,9 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 	// An uncontextual `[]` is `never[]`, which a union drops; an auto-typed declaration or assignment still evolves (`any[]`).
 	['an empty array arm of a conditional takes the other arm', 'declare const c: boolean; declare const xs: { n: number }[]; const r = c ? xs : []; const q: string = r.map(x => x.n);', [NOT_ASSIGNABLE('number[]', 'string')]],
 	['an empty array declaration or assignment evolves', 'let a = []; a.push(1); let b; (b = [], b).push(5);', []],
+	// `in`'s false branch drops only a member declaring the key as required: an index signature or an optional member may lack it.
+	['a false `in` keeps an index signature or optional member', "const r: { [x: string]: number } = {}; declare const o: { k?: string }; if (!('k' in r) && !('k' in o)) { const q: string = r.k; const p: number = o.k; }",
+		[NOT_ASSIGNABLE('number', 'string'), NOT_ASSIGNABLE('string | undefined', 'number')]],
 	['a destructuring default adds its own type', "let [x = 'a' in {}] = []; x = !x; const { y = 1 } = {} as { y?: string }; const q: boolean = y;", [NOT_ASSIGNABLE('string | number', 'boolean')]],
 	// Stripping `undefined` keeps an aliased union by name, as TS does: expanded, it no longer matched the alias itself.
 	['?? and ! keep an aliased union by name', "type U = { a: 1 } | { b: 2 }; declare const p: { c?: U }; declare function d(): U; const q: string = p.c ?? d(); declare const n: U | undefined; const r: string = n!;", [NOT_ASSIGNABLE('U', 'string'), NOT_ASSIGNABLE('U', 'string')]],

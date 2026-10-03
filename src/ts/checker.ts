@@ -1087,7 +1087,10 @@ export function narrow(test: Expr, scope: Scope, sense: boolean): Scope {
 						s.addNarrowing(key, TS.IntersectionType([r, TS.ObjectType([TS.TypeProperty(prop, T.UNKNOWN)])]));
 						return s;
 					}
-					return narrowValue(scope, key, m => !T.sealed(m, scope) || !!T.lookupMember(m, prop, scope) === sense, t);
+					// The false branch drops only a member DECLARING the property as required: an index signature or an optional one may lack it.
+					const required = (m: Type) => !T.memberOptional(m, prop, scope)
+						&& T.collectMembers(m, scope).some(d => (d.type === 'property' || d.type === 'method') && T.memberKey(d.key) === prop);
+					return narrowValue(scope, key, m => !T.sealed(m, scope) || (sense ? !!T.lookupMember(m, prop, scope) : !required(m)), t);
 				}
 				return scope;
 			}
