@@ -465,6 +465,38 @@ export function patternBindings(kind: JS.DeclarationKind, target: BindingTarget,
 }
 
 //-----------------------------------------------------------------------------
+// Lowering for codegen -- after the check; the result is checked with `checkSynthesized`
+//-----------------------------------------------------------------------------
+
+type ForOf = Extract<Stmt, { type: 'for'; right: unknown }>;
+
+// `iterator.next()`: JS sends `undefined` to a `next` that takes a value (a generator's).
+export function nextCall(iterator: TS.Expr, it: T.IterationTypes, scope: Scope): TS.Expr {
+	return JS.Call(JS.Member(iterator, 'next'), T.isNullish(it.next, scope) ? [] : [Identifier('undefined')]);
+}
+
+// `for (v of xs) body` as plain loops: by the iteration protocol where codegen iterates by it (`it`: what iterating yields), else by
+// position. `temp` names a fresh hidden binding.
+export function lowerForOf(s: ForOf, it: T.IterationTypes | undefined, scope: Scope, temp: (role: string) => string): Stmt {
+	if (s.init.type !== 'var_decl' || s.init.declarations.length !== 1)
+		throw "'for...of' loop variable must be a single declaration";
+	const v		= s.init.declarations[0], kind = s.init.kind;
+	const bind	= (value: TS.Expr, t?: Type) => JS.Block<Stmt>(JS.VarDecl(kind, JS.Var(v.name, value, v.typeAnnotation ?? t)), s.body);
+	if (it) {
+		const iter = Identifier(temp('it')), r = Identifier(temp('r'));
+		return JS.Block<Stmt>(
+			JS.VarDecl('const', JS.Var(iter.name, JS.Call(JS.Member(s.right, '[Symbol.iterator]'), []))),
+			JS.For(JS.VarDecl('let', JS.Var(r.name, nextCall(iter, it, scope))), JS.JSUnary('!', JS.Member(r, 'done')), Assign<TS.Expr, never>(r, nextCall(iter, it, scope)), bind(JS.Member(r, 'value'), it.yield)),
+		);
+	}
+	const arr = Identifier(temp('arr')), i = Identifier(temp('i'));
+	return JS.Block<Stmt>(
+		JS.VarDecl('const', JS.Var(arr.name, s.right)),
+		JS.For(JS.VarDecl('let', JS.Var(i.name, Literal(0))), JS.JSBinary('<', i, JS.Member(arr, 'length')), JS.JSUnary('++', i), bind(JS.Index(arr, i))),
+	);
+}
+
+//-----------------------------------------------------------------------------
 // TS to JS
 //-----------------------------------------------------------------------------
 

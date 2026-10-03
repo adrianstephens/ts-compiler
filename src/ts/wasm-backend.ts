@@ -5,10 +5,10 @@ import * as JS from './js-parser';
 import * as T from './type-utils';
 import * as W from '../wasm/codegen';
 import { Literal, Identifier, Binary, Assign, Conditional, Member, hasMod, Module as CModule } from '@isopodlabs/tison/ast';
-import { checkHoisted, checkImported, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, checkedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals } from './checker';
+import { checkHoisted, checkImported, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, checkedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized } from './checker';
 import { Walker, walker, walkerB } from './walker';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
-import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary } from './transform';
+import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, nextCall } from './transform';
 import * as wasm from '@isopodlabs/binary_libs/wasm';
 import * as WAT from '../wasm/wat-parser';
 
@@ -1886,12 +1886,6 @@ function homeKey(homeModule: string, name: string) {
 }
 
 
-// What iterating `t` yields, and returns once done (TS's iteration types): read off its `[Symbol.iterator]()` iterator's
-// `next()` result (`for await` tries `[Symbol.asyncIterator]` first). Without the protocol (an ES5 lib) only arrays and strings iterate.
-// `iterator.next()`: JS sends `undefined` to a `next` that takes a value (a generator's).
-function nextCall(iterator: Expr, it: T.IterationTypes, typeScope: Scope): Expr {
-	return JS.Call(JS.Member(iterator, 'next'), T.isNullish(it.next, typeScope) ? [] : [{ type: 'identifier', name: 'undefined' }]);
-}
 
 // Substitutes a generic class's type parameters throughout its decl.
 function substituteClassTypeParam(decl: JS.ClassDecl<Type>, map: ReadonlyMap<string, Type>): JS.ClassDecl<Type> {
@@ -7268,46 +7262,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 						return;
 
 					case  'of': {
-						// The loop variable's own `name` (`v.name`) may be a plain identifier or a real destructuring pattern (`for (const [k, v] of pairs)`) -- `JS.Var`'s
-						// own `name: BindingTarget` carries either through unchanged, and the synthesized `var_decl` (`JS.VarDecl(s.init.kind, JS.Var(v.name, ...))`) is
-						// handled the same generic way any pattern-typed `var_decl` already is (`hoistVar`/`emitPatternBinding`) -- nothing here needs to know which shape.
-						if (s.init.type !== 'var_decl' || s.init.declarations.length !== 1)
-							throw "'for...of' loop variable must be a single declaration";
-
-						const v			= s.init.declarations[0];
+						// An array is read by position; anything else with `[Symbol.iterator]()` by the protocol, as JS iterates every iterable.
 						const n			= ctx.tempCounter++;
-						// A non-array with `[Symbol.iterator]()` iterates by the protocol, as JS iterates every iterable: `next()` until
-						// `done`. `for...of` sends `undefined` to a `next` that takes a value (a generator's). Arrays stay indexed below.
-						const it = iteratesByProtocol(s.right, ctx);
-						if (it) {
-							const itId: Expr	= Identifier(`#for${n}$it`);
-							const rId: Expr		= Identifier(`#for${n}$r`);
-							emitStmt(JS.Block<Stmt>(
-								JS.VarDecl('const', JS.Var(`#for${n}$it`, JS.Call(JS.Member(s.right, '[Symbol.iterator]'), []))),
-								JS.For(
-									JS.VarDecl('let', JS.Var(`#for${n}$r`, nextCall(itId, it, ctx.scope))),
-									JS.JSUnary('!', JS.Member(rId, 'done')),
-									Assign<Expr, never>(rId, nextCall(itId, it, ctx.scope)),
-									JS.Block<Stmt>(JS.VarDecl(s.init.kind, JS.Var(v.name, JS.Member(rId, 'value'), v.typeAnnotation ?? it.yield)), s.body),
-								),
-							), ctx);
-							return;
-						}
-						const arrId: Expr = Identifier(`#for${n}$arr`);
-						const idxId: Expr = Identifier(`#for${n}$i`);
-
-						emitStmt(JS.Block<Stmt>(
-							JS.VarDecl('const', JS.Var(arrId.name, s.right)),
-							JS.For(
-								JS.VarDecl('let', JS.Var(idxId.name, Literal(0))),
-								JS.JSBinary('<', idxId, JS.Member(arrId, 'length')),
-								JS.JSUnary('++', idxId),
-								JS.Block<Stmt>(
-									JS.VarDecl(s.init.kind, JS.Var(v.name, JS.Index(arrId, idxId), v.typeAnnotation)),
-									s.body
-								),
-							),
-						), ctx);
+						const lowered	= lowerForOf(s, iteratesByProtocol(s.right, ctx), ctx.scope, role => `#for${n}$${role}`);
+						checkSynthesized([lowered], (s as { scope?: Scope }).scope ?? ctx.scope);
+						emitStmt(lowered, ctx);
 						return;
 					}
 					// `for (const k in obj)` is `for (const k of Object.keys(obj))`; something read by POSITION enumerates its indices, as strings.
