@@ -7102,158 +7102,119 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			// result). The try body's success path explicitly `br`s past the handler to `$after`, so `$catchLand`'s wrapped `try_table` never falls through to its
 			// own end -- `unreachable` closes that dead edge; without it the validator checks the block's declared (anyref) result against the fallthrough's nothing
 			// and rejects the module. JS's grammar allows at most one `catch`, so `handlers` is only ever empty or a single clause here.
-			case 'try':
+			case 'try': {
 				if (!s.handlers.length && !s.finalizer)
 					throw "'try' needs a 'catch' or 'finally'";
-
-				if (!s.finalizer) {
-					const saved			= ctx.swapOut();
-					ctx.enterLabel(3);
+				// The body in a try_table catching the one tag (all this compiler throws), its value delivered to a block and bound to the
+				// catch parameter, then `handler`. Bound OUTSIDE any try_table the handler opens: a block does not inherit outer stack values.
+				const emitCaught = (afterDepth: number, handler: () => void) => {
+					ctx.enterLabel(2);			// $catchLand, and the try_table's own level
 					ctx.inScope(() => emitStmts(s.body, ctx));
-					
-					ctx.emit(I.br(2));	//ctx.depth - $after
+					ctx.emit(I.br(ctx.depth - afterDepth));
 					ctx.exitLabel();
 					ctx.emit(I.try_table(undefined, [wasm.Catch.tag(ensureExceptionTag(), 0)], ctx.swapOut()));
 					ctx.emit(I.unreachable);
 					ctx.exitLabel();
 					ctx.emit(I.block(toValType(W.REF_ANY), ctx.swapOut()));
-
 					ctx.inScope(() => {
-						if (s.handlers[0].param) {
-							if (typeof s.handlers[0].param !== 'string')
-								throw "a destructured catch parameter ('catch ({...})'/'catch ([...])') is not supported";
-							ctx.emit(I.local.set(ctx.declareValue(s.handlers[0].param, W.REF_ANY, T.ANY).index));
-						} else {
-							ctx.emit(I.drop);
-						}
-						emitStmts(s.handlers[0].body, ctx);
+						const param = s.handlers[0].param;
+						if (param && typeof param !== 'string')
+							throw "a destructured catch parameter ('catch ({...})'/'catch ([...])') is not supported";
+						ctx.emit(param ? I.local.set(ctx.declareValue(param, W.REF_ANY, T.ANY).index) : I.drop);
+						handler();
 					});
+				};
 
+				if (!s.finalizer) {
+					const saved = ctx.swapOut();
+					emitCaught(ctx.enterLabel(), () => emitStmts(s.handlers[0].body, ctx));
 					ctx.exitLabel();
 					ctx.emit(I.block(undefined, ctx.swapOut(saved)));
-
-				} else {
-
-					// With a 'finally', every exit -- normal completion, a caught or uncaught exception, an escaping break/continue/return -- funnels through one shared
-					// landing point ($land) that runs 'finally' once, then re-dispatches on a recorded action code; break/continue/return redirect here via
-					// `ctx.finallyGuards` (see those `case`s above), while the exception path needs no interception (`throw_ref` propagates on its own). A
-					// return/throw/break/continue written directly inside 'finally' needs no special handling either -- guards and `onReturn` are restored to their outer
-					// values before 'finally' compiles, so it executes as a real exit or redirects through the next-outer guard. Works in a generator/async function, a
-					// constructor, or a `reassignsThis` method too: `onReturn` rebuilds the real per-context return (IteratorResult/Promise/`this`), exactly as if
-					// compiling that shape fresh.
-					const actionLocal		= { wtype: 'i32' as const, index: ctx.temp('#finally$action', 'i32') };
-					const exnLocal			= { wtype: W.REF_EXN, index: ctx.temp('#finally$exn', W.REF_EXN) };
-					const savedOnReturn		= ctx.onReturn;
-					const outerOnReturn		= savedOnReturn;
-					const outerWtype		= outerOnReturn.wtype(ctx);
-					const returnValueLocal	= outerWtype !== undefined ? { wtype: outerWtype, index: ctx.temp('#finally$retval', outerWtype) } : undefined;
-
-					const saved				= ctx.swapOut();
-					const landDepth			= ctx.enterLabel();			// $land
-					const catchAllDepth 	= ctx.enterLabel();			// $catchAllLand
-					const afterDepth		= ctx.enterLabel();			// $after
-
-					const guard = {
-						actionLocal,
-						breakTargetsLenAtEntry:		ctx.breakTargets.length,
-						continueTargetsLenAtEntry:	ctx.continueTargets.length,
-						landingDepth:				landDepth,
-					};
-					ctx.finallyGuards.push(guard);
-					// A `return` in the protected region must stash its value and redirect here too; only one return meaning is ever current (no stack needed
-					// as with nested loops' `break`), so a plain swap-and-restore mirrors `ctx.swapOut()`'s idiom.
-					ctx.onReturn = {
-						wtype: () => outerWtype,
-						emit(ctx, argument) {
-							if (returnValueLocal) {
-								if (argument)
-									emitAs(argument, ctx, returnValueLocal.wtype);
-								else
-									ctx.emitDefaultValue(returnValueLocal.wtype, types, toValType);
-								ctx.emit(I.local.set(returnValueLocal.index));
-							} else if (argument) {
-								// Same rejection the real (outer) 'return' gives -- delegate to it for that message (a 'void' function vs. a constructor say this differently)
-								// rather than inventing a second copy of the same decision here.
-								outerOnReturn.emit(ctx, argument);
-							}
-							ctx.emit(I.i32.const(1), I.local.set(actionLocal.index), I.br(ctx.depth - landDepth));
-						},
-					};
-
-					if (s.handlers.length) {
-						// A's own exceptions: our single project-wide tag is the only thing this compiler ever throws, so the ordinary tag-catch below already covers 'try' exhaustively --
-						// no 'catch_all_ref' needed on *this* try_table (unlike the one below, for B).
-						ctx.enterLabel(2);			// $catchLand, try_table (A)'s own implicit level
-						ctx.inScope(() => emitStmts(s.body, ctx));
-						ctx.emit(I.br(ctx.depth - afterDepth));
-						ctx.exitLabel();
-						ctx.emit(I.try_table(undefined, [wasm.Catch.tag(ensureExceptionTag(), 0)], ctx.swapOut()));
-						ctx.emit(I.unreachable);
-						ctx.exitLabel();
-						ctx.emit(I.block(toValType(W.REF_ANY), ctx.swapOut()));
-
-						// The catch param binds `$catchLand`'s own delivered value -- outside and *before* try_table (B) starts: a block's body doesn't inherit values left
-						// on the outer stack unless declared as real params (none of these are), so try_table (B) itself must start from a clean slate, not reach back for a
-						// value produced before it began.
-						ctx.openScope();
-							if (s.handlers[0].param) {
-								if (typeof s.handlers[0].param !== 'string')
-									throw "a destructured catch parameter ('catch ({...})'/'catch ([...])') is not supported";
-								ctx.emit(I.local.set(ctx.declareValue(s.handlers[0].param, W.REF_ANY, T.ANY).index));
-							} else {
-								ctx.emit(I.drop);
-							}
-
-							// B (the catch handler) gets its *own* safety net -- unlike A, nothing else already
-							// guarantees every exception B might throw is caught before 'finally' needs to run.
-							const catchHandlerSaved = ctx.swapOut();
-							ctx.enterLabel();			// try_table (B)'s own implicit level
-							emitStmts(s.handlers[0].body, ctx);
-						ctx.closeScope();
-
-						ctx.emit(I.br(ctx.depth - afterDepth));
-						ctx.exitLabel();
-						ctx.emit(I.try_table(undefined, [wasm.Catch.allRef(ctx.depth - catchAllDepth)], ctx.swapOut(catchHandlerSaved)));
-						ctx.emit(I.unreachable);
-					} else {
-						// No 'catch' clause -- 'finally' alone needs only the safety net around A itself.
-						ctx.enterLabel();			// try_table's own implicit level
-						ctx.inScope(() => emitStmts(s.body, ctx));
-						ctx.emit(I.br(ctx.depth - afterDepth));
-						ctx.exitLabel();
-						ctx.emit(I.try_table(undefined, [wasm.Catch.allRef(ctx.depth - catchAllDepth)], ctx.swapOut()));
-						ctx.emit(I.unreachable);
-					}
-
-					ctx.finallyGuards.pop();
-					ctx.onReturn = savedOnReturn;
-
-					ctx.exitLabel();				// exit $after
-					ctx.emit(I.block(undefined, ctx.swapOut()));
-					ctx.emit(I.i32.const(0), I.local.set(actionLocal.index), I.br(ctx.depth - landDepth));
-					ctx.exitLabel();				// exit $catchAllLand
-					ctx.emit(I.block(toValType(W.REF_EXN), ctx.swapOut()));
-					ctx.emit(I.local.set(exnLocal.index), I.i32.const(4), I.local.set(actionLocal.index));
-					ctx.exitLabel();				// exit $land
-					ctx.emit(I.block(undefined, ctx.swapOut(saved)));
-
-					ctx.inScope(() => emitStmts(s.finalizer!, ctx));
-
-					// Exactly one action code is ever set, and each arm is gated by its own 'if' so the validator only checks one small branch at a time.
-					const dispatch = (code: number, build: () => void) => {
-						ctx.emit(I.local.get(actionLocal.index), I.i32.const(code), I.i32.eq);
-						ctx.emitIf(undefined, build);
-					};
-					dispatch(1, () => outerOnReturn.emit(ctx, returnValueLocal ? Identifier('#finally$retval') : undefined));
-					// Skip an arm entirely when no such target was enclosing this construct (those action codes can then never be set), since
-					// 'case break'/'case continue' would otherwise reject the synthesized statement outright.
-					if (guard.breakTargetsLenAtEntry > 0)
-						dispatch(2, () => ctx.emitBreak());
-					if (guard.continueTargetsLenAtEntry > 0)
-						dispatch(3, () => ctx.emitContinue());
-					dispatch(4, () => ctx.emit(I.local.get(exnLocal.index), I.throw_ref));
+					return;
 				}
+
+				// With a 'finally', every exit -- normal completion, an exception, an escaping break/continue/return -- funnels through one landing
+				// point ($land) that runs 'finally' once, then re-dispatches on a recorded action code; break/continue/return redirect here via
+				// `ctx.finallyGuards`, and an exception is held for `throw_ref`. Guards and `onReturn` are restored before 'finally' compiles, so an
+				// exit written inside it is a real one. `onReturn` rebuilds the real per-context return (a generator's, a constructor's).
+				const actionLocal		= { wtype: 'i32' as const, index: ctx.temp('#finally$action', 'i32') };
+				const exnLocal			= { wtype: W.REF_EXN, index: ctx.temp('#finally$exn', W.REF_EXN) };
+				const outerOnReturn		= ctx.onReturn;
+				const outerWtype		= outerOnReturn.wtype(ctx);
+				const returnValueLocal	= outerWtype !== undefined ? { wtype: outerWtype, index: ctx.temp('#finally$retval', outerWtype) } : undefined;
+
+				const saved				= ctx.swapOut();
+				const landDepth			= ctx.enterLabel();			// $land
+				const catchAllDepth 	= ctx.enterLabel();			// $catchAllLand
+				const afterDepth		= ctx.enterLabel();			// $after
+
+				const guard = {
+					actionLocal,
+					breakTargetsLenAtEntry:		ctx.breakTargets.length,
+					continueTargetsLenAtEntry:	ctx.continueTargets.length,
+					landingDepth:				landDepth,
+				};
+				ctx.finallyGuards.push(guard);
+				// A `return` in the protected region stashes its value and redirects here too.
+				ctx.onReturn = {
+					wtype: () => outerWtype,
+					emit(ctx, argument) {
+						if (returnValueLocal) {
+							if (argument)
+								emitAs(argument, ctx, returnValueLocal.wtype);
+							else
+								ctx.emitDefaultValue(returnValueLocal.wtype, types, toValType);
+							ctx.emit(I.local.set(returnValueLocal.index));
+						} else if (argument) {
+							// The real return rejects it, with its own message.
+							outerOnReturn.emit(ctx, argument);
+						}
+						ctx.emit(I.i32.const(1), I.local.set(actionLocal.index), I.br(ctx.depth - landDepth));
+					},
+				};
+
+				// What may throw past the tag catch (the catch clause, or a body with none) is netted by `catch_all_ref` so 'finally' still runs.
+				const emitNetted = (body: () => void) => {
+					const outer = ctx.swapOut();
+					ctx.enterLabel();			// the try_table's own level
+					body();
+					ctx.emit(I.br(ctx.depth - afterDepth));
+					ctx.exitLabel();
+					ctx.emit(I.try_table(undefined, [wasm.Catch.allRef(ctx.depth - catchAllDepth)], ctx.swapOut(outer)));
+					ctx.emit(I.unreachable);
+				};
+				if (s.handlers.length)
+					emitCaught(afterDepth, () => emitNetted(() => emitStmts(s.handlers[0].body, ctx)));
+				else
+					emitNetted(() => ctx.inScope(() => emitStmts(s.body, ctx)));
+
+				ctx.finallyGuards.pop();
+				ctx.onReturn = outerOnReturn;
+
+				ctx.exitLabel();				// exit $after
+				ctx.emit(I.block(undefined, ctx.swapOut()));
+				ctx.emit(I.i32.const(0), I.local.set(actionLocal.index), I.br(ctx.depth - landDepth));
+				ctx.exitLabel();				// exit $catchAllLand
+				ctx.emit(I.block(toValType(W.REF_EXN), ctx.swapOut()));
+				ctx.emit(I.local.set(exnLocal.index), I.i32.const(4), I.local.set(actionLocal.index));
+				ctx.exitLabel();				// exit $land
+				ctx.emit(I.block(undefined, ctx.swapOut(saved)));
+
+				ctx.inScope(() => emitStmts(s.finalizer!, ctx));
+
+				// Exactly one action code is ever set, each arm gated by its own 'if'. An arm with no enclosing target is skipped: its code is never set.
+				const dispatch = (code: number, build: () => void) => {
+					ctx.emit(I.local.get(actionLocal.index), I.i32.const(code), I.i32.eq);
+					ctx.emitIf(undefined, build);
+				};
+				dispatch(1, () => outerOnReturn.emit(ctx, returnValueLocal ? Identifier('#finally$retval') : undefined));
+				if (guard.breakTargetsLenAtEntry > 0)
+					dispatch(2, () => ctx.emitBreak());
+				if (guard.continueTargetsLenAtEntry > 0)
+					dispatch(3, () => ctx.emitContinue());
+				dispatch(4, () => ctx.emit(I.local.get(exnLocal.index), I.throw_ref));
 				return;
+			}
 
 			// Nothing to emit: an enum declares compile-time constants, collected into `enumMembers` by
 			// the module scan and folded at each read.
