@@ -8866,19 +8866,17 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		}
 	}
 
-	// The checker's resolution of a call on `owner`: of its method `name`, else of its constructor. A call codegen makes itself is resolved
-	// as that same call on a value of the implementation's own type, bound in a scope of its own.
+	// The resolution of a call on `owner` of its method `name`, else of its constructor: a source call's stamp; for a call codegen makes
+	// of values it holds, the body its arguments' types fit (`overloadByTypes`), its type arguments inferred from them by the checker.
 	function resolvedCall(owner: ClassInfo, name: string | undefined, call: CallSite, ctx: FunctionContext): CheckedCall | undefined {
 		if (!Array.isArray(call))
 			return callOf(call, ctx.scope);
-		const self		= owner.thisTsType;
-		const recvType	= name ? self : self.type === 'ref' ? { type: 'typeof' as const, name: self.name, typeArgs: self.typeArgs, declScope: self.declScope } : undefined;
-		if (!recvType)
-			throw `internal: '${owner.name}' has a constructor but no class to construct`;
-		const scope = new Scope(ctx.scope);
-		scope.addValue('$receiver', recvType);
-		const receiver: Expr = Identifier('$receiver');
-		return callOf(name ? JS.Call(JS.Member(receiver, name), call) : { type: 'new', callee: receiver, arguments: call }, scope);
+		const key	= name ?? 'constructor', argTs = call.map(a => ctx.narrowedTypeOf(a));
+		const sig	= overloadByTypes(owner, key, argTs) ?? owner.methodDecls.get(key)?.find(d => d.body);
+		if (!sig)
+			return undefined;
+		const found	= sig.typeParams?.length ? checkerInferTypeArgMap(sig, argTs, undefined, ctx.scope) : undefined;
+		return { sig: { ...sig, origin: sig }, typeArgs: found && new Map((sig.typeParams ?? []).map(p => [p.name, found.get(p.name) ?? p.default ?? p.constraint ?? T.ANY])) };
 	}
 
 	// A statically-`any` argument fits every overload but its type is known only at run time, so it takes the candidate whose
