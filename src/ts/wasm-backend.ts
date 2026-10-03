@@ -9353,15 +9353,28 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		return out;
 	}
 
-	// Each reached `DynamicObject<V>` as a cascade arm: `use` gets a local holding it, to read or write its entries.
-	function dynamicObjectArms(dctx: FunctionContext, use: (obj: Expr) => void) {
-		return [...new Set(classes.values())].filter(cls => isDynamicObject(cls) && cls.typeIndex !== -1).map(cls => ({ heap: cls.typeIndex, emit: () => {
-			const name = `$dynobj$${cls.typeIndex}`;
-			dctx.emit(I.local.set(dctx.declareValue(name, cls.thisWtype!, cls.thisTsType).index));
-			use(Identifier(name));
-		} }));
+	// Each reached `DynamicObject<V>` as a cascade arm, `use` running with it on the stack.
+	function dynamicObjectArms(use: (cls: ClassInfo) => void) {
+		return [...new Set(classes.values())].filter(cls => isDynamicObject(cls) && cls.typeIndex !== -1).map(cls => ({ heap: cls.typeIndex, emit: () => use(cls) }));
 	}
-	const callOn = (obj: Expr, method: string, args: Expr[]): Expr => JS.Call(JS.Member(obj, method), args);
+	// An argument the caller already holds, in its physical representation.
+	interface HeldArg { wtype: W.Type; push(): void }
+	const localArg	= (ctx: FunctionContext, index: number, wtype: W.Type): HeldArg => ({ wtype, push: () => ctx.emit(I.local.get(index)) });
+	const stringArg	= (ctx: FunctionContext, s: string): HeldArg => ({ wtype: W.ARRAY.i16, push: () => emitStringConst(s, ctx) });
+	// `cls`'s one-body (or `__asm`) method `name` on the receiver on the stack: no call site to pick an overload by.
+	function emitCallOn(cls: ClassInfo, name: string, args: HeldArg[], ctx: FunctionContext): W.Type {
+		const inline	= cls.inlineMethods?.get(name)?.(args.map(a => ({ wtype: a.wtype })), ctx);
+		const method	= inline ? undefined : ensureMethod(cls, name, [], ctx);
+		const sig		= inline ?? method;
+		if (!sig)
+			throw `internal: '${cls.name}' has no method '${name}'`;
+		args.forEach((a, i) => {
+			a.push();
+			coerceTop(a.wtype, ctx, sig.params[i]);
+		});
+		ctx.emit(...inline?.inline ?? [I.call(method!.funcIndex)]);
+		return sig.result;
+	}
 	const distinctHeaps = <R extends { heap: wasm.HeapType }>(rs: R[]) => rs.filter((r, i) => rs.findIndex(s => s.heap === r.heap) === i);
 	const depthOf = (c: ClassInfo): number => c.superClass ? 1 + depthOf(c.superClass) : 0;
 	const inherits = (c: ClassInfo, ancestor: ClassInfo): boolean => !!c.superClass && (c.superClass === ancestor || inherits(c.superClass, ancestor));
@@ -9400,17 +9413,20 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	}
 	// The string local `key` against each of `cls`'s fields' names, compared as `===` compares strings: `hit` for the field it names, else `miss`.
 	function emitKeyedField(cls: ClassInfo, key: number, ctx: FunctionContext, hit: (idx: number) => void, miss: () => void, result?: W.Type): void {
-		const eq		= ensureMethod(builtinTypeOwner('string')!, 'eq', [], ctx)!.funcIndex;
 		const named	= cls.fields.flatMap((f, i) => f.name.startsWith('#') ? [] : [i]);
 		const chain	= (k: number): void => {
 			if (k === named.length)
 				return miss();
-			ctx.emit(I.local.get(key));
-			emitStringConst(cls.fields[named[k]].name, ctx);
-			ctx.emit(I.call(eq));
+			emitKeyEq(key, cls.fields[named[k]].name, ctx);
 			ctx.emitIf(result && toValType(result), () => hit(named[k]), () => chain(k + 1));
 		};
 		chain(0);
+	}
+	// Whether the string local `key` is `name`, as `===` compares strings.
+	function emitKeyEq(key: number, name: string, ctx: FunctionContext): void {
+		ctx.emit(I.local.get(key));
+		emitStringConst(name, ctx);
+		ctx.emit(I.call(ensureMethod(builtinTypeOwner('string')!, 'eq', [], ctx)!.funcIndex));
 	}
 
 	// `x[k]` where `x` is `any` and `k` a computed string: each class with fields chains its own names, as a known receiver's `x[k]` compiles.
@@ -9421,18 +9437,18 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			params: [anyParam('recv'), { key: 'key', wtype: typeOf(T.STRING)!, tsType: T.STRING }, ...(kind === 'set' ? [anyParam('value', W.REF_ANY_NULLABLE)] : [])],
 			result: kind === 'get' ? W.REF_ANY_NULLABLE : kind === 'delete' ? 'i32' : 'void' as W.Type,
 		}), (dctx, [recv, key, value], { result }) => {
-			const keyId: Expr	= Identifier('$key');
-			const written: Expr	= Identifier(kind === 'set' ? '$value' : 'undefined');
+			const keyArg		= localArg(dctx, key, typeOf(T.STRING)!);
 			const deleted		= () => {
 				if (kind === 'delete')
 					dctx.emit(I.i32.const(1));
 			};
 			const owners		= distinctHeaps(dynamicReceivers(false).filter(r => r.cls.typeIndex !== -1 && r.cls.fields.length && r.cls.thisTsType));
-			const dynamic		= dynamicObjectArms(dctx, obj => {
+			const dynamic		= dynamicObjectArms(cls => {
+				const got = emitCallOn(cls, kind, kind === 'set' ? [keyArg, localArg(dctx, value, W.REF_ANY_NULLABLE)] : [keyArg], dctx);
 				if (kind === 'get')
-					emitAs(callOn(obj, 'get', [keyId]), dctx, W.REF_ANY_NULLABLE);
+					coerceTop(got, dctx, result);
 				else
-					emitStmt(JS.ExprStmt(kind === 'set' ? callOn(obj, 'set', [keyId, written]) : callOn(obj, 'delete', [keyId])), dctx);
+					dctx.emit(I.drop);
 				deleted();
 			});
 			emitTypeCascade(dctx, recv, [...dynamic, ...owners.map(({ heap, cls }) => ({ heap, emit: () => {
@@ -9504,7 +9520,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				const sig = cls.getterNames?.has(name) ? methodSig(cls, accessorKey('get', name), dctx) : undefined;
 				return sig ? [{ heap, emit: () => emitBoxed(cls, name, emitMethodCall(cls, accessorKey('get', name), [], dctx), dctx, result) }] : [];
 			};
-			const arms = [...dynamicObjectArms(dctx, obj => emitAs(callOn(obj, 'get', [Literal(name)]), dctx, result)), ...distinctHeaps(dynamicReceivers(true).flatMap(readOf))];
+			const arms = [...dynamicObjectArms(cls => coerceTop(emitCallOn(cls, 'get', [stringArg(dctx, name)], dctx), dctx, result)), ...distinctHeaps(dynamicReceivers(true).flatMap(readOf))];
 			// Gated like the arrays: with no closure type, no function value can be in an `any` slot.
 			const closureField = CLOSURE_FIELDS.get(name);
 			if (closureField !== undefined && closureTypes.size) {
@@ -9525,7 +9541,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	function ensureAnyFieldWrite(name: string): FuncInfo {
 		return synthesize(`<any field write>.${name}`, () => ({ params: [anyParam('recv'), anyParam('value', W.REF_ANY_NULLABLE)], result: 'void' as W.Type }), (dctx, [recv, value]) => {
 			const owners	= distinctHeaps(dynamicReceivers(false).filter(r => r.cls.typeIndex !== -1 && r.cls.fieldIndex.has(name)));
-			const dynamic	= dynamicObjectArms(dctx, obj => emitStmt(JS.ExprStmt(callOn(obj, 'set', [Literal(name), Identifier('$value')])), dctx));
+			const dynamic	= dynamicObjectArms(cls => {
+				emitCallOn(cls, 'set', [stringArg(dctx, name), localArg(dctx, value, W.REF_ANY_NULLABLE)], dctx);
+				dctx.emit(I.drop);
+			});
 			if (!owners.length && !dynamic.length)
 				throw `no reachable class declares a field '${name}' -- a dynamic write on 'any' needs at least one real candidate`;
 			emitTypeCascade(dctx, recv, [...dynamic, ...owners.map(({ heap, cls }) => ({ heap, emit: () => {
@@ -9546,17 +9565,21 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// or method, as JS finds prototype members too. A key known only at run time is compared with each representation's names; a primitive or null answers `false`.
 	function ensureAnyIn(name?: string): FuncInfo {
 		const names = (cls: ClassInfo) => [...cls.fieldIndex.keys(), ...cls.getterNames ?? [], ...cls.methodDecls.keys()].filter(n => !n.startsWith('#'));
-		const has = (dctx: FunctionContext, key: Expr) => dynamicObjectArms(dctx, obj => emitAs(callOn(obj, 'has', [key]), dctx, 'i32'));
+		const has = (dctx: FunctionContext, key: HeldArg) => dynamicObjectArms(cls => coerceTop(emitCallOn(cls, 'has', [key], dctx), dctx, 'i32'));
 		if (name !== undefined)
 			return synthesize(`<any in>.${name}`, () => ({ params: [anyParam('recv', W.REF_ANY_NULLABLE)], result: 'i32' as W.Type }), (dctx, [recv], { result }) =>
-				emitTypeCascade(dctx, recv, [...has(dctx, Literal(name)), ...distinctHeaps(dynamicReceivers(false).filter(({ cls }) => names(cls).includes(name)))
+				emitTypeCascade(dctx, recv, [...has(dctx, stringArg(dctx, name)), ...distinctHeaps(dynamicReceivers(false).filter(({ cls }) => names(cls).includes(name)))
 					.map(({ heap }) => ({ heap, emit: () => dctx.emit(I.drop, I.i32.const(1)) }))], () => dctx.emit(I.i32.const(0)), result));
-		return synthesize('<any in>', () => ({ params: [{ key: 'key', wtype: typeOf(T.STRING)!, tsType: T.STRING }, anyParam('recv', W.REF_ANY_NULLABLE)], result: 'i32' as W.Type }), (dctx, [, recv], { result }) => {
-			const keyId: Expr = Identifier('$key');
+		return synthesize('<any in>', () => ({ params: [{ key: 'key', wtype: typeOf(T.STRING)!, tsType: T.STRING }, anyParam('recv', W.REF_ANY_NULLABLE)], result: 'i32' as W.Type }), (dctx, [key, recv], { result }) => {
 			const owners = distinctHeaps(dynamicReceivers(false).filter(({ cls }) => names(cls).length));
-			const declares = (cls: ClassInfo) => names(cls).map((n): Expr => Binary<Expr, '==='>('===', keyId, Literal(n))).reduce((a, b) => Binary<Expr, '||'>('||', a, b));
-			emitTypeCascade(dctx, recv, [...has(dctx, keyId), ...owners.map(({ heap, cls }) => ({ heap, emit: () => { dctx.emit(I.drop); emitAs(declares(cls), dctx, 'i32'); } }))],
-				() => dctx.emit(I.i32.const(0)), result);
+			emitTypeCascade(dctx, recv, [...has(dctx, localArg(dctx, key, typeOf(T.STRING)!)), ...owners.map(({ heap, cls }) => ({ heap, emit: () => {
+				dctx.emit(I.drop);
+				names(cls).forEach((n, i) => {
+					emitKeyEq(key, n, dctx);
+					if (i)
+						dctx.emit(I.i32.or);
+				});
+			} }))], () => dctx.emit(I.i32.const(0)), result);
 		});
 	}
 
@@ -9566,7 +9589,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		return synthesize(`<any ${which}>`, () => ({ params: [anyParam('recv')], result: W.ARRAY.ref }), (dctx, [recv], { result }) => {
 			const owners = distinctHeaps(dynamicReceivers(false).filter(({ cls }) => cls.typeIndex !== -1 && cls.decl.name !== 'Map' && W.isRef(cls.thisWtype))
 				.sort((a, b) => depthOf(b.cls) - depthOf(a.cls)));
-			emitTypeCascade(dctx, recv, [...dynamicObjectArms(dctx, obj => emitAs(callOn(obj, 'anyEntries', [Literal(which)]), dctx, result)),
+			emitTypeCascade(dctx, recv, [...dynamicObjectArms(cls => coerceTop(emitCallOn(cls, 'anyEntries', [stringArg(dctx, which)], dctx), dctx, result)),
 				...owners.map(({ heap, cls }) => ({ heap, emit: () => void emitEntriesOf(cls, which, dctx) }))], trap(dctx), result);
 		});
 	}
