@@ -148,6 +148,22 @@ type-utils/vsdg (-11); switch's two strategies share `emitCases` (-43). **Tried 
 type-utils' `withReturnType` `{...m, returnType}` builds a sibling struct and needs a coercion (probe-decl WAT A/B).
 `contextualShapeOwner`/`matchContextualUnionMember` deletions are invisible to the suite: their cases depend on which shapes the
 whole program built (no small repro), so reason from the code and A/B a probe where one exists.
+Then type-core: holdsZero = rangeIncludesZero, the XK debug hook and dead cases (-4). Session total: tracked src 31,484 -> 31,254
+(-230); wasm-backend.ts 9,958 -> 9,741.
+**Measured dead ends (2026-10-03, do not retry blind):**
+- Micro-consolidation in wasm-backend.ts is exhausted: the `ensureAny*` dispatchers already share `synthesize`/`emitTypeCascade`/
+  `dynamicReceivers`; a worklist-body helper for the 17 `new FunctionContext` sites saves ~1 line each after the withCatch/withCatchAt
+  variants; generator/async share all but ~4 lines of prologue each; `coerceTop`, `ensureClass`, `ensureCtorDecl`, `unary` are case work.
+- `LIB_DECL_MAP` vs the lib scope: for every lib CLASS `libScope.decl(name)` is the same node, but a lib FUNCTION resolves to its
+  ambient lib.d.ts stub and a `var` is no decl, so the real-over-ambient preference is load-bearing; internal `ensureClass('Array'|
+  'Promise'|'String'...)` rely on lib-first lookup. (Lib-first is also a latent bug: a user class named like a lib class gets the lib's.)
+- Family 2's class identity: `TypeEntry` has no declaring module and the entry/lib keep bare keys on purpose, so per-declaration
+  keys rename every class (all WAT names) for ~30-40 lines.
+- type-core.ts read to ~1,790 (`resolve` included): dense, little duplication left; the fat is long historical comments.
+- Checker `case 'call'` special-cases `new Promise(...)` BY NAME (infers T from the executor's `resolve` calls; TS gives `unknown`).
+**What is left that is big is architectural:** (1) the backend's own contextual-type channel (`ctx.contextualReturn`/`withContext`/
+`callContext`, ~25 sites) replaced by the checker stamping the expected type each expression was checked against -- but codegen's
+`callTypeArgs` deliberately instantiates by flow, unlike the checker, so expect many WAT diffs; (2) comments (user declined a pass).
 Commit-message deltas that are wrong: the bigint-limb commit (-27, truly -19); 835a5d9 (-20, truly -6), 981a774 (-96, -95), 3ac24ad (-4, -2), the fresh-node commit (+3,
 +1), the method-instance commit (+18, truly +12). This log is right.
 Measured: the fallback typing that exists ONLY for synthesized nodes is small (most of the 47 `checkerTypeOf` calls query source
