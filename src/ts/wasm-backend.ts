@@ -5338,20 +5338,25 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			// A computed STRING key on a struct: the field the key names, compared at run time; a key naming none reads `undefined`
 			// and writes nothing, since a struct has no slot to grow.
 			if (cls && cls.typeIndex !== -1 && cls.fields.length && stringKey) {
-				const n		= ctx.tempCounter++;
-				const ids	= { obj: Identifier(`#keyobj$${n}`), key: Identifier(`#key$${n}`), val: Identifier(`#keyval$${n}`) };
-				const isKey	= (f: { name: string }) => Binary<Expr, '==='>('===', ids.key, Literal(f.name));
-				const hold	= (id: Identifier, wtype: W.Type, t: Type) => ctx.emit(I.local.set((ctx.lookup(id.name) ?? ctx.declareValue(id.name, wtype, t)).index));
-				const holdOperands = () => { hold(ids.key, keyWtype, T.STRING); hold(ids.obj, cls.thisWtype!, cls.thisTsType!); };
+				const hold = (wtype: W.Type) => {
+					const l = ctx.temp(`$keyed$${ctx.tempCounter++}`, wtype);
+					ctx.emit(I.local.set(l));
+					return l;
+				};
 				return { wtype: W.REF_ANY_NULLABLE, operands: [expr(target.object, cls.thisWtype!), expr(target.index, keyWtype)],
 					load: () => {
-						holdOperands();
-						emitAs(cls.fields.reduce<Expr>((alternate, f) => Conditional<Expr>(isKey(f), JS.Member(ids.obj, f.name), alternate), Identifier('undefined')), ctx, W.REF_ANY_NULLABLE);
+						const key = hold(keyWtype), obj = hold(cls.thisWtype!);
+						emitKeyedField(cls, key, ctx, idx => {
+							ctx.emit(I.local.get(obj));
+							emitBoxedField(cls, idx, ctx, W.REF_ANY_NULLABLE);
+						}, () => ctx.emitDefaultValue(W.REF_ANY_NULLABLE, types, toValType), W.REF_ANY_NULLABLE);
 					},
 					store: () => {
-						hold(ids.val, W.REF_ANY_NULLABLE, T.ANY);
-						holdOperands();
-						cls.fields.forEach(f => emitStmt({ type: 'if', test: isKey(f), consequent: JS.ExprStmt(Assign<Expr, never>(JS.Member(ids.obj, f.name), ids.val)) } as Stmt, ctx));
+						const val = hold(W.REF_ANY_NULLABLE), key = hold(keyWtype), obj = hold(cls.thisWtype!);
+						emitKeyedField(cls, key, ctx, idx => {
+							ctx.emit(I.local.get(obj), I.local.get(val));
+							emitBoxedFieldWrite(cls, idx, ctx);
+						}, () => {});
 					} };
 			}
 
@@ -9371,6 +9376,43 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			});
 	}
 
+	// What an `any` slot holds for `cls`'s member `name`: its DECLARED type's representation, a number's the `f64` box (`String.length` is an
+	// `array.len`, a literal's `{length: n}` may be an `i32`), or a reader's box cast traps. `T.lookupMember`: an `__asm` accessor has no decl.
+	function canonicalOf(cls: ClassInfo, name: string, physical: W.Type): W.Type {
+		const declared	= typeof physical === 'string' ? T.lookupMember(cls.thisTsType, name, global) : undefined;
+		const canonical	= declared && (T.isNumberLike(declared, global) ? 'f64' : typeOf(declared));
+		return canonical && canonical !== 'void' ? canonical : physical;
+	}
+	function emitBoxed(cls: ClassInfo, name: string, physical: W.Type, ctx: FunctionContext, result: W.Type): void {
+		const canonical = canonicalOf(cls, name, physical);
+		coerceTop(physical, ctx, canonical);
+		coerceTop(canonical, ctx, result);
+	}
+	// A field read off the receiver on the stack, as an `any` slot holds it.
+	function emitBoxedField(cls: ClassInfo, idx: number, ctx: FunctionContext, result: W.Type): void {
+		emitBoxed(cls, cls.fields[idx].name, emitFieldRead(cls, idx, ctx), ctx, result);
+	}
+	// A boxed value (`REF_ANY_NULLABLE`) on the receiver on the stack, unboxed as `canonicalOf` boxed it, into the field.
+	function emitBoxedFieldWrite(cls: ClassInfo, idx: number, ctx: FunctionContext): void {
+		const canonical = canonicalOf(cls, cls.fields[idx].name, cls.fields[idx].wtype);
+		coerceTop(W.REF_ANY_NULLABLE, ctx, canonical);
+		emitFieldWrite(cls, idx, canonical, ctx);
+	}
+	// The string local `key` against each of `cls`'s fields' names, compared as `===` compares strings: `hit` for the field it names, else `miss`.
+	function emitKeyedField(cls: ClassInfo, key: number, ctx: FunctionContext, hit: (idx: number) => void, miss: () => void, result?: W.Type): void {
+		const eq		= ensureMethod(builtinTypeOwner('string')!, 'eq', [], ctx)!.funcIndex;
+		const named	= cls.fields.flatMap((f, i) => f.name.startsWith('#') ? [] : [i]);
+		const chain	= (k: number): void => {
+			if (k === named.length)
+				return miss();
+			ctx.emit(I.local.get(key));
+			emitStringConst(cls.fields[named[k]].name, ctx);
+			ctx.emit(I.call(eq));
+			ctx.emitIf(result && toValType(result), () => hit(named[k]), () => chain(k + 1));
+		};
+		chain(0);
+	}
+
 	// `x[k]` where `x` is `any` and `k` a computed string: each class with fields chains its own names, as a known receiver's `x[k]` compiles.
 	// A key no candidate declares reads `undefined`, as JS does; a write traps, since there is no honest place to put it.
 	// A struct cannot lose a slot, so `delete` stores `undefined` in a field, as a typed `delete` does; a dynamic object drops its entry.
@@ -9378,9 +9420,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		return synthesize(`<any key ${kind}>`, () => ({
 			params: [anyParam('recv'), { key: 'key', wtype: typeOf(T.STRING)!, tsType: T.STRING }, ...(kind === 'set' ? [anyParam('value', W.REF_ANY_NULLABLE)] : [])],
 			result: kind === 'get' ? W.REF_ANY_NULLABLE : kind === 'delete' ? 'i32' : 'void' as W.Type,
-		}), (dctx, [recv], { result }) => {
+		}), (dctx, [recv, key, value], { result }) => {
 			const keyId: Expr	= Identifier('$key');
-			const isKey			= (f: string): Expr => Binary<Expr, '==='>('===', keyId, Literal(f));
 			const written: Expr	= Identifier(kind === 'set' ? '$value' : 'undefined');
 			const deleted		= () => {
 				if (kind === 'delete')
@@ -9395,21 +9436,27 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				deleted();
 			});
 			emitTypeCascade(dctx, recv, [...dynamic, ...owners.map(({ heap, cls }) => ({ heap, emit: () => {
-				const objName		= `$keyobj$${heap}`;
-				const objId: Expr	= Identifier(objName);
-				dctx.emit(I.local.set(dctx.declareValue(objName, cls.thisWtype!, cls.thisTsType!).index));
+				const obj = dctx.temp(`$keyobj$${heap}`, cls.thisWtype!);
+				dctx.emit(I.local.set(obj));
+				emitKeyedField(cls, key, dctx, idx => {
+					const f = cls.fields[idx];
+					// A field that cannot hold `undefined` cannot be deleted: trap, as the typed `delete`'s non-null cast does.
+					if (kind === 'delete' && !W.isNullable(f.wtype) && !W.isAny(f.wtype))
+						return void dctx.emit(I.unreachable);
+					dctx.emit(I.local.get(obj));
+					if (kind === 'get') {
+						emitBoxedField(cls, idx, dctx, result);
+					} else if (kind === 'set') {
+						dctx.emit(I.local.get(value));
+						emitBoxedFieldWrite(cls, idx, dctx);
+					} else {
+						emitAs(Identifier('undefined'), dctx, f.wtype);
+						emitFieldWrite(cls, idx, f.wtype, dctx);
+					}
+				}, () => {
 				if (kind === 'get')
-					emitAs(cls.fields.reduce<Expr>((alternate, f) => Conditional<Expr>(isKey(f.name), JS.Member(objId, f.name), alternate), Identifier('undefined')), dctx, W.REF_ANY_NULLABLE);
-				else
-					cls.fields.forEach(f => {
-						// A field that cannot hold `undefined` cannot be deleted: trap, as the typed `delete`'s non-null cast does.
-						if (kind === 'delete' && !W.isNullable(f.wtype) && !W.isAny(f.wtype)) {
-							emitAs(isKey(f.name), dctx, 'i32');
-							dctx.emit(I.if(undefined, [I.unreachable]));
-						} else {
-							emitStmt({ type: 'if', test: isKey(f.name), consequent: JS.ExprStmt(Assign<Expr, never>(JS.Member(objId, f.name), written)) } as Stmt, dctx);
-						}
-					});
+					dctx.emitDefaultValue(result, types, toValType);
+			}, kind === 'get' ? result : undefined);
 				deleted();
 			} }))], kind === 'set' ? trap(dctx) : kind === 'delete' ? deleted : () => dctx.emitDefaultValue(W.REF_ANY_NULLABLE, types, toValType), result);
 		});
@@ -9450,31 +9497,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// types differ; a receiver declaring nothing is an object lacking it and reads `undefined`, while a NULL receiver, which JS throws on, traps.
 	function ensureAnyField(name: string): FuncInfo {
 		return synthesize(`<any field>.${name}`, () => ({ params: [anyParam('recv')], result: W.REF_ANY_NULLABLE }), (dctx, [recv], { result }) => {
-			// Boxed by the member's DECLARED type: `String.length` is an `array.len` and a literal's `{length: n}` may be an `i32`, but anything entering
-			// an `any` slot must be its logical type's canonical form, or the reader's `f64`-box cast traps. `T.lookupMember`: an `__asm` accessor has no decl.
-			const canonicalOf = (cls: ClassInfo, physical: W.Type): W.Type => {
-				const declared	= cls.thisTsType && T.lookupMember(cls.thisTsType, name, dctx.scope);
-				const canonical	= declared && typeof physical === 'string' && T.isNumberLike(declared, dctx.scope) ? 'f64' : (declared && typeOf(declared)) || physical;
-				return canonical === 'void' ? physical : canonical;
-			};
-			const boxed = (physical: W.Type, want: W.Type) => {
-				coerceTop(physical, dctx, want);
-				coerceTop(want, dctx, result);
-			};
 			const readOf = ({ heap, cls }: Receiver) => {
 				const idx = cls.fieldIndex.get(name);
-				if (idx !== undefined && cls.typeIndex !== -1) {
-					const physical = cls.fields[idx].wtype;
-					return [{ heap, emit: () => {
-						emitFieldRead(cls, idx, dctx);
-						boxed(physical, typeof physical === 'string' ? canonicalOf(cls, physical) : physical);
-					} }];
-				}
+				if (idx !== undefined && cls.typeIndex !== -1)
+					return [{ heap, emit: () => emitBoxedField(cls, idx, dctx, result) }];
 				const sig = cls.getterNames?.has(name) ? methodSig(cls, accessorKey('get', name), dctx) : undefined;
-				return sig ? [{ heap, emit: () => {
-					emitMethodCall(cls, accessorKey('get', name), [], dctx);
-					boxed(sig.result, canonicalOf(cls, sig.result));
-				} }] : [];
+				return sig ? [{ heap, emit: () => emitBoxed(cls, name, emitMethodCall(cls, accessorKey('get', name), [], dctx), dctx, result) }] : [];
 			};
 			const arms = [...dynamicObjectArms(dctx, obj => emitAs(callOn(obj, 'get', [Literal(name)]), dctx, result)), ...distinctHeaps(dynamicReceivers(true).flatMap(readOf))];
 			// Gated like the arrays: with no closure type, no function value can be in an `any` slot.
@@ -9483,7 +9511,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				const base = types.closureBase();
 				arms.push({ heap: base, emit: () => {
 					dctx.emit(I.struct.get(base, closureField));
-					boxed('u32', 'f64');
+					coerceTop('u32', dctx, 'f64');
+					coerceTop('f64', dctx, result);
 				} });
 			}
 			emitTypeCascade(dctx, recv, arms, () => dctx.emit(I.local.get(recv), I.ref.is_null,
@@ -9502,7 +9531,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			emitTypeCascade(dctx, recv, [...dynamic, ...owners.map(({ heap, cls }) => ({ heap, emit: () => {
 				// Through the owner's own receiver type, so a key with a setter (`emitFieldWrite`) calls it here too.
 				dctx.emit(I.local.get(value));
-				emitFieldWrite(cls, cls.fieldIndex.get(name)!, W.REF_ANY_NULLABLE, dctx);
+				emitBoxedFieldWrite(cls, cls.fieldIndex.get(name)!, dctx);
 			} }))], trap(dctx));
 		});
 	}
