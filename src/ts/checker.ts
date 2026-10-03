@@ -1621,7 +1621,9 @@ function hoistVar(scope: Scope, d: JS.Var<Type>, widen: boolean, typeAnnotation 
 				scope.addNarrowing(d.name, T.combineTypes(kept));
 		}
 	} else {
-		const t = typeAnnotation ?? (d.init && T.widenNullish(typeOf(d.init, scope, widen, undefined, undefined, err, stamp), scope));
+		// TS's getTypeFromBindingPattern as the initializer's context: an array pattern makes an array literal a tuple (`const [a] = [s, n]`).
+		const context	= d.name.type === 'array_pattern' ? T.patternType(d.name) : undefined;
+		const t			= typeAnnotation ?? (d.init && T.widenNullish(typeOf(d.init, scope, widen, context, undefined, err, stamp), scope));
 		if (t)
 			bindPattern(home, d.name, t, d.init, !widen, err);
 		else
@@ -2039,7 +2041,8 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 				// and (via `wasmTypeOf`) for codegen's own physical representation of it.
 				// As a tuple, a spread of a tuple splices its elements and any other spread is a variadic `...T[]`. `i` is the position,
 				// unknown past a variadic spread; `fromEnd` counts from the literal's end, where a context's trailing elements apply.
-				const tupleElements = (context: (el: Expr, i: number | undefined, fromEnd: number) => Type | undefined, each = (t: Type) => t) => {
+				const tupleElements = (context: (el: Expr, i: number | undefined, fromEnd: number) => Type | undefined, each = (t: Type) => t,
+					element = (el: Expr, c: Type | undefined) => recurse(el, c)) => {
 					const out: TS.TupleElement[] = [];
 					let i: number | undefined = 0;
 					e.elements.forEach((el, k) => {
@@ -2049,7 +2052,7 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 							out.push(...spliced.map(x => x.type === 'spread' ? x : x.type === 'optional' || x.type === 'labeled' ? { ...x, element: each(x.element) } : each(x)));
 							i = i !== undefined && !spliced.some(x => x.type === 'spread') ? i + spliced.length : undefined;
 						} else {
-							out.push(el ? each(recurse(el, context(el, i, e.elements.length - k))) : T.UNDEFINED);
+							out.push(el ? each(element(el, context(el, i, e.elements.length - k))) : T.UNDEFINED);
 							i = i !== undefined ? i + 1 : undefined;
 						}
 					});
@@ -2069,7 +2072,8 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 				// is that position across them.
 				const tuples			= resolvedExpected?.type === 'tuple' ? [resolvedExpected] : arrayLike.filter((m): m is Type & { type: 'tuple' } => m.type === 'tuple');
 				if (tuples.length)
-					return { type: 'tuple', elements: tupleElements((_, i, fromEnd) => T.combineTypes(tuples.flatMap(t => { const c = tupleContextAt(t, i, fromEnd, scope); return c ? [c] : []; }))) };
+					return { type: 'tuple', elements: tupleElements((_, i, fromEnd) => T.combineTypes(tuples.flatMap(t => { const c = tupleContextAt(t, i, fromEnd, scope); return c ? [c] : []; })),
+						undefined, (el, c) => widenForContext(recurse(el, c), c, scope)) };
 				// Otherwise an element's context is what the context iterates to (TS): an `Iterable<T>`'s `T` as much as an array's element.
 				const elemExpected		= resolvedExpected?.type === 'array' ? resolvedExpected.element : contextual && iteratedContext(contextual, scope);
 				const elems				= e.elements.flatMap(el => !el ? [] : el.type === 'spread' ? [iterationOrReport(recurse(el.operand), scope, pos, err).yield] : [recurse(el, elemExpected)]);
