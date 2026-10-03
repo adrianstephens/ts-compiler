@@ -1798,7 +1798,7 @@ export function inferTypeArgMap(sig: TS.CallSig, argTs: (Type | undefined)[], ty
 			map.set(p.name, constraint && !T.isAssignable(t, constraint, scope) ? constraint : t);
 			return;
 		}
-		const assumed = t ?? p.default ?? p.constraint ?? T.ANY;
+		const assumed = t ?? p.default ?? p.constraint ?? T.UNKNOWN;
 		map.set(p.name, assumed);
 		// A default is a silent fallback, as in TS; flagged only when a supplied argument mentions `p.name` and still could not pin it.
 		if (err && pos && !p.default && sig.params.some((prm, i) => argTs[i] && prm.typeAnnotation && T.mentionsTypeParam(prm.typeAnnotation, p.name)))
@@ -2209,26 +2209,6 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 					const base = scope.value('super');
 					typeArgs = base?.type === 'ref' ? base.typeArgs : undefined;
 				}
-				// `new Promise((resolve) => ...)` with no `<T>`: `T` from the executor's `resolve(...)` calls, matched by the name `Promise` (TS gives `unknown`).
-				if (!typeArgs && e.type === 'new' && e.callee.type === 'identifier' && e.callee.name === 'Promise' && e.arguments.length === 1) {
-					const executor = e.arguments[0];
-					if (executor.type === 'function' || executor.type === 'arrow') {
-						const resolveParam = executor.params[0];
-						if (resolveParam && typeof resolveParam.key === 'string') {
-							const resolveName = resolveParam.key;
-							const resolvedTypes: Type[] = [];
-							walkerB(undefined, (x, process) => {
-								if (x.type === 'call' && x.callee.type === 'identifier' && x.callee.name === resolveName) {
-									const arg = x.arguments[0];
-									resolvedTypes.push(arg && arg.type !== 'spread' ? recurse(arg) : T.UNDEFINED);
-								}
-								return process(x);
-							}).body(executor.body as JS.Stmt<any>[] | Expr);
-							typeArgs = [resolvedTypes.length ? T.combineTypes(resolvedTypes) : T.VOID];
-						}
-					}
-				}
-
 				// An `any` callee is called (or constructed) as TS does: the result is `any`, and every argument is still checked.
 				if (T.isRef(T.resolveOwn(calleeT, scope), 'any')) {
 					for (const a of e.arguments)

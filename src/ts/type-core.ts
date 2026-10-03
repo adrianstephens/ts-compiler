@@ -2772,7 +2772,7 @@ export class Inference {
 		}
 		return map;
 	}
-	// Fixed with nothing inferred: the parameter's default, else its constraint, else `any` -- the call reports it as a GAP.
+	// Fixed with nothing inferred: the parameter's default, else its constraint, else `unknown` (TS's getInferredType).
 	wasDefaulted(name: string): boolean	{ return this.defaulted.has(name); }
 	// `declared` as a callback's context: every parameter its own parameter types mention is FIXED at its current inference.
 	contextFor(declared: Type): Type {
@@ -2783,7 +2783,7 @@ export class Inference {
 			const t = this.inferred(name);
 			if (!t)
 				this.defaulted.add(name);
-			this.fixed.set(name, t ?? tp.default ?? tp.constraint ?? ANY);
+			this.fixed.set(name, t ?? tp.default ?? tp.constraint ?? UNKNOWN);
 		}
 		const map = this.current();
 		return map.size ? substituteType(declared, map) : declared;
