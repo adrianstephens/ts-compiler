@@ -71,9 +71,6 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 - [AST convergence](tison_ast_convergence.md) — 3 parser ASTs converged onto common.ts shapes
 - [py-parser](tison_py_parser.md) — off-side rule done purely in the lexer
 - [jsx-parser](tison_jsx_parser.md) — LALR reduce-lookahead leaks + JSX-vs-generic-arrow ambiguity
-- [glsl-parser](tison_glsl_parser.md) — GLSL over c-parser; the two LALR conflicts (unit-reduction nonterminal, scalar_type reduce/reduce) and the `ArrayDecl` size seam
-- [hlsl-msl-parsers](tison_hlsl_msl_parsers.md) — HLSL/MSL over cpp-parser; the `Definition<S>` statement seam, exported `scope_prefix`/`skip`/`>>` terminals, semantics-vs-bitfield and qualified-name resolutions; Cg/Slang ride HLSL
-- [slang-parser](tison_slang_parser.md) — Slang over hlsl-parser; `interface` as a Definition to dodge chain re-instantiation, and the `__target_switch` label-folding technique (its `case` is token-identical to a `switch` case)
 - [wat-parser exceptions](tison_wat_parser_exceptions.md) — exceptions + multi-value blocktypes, verified vs wasmtime
 
 ## TS-to-wasm compiler
