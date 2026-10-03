@@ -453,38 +453,37 @@ export interface PatternLowering {
 export function lowerPattern(kind: JS.DeclarationKind, target: BindingTarget, value: TS.Expr, annotation: Type | undefined, how: PatternLowering, emit: (s: Stmt) => void): void {
 	if (typeof target === 'string')
 		return emit(JS.VarDecl(kind, JS.Var(target, value, annotation)));
-	const hold = (init: TS.Expr, role: string, t?: Type): TS.Expr => {
+	// A level held in a temp is read through a fresh node per use: each is typed where it stands, and a node holds one type.
+	const hold = (init: TS.Expr, role: string, t?: Type): (() => TS.Expr) => {
 		if (!how.temp)
-			return init;
-		const id = Identifier(how.temp(role));
-		emit(JS.VarDecl('const', JS.Var(id.name, init, t)));
-		return id;
+			return () => init;
+		const name = how.temp(role);
+		emit(JS.VarDecl('const', JS.Var(name, init, t)));
+		return () => Identifier(name);
 	};
 	const sub	= (t: BindingTarget, e: TS.Expr, ann?: Type) => lowerPattern(kind, t, e, ann, how, emit);
 	const v		= hold(value, 'destructure', annotation);
 	if (target.type === 'array_pattern') {
-		const it = how.iterates?.(v);
+		const it = how.iterates?.(v());
 		if (it && how.temp && how.scope) {
-			const iter = hold(JS.Call(JS.Member(v, '[Symbol.iterator]'), []), 'iterator');
+			const iter = hold(JS.Call(JS.Member(v(), '[Symbol.iterator]'), []), 'iterator');
 			for (const el of target.elements) {
-				const r = hold(nextCall(iter, it, how.scope), 'result');	// a hole still advances
-				const got = JS.Member(r, 'value');
+				const r = hold(nextCall(iter(), it, how.scope), 'result');	// a hole still advances
 				if (el)
-					sub(el.target, el.default ? Conditional<TS.Expr>(JS.Member(r, 'done'), el.default, Binary('??', got, el.default)) : got, el.default ? undefined : it.yield);
+					sub(el.target, el.default ? Conditional<TS.Expr>(JS.Member(r(), 'done'), el.default, Binary('??', JS.Member(r(), 'value'), el.default)) : JS.Member(r(), 'value'), el.default ? undefined : it.yield);
 			}
 			if (target.rest)
-				sub(target.rest, drainIterator(iter, it, how.scope, how.temp, emit));
+				sub(target.rest, drainIterator(iter(), it, how.scope, how.temp, emit));
 			return;
 		}
-		// A fresh node per read: each is typed where it stands (narrowed in the default's test), and a node holds one type.
 		target.elements.forEach((el, i) => {
-			const elem = () => JS.Index(v, Literal(i));
+			const elem = () => JS.Index(v(), Literal(i));
 			if (el)
-				sub(el.target, !el.default ? elem() : Conditional<TS.Expr>(Binary<TS.Expr, '<'>('<', Literal(i), JS.Member(v, 'length')),
+				sub(el.target, !el.default ? elem() : Conditional<TS.Expr>(Binary<TS.Expr, '<'>('<', Literal(i), JS.Member(v(), 'length')),
 					how.absent?.(elem()) === false ? elem() : Conditional<TS.Expr>(Binary<TS.Expr, '==='>('===', elem(), Identifier('undefined')), el.default, elem()), el.default));
 		});
 		if (target.rest)
-			sub(target.rest, JS.Call(JS.Member(v, 'slice'), [Literal(target.elements.length)]));
+			sub(target.rest, JS.Call(JS.Member(v(), 'slice'), [Literal(target.elements.length)]));
 		return;
 	}
 	if (target.rest)
@@ -493,18 +492,18 @@ export function lowerPattern(kind: JS.DeclarationKind, target: BindingTarget, va
 		const key = JS.keyName(prop.key);
 		if (key === undefined)
 			throw "a computed key ('[expr]') in an object destructuring pattern is not supported";
-		const propExpr = JS.Member(v, key);
+		const propExpr = JS.Member(v(), key);
 		sub(prop.value, prop.default ? Binary('??', propExpr, prop.default) : propExpr);
 	}
 }
 
 // Every remaining value of an iterator, into a new array: what `...` does with an iterable, and a rest element.
 export function drainIterator(iterator: TS.Expr, it: T.IterationTypes, scope: Scope, temp: (role: string) => string, emit: (s: Stmt) => void): TS.Expr {
-	const arr = Identifier(temp('drained')), r = Identifier(temp('result'));
-	emit(JS.VarDecl('const', JS.Var(arr.name, JS.ArrayLit([]), TS.ArrayType(it.yield))));
-	emit(JS.For(JS.VarDecl('let', JS.Var(r.name, nextCall(iterator, it, scope))), JS.JSUnary('!', JS.Member(r, 'done')), Assign<TS.Expr, never>(r, nextCall(iterator, it, scope)),
-		ExprStmt(JS.Call(JS.Member(arr, 'push'), [JS.Member(r, 'value')]))));
-	return arr;
+	const arr = temp('drained'), r = temp('result');
+	emit(JS.VarDecl('const', JS.Var(arr, JS.ArrayLit([]), TS.ArrayType(it.yield))));
+	emit(JS.For(JS.VarDecl('let', JS.Var(r, nextCall(iterator, it, scope))), JS.JSUnary('!', JS.Member(Identifier(r), 'done')), Assign<TS.Expr, never>(Identifier(r), nextCall(iterator, it, scope)),
+		ExprStmt(JS.Call(JS.Member(Identifier(arr), 'push'), [JS.Member(Identifier(r), 'value')]))));
+	return Identifier(arr);
 }
 
 // `for (v of xs) body` as plain loops: by the iteration protocol where codegen iterates by it (`it`: what iterating yields), else by
@@ -514,17 +513,19 @@ export function lowerForOf(s: ForOf, it: T.IterationTypes | undefined, scope: Sc
 		throw "'for...of' loop variable must be a single declaration";
 	const v		= s.init.declarations[0], kind = s.init.kind;
 	const bind	= (value: TS.Expr, t?: Type) => JS.Block<Stmt>(JS.VarDecl(kind, JS.Var(v.name, value, v.typeAnnotation ?? t)), s.body);
+	// A fresh node per use: each is typed where it stands (`r` narrowed by `!r.done`), and a node holds one type.
+	const use = (name: string) => () => Identifier(name);
 	if (it) {
-		const iter = Identifier(temp('it')), r = Identifier(temp('r'));
+		const iter = use(temp('it')), r = use(temp('r'));
 		return JS.Block<Stmt>(
-			JS.VarDecl('const', JS.Var(iter.name, JS.Call(JS.Member(s.right, '[Symbol.iterator]'), []))),
-			JS.For(JS.VarDecl('let', JS.Var(r.name, nextCall(iter, it, scope))), JS.JSUnary('!', JS.Member(r, 'done')), Assign<TS.Expr, never>(r, nextCall(iter, it, scope)), bind(JS.Member(r, 'value'), it.yield)),
+			JS.VarDecl('const', JS.Var(iter().name, JS.Call(JS.Member(s.right, '[Symbol.iterator]'), []))),
+			JS.For(JS.VarDecl('let', JS.Var(r().name, nextCall(iter(), it, scope))), JS.JSUnary('!', JS.Member(r(), 'done')), Assign<TS.Expr, never>(r(), nextCall(iter(), it, scope)), bind(JS.Member(r(), 'value'), it.yield)),
 		);
 	}
-	const arr = Identifier(temp('arr')), i = Identifier(temp('i'));
+	const arr = use(temp('arr')), i = use(temp('i'));
 	return JS.Block<Stmt>(
-		JS.VarDecl('const', JS.Var(arr.name, s.right)),
-		JS.For(JS.VarDecl('let', JS.Var(i.name, Literal(0))), JS.JSBinary('<', i, JS.Member(arr, 'length')), JS.JSUnary('++', i), bind(JS.Index(arr, i))),
+		JS.VarDecl('const', JS.Var(arr().name, s.right)),
+		JS.For(JS.VarDecl('let', JS.Var(i().name, Literal(0))), JS.JSBinary('<', i(), JS.Member(arr(), 'length')), JS.JSUnary('++', i()), bind(JS.Index(arr(), i()))),
 	);
 }
 
