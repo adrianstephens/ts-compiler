@@ -1633,14 +1633,19 @@ export function resolve(scope: Scope, t: Type, depth = 10, stopAtRef = false): T
 				const checkType = oneStepIndexed(t.checkType, scope);
 				if (!isAny(check) && !isAbstract(check, scope)) {
 					if (containsKind(t.extendsType, 'infer')) {
-						const bindings = new Map<string, Type>();
-						// Not the already-resolved `check` -- resolving would eagerly expand a named type, losing the identity
-						// `matchInfer`'s `ref`-typeArgs case needs to match `Promise<infer R>`. Gets its own fresh budget, not `resolve`'s `depth`.
-						const r = matchInfer(t.extendsType, checkType, scope, bindings);
+						// As TS: each `infer X` is a type parameter inferred from the check type (unresolved: keeps a named type's identity) as a
+						// call infers; the pattern, instantiated (uninferred at its constraint, else `unknown`), is what the check type must extend.
+						const params	= new Map<string, TS.TypeParam>();
+						const pattern	= walker(undefined, undefined, rewriteOnce((x: Type, process: <T extends Type>(x: T) => T) => x.type === 'infer'
+							? (params.set(x.name, TS.TypeParam(x.name, x.constraint)), TS.RefType(x.name)) : process(x))).type(t.extendsType) ?? t.extendsType;
+						const bindings	= new Map<string, Type>();
+						inferTypeArgs(pattern, checkType, params, bindings, scope);
+						params.forEach((p, name) => bindings.has(name) || bindings.set(name, p.constraint ?? UNKNOWN));
+						const fits		= [...params].every(([name, p]) => !p.constraint || isAssignable(bindings.get(name)!, p.constraint, scope))
+							&& isAssignable(checkType, substituteType(pattern, bindings), scope);
 						// A taken branch IS the conditional's result, so it spends no depth: a long `A ? X : B ? Y : ...` chain bailed to
 						// `any`, and a bail leaves every enclosing resolution uncached, so each repeat re-evaluated it (ReadType ran for hours).
-						if (r !== undefined)
-							return resolve(scope, r ? substituteType(t.trueType, bindings) : t.falseType, depth, stopAtRef);
+						return resolve(scope, fits ? substituteType(t.trueType, bindings) : t.falseType, depth, stopAtRef);
 					} else {
 						// Stricter than `isAssignable`: real TS's `extends` says a bare `number` does NOT extend a narrower literal union, unlike ordinary assignability.
 						// `undefined` propagates `isLiteralOnly`'s "can't safely decide" -- caller must stay opaque, not guess.
@@ -2876,181 +2881,6 @@ function primitiveConstraint(c: Type | undefined, scope: Scope): boolean {
 	return !!c && unionMembers(c, scope).some(m => PRIMITIVE_DOMAINS.has(domainOf(resolveOwn(m, scope), scope) ?? ''));
 }
 
-// Structurally matches `pattern` (an `extendsType` containing `infer` nodes) against `actual`, binding each `infer X` into `out`.
-// Three-valued like `conditionalExtends`: `false` only on outright conflict, `undefined` when unresolvable -- never guessed.
-function matchInfer(pattern: Type, actual: Type, scope: Scope, out: Map<string, Type>, depth = 6): boolean | undefined {
-	if (depth < 0) {
-		scope.hitDepthLimit('matchInfer');
-		return undefined;
-	}
-	if (pattern.type === 'infer') {
-		if (!out.has(pattern.name))
-			out.set(pattern.name, actual);
-		return !pattern.constraint || isAssignable(actual, pattern.constraint, scope);
-	}
-	if (!containsKind(pattern, 'infer'))
-		return isAssignable(actual, pattern, scope);
-
-	const a = normalizeArray(resolve(scope, actual, depth - 1));
-	if (pattern.type === 'ref' && pattern.typeArgs) {
-		if (pattern.name === 'ReadonlyArray') {
-			const patternEl = pattern.typeArgs[0];
-			if (a.type === 'ref' && a.name === 'Array' && a.typeArgs?.length)
-				return matchInfer(patternEl, a.typeArgs[0], scope, out, depth - 1);
-			if (a.type === 'tuple')
-				return a.elements.every(e => { const t = tupleElementType(e); return !t || matchInfer(patternEl, t, scope, out, depth - 1) !== false; }) || undefined;
-		} else if (pattern.name === 'Array' && a.type === 'tuple' && pattern.typeArgs.length === 1) {
-			const patternEl = pattern.typeArgs[0];
-			return a.elements.every(e => { const t = tupleElementType(e); return !t || matchInfer(patternEl, t, scope, out, depth - 1) !== false; }) || undefined;
-		}
-		// Checks the *unresolved* `actual` for a same-named ref first -- `scope.resolve` would eagerly expand it, losing the
-		// "named `Promise<number>`" identity this needs; only falls back to the resolved form for an alias needing one unwrap.
-		const named = actual.type === 'ref' && actual.typeArgs && actual.name === pattern.name ? actual
-			: a.type === 'ref' && a.typeArgs && a.name === pattern.name ? a
-			: undefined;
-		if (!named) {
-			// The pattern's own name may still describe a shape the actual can match: an interface or alias expands
-			// (`Term<infer U>` -> `{t: infer U}`), and the structural cases below then decide it properly. A class ref stays
-			// nominal through `resolve`, so this cannot loop. Without it a chain like `T extends Term<infer U> ? U : T extends
-			// (() => infer U) ? U : never` gave up at the FIRST branch (undecidable) instead of falling to the second.
-			const expanded = resolve(scope, pattern, depth - 1);
-			if (expanded.type !== 'ref' || expanded.name !== pattern.name)
-				return matchInfer(expanded, actual, scope, out, depth - 1);
-			// A resolved primitive (`string`, a literal `'k'`, a range) can never structurally match a generic ref pattern
-			// like `PromiseLike<infer R>` -- no type arguments, no generic shape -- so this is a confident `false`,
-			// not the usual "differently-named, could still be an unresolved match" `undefined`. A function type is the
-			// same answer for the same reason: it has no keyed members, and a class ref (kept nominal by `resolve`, so it
-			// never expanded above) is not something a function value is an instance of.
-			return isPrimitive(a) || a.type === 'literal' || a.type === 'range' || a.type === 'function' || a.type === 'constructor' ? false : undefined;
-		}
-		return pattern.typeArgs.length === named.typeArgs!.length
-			&& pattern.typeArgs.every((p, i) => matchInfer(p, named.typeArgs![i], scope, out, depth - 1) !== false)
-			|| undefined;
-	}
-	if (pattern.type === 'array') {
-		// `a` was normalized to `Array<T>`/`ReadonlyArray<T>` above -- no longer `'array'` itself -- so this reads its element
-		// back out through `arrayLikeElement` instead of `a.element` directly.
-		const ael = arrayLikeElement(a);
-		return ael !== undefined ? matchInfer(pattern.element, ael, scope, out, depth - 1)
-			: a.type === 'tuple' ? a.elements.every(e => {
-				const t = tupleElementType(e);
-				return t && matchInfer(pattern.element, t, scope, out, depth - 1) !== false;
-			}) || undefined
-			: false;
-	}
-	if (pattern.type === 'tuple') {
-		if (a.type !== 'tuple')
-			return undefined;
-		// A trailing `...infer Rest` (or `...unknown[]`) only has to line up against whatever's left after the fixed leading elements match --
-		// unlike the fixed-length case below, `a` may have *more* elements than `pattern`'s leading portion.
-		const last = pattern.elements.at(-1);
-		if (last?.type === 'spread') {
-			const lead = pattern.elements.slice(0, -1);
-			if (a.elements.length < lead.length)
-				return false;
-			// `a` itself may contain a spread anywhere in the range being matched here (e.g. `[...T[]]`, the
-			// common encoding for "array of unknown length" reaching this branch as a genuine `tuple` rather
-			// than tison's own `array` kind, which `normalizeArray` above would already have converted to
-			// `Array<T>` and failed the `a.type !== 'tuple'` check before this point) -- unlike `tupleElementType`
-			// (which deliberately returns `undefined` for a spread elsewhere, since a spread has no *single*
-			// element value), a pattern position lining up against one still needs *some* type to bind its
-			// `infer` against, and the spread's own argument is exactly that (matches real TS's inference for
-			// `[infer First, ...infer Rest]` against a plain array type).
-			const elementTypeAt = (te: TS.TupleElement) => te.type === 'spread' ? te.argument : tupleElementType(te);
-			if (!lead.every((p, i) => {
-				const at = elementTypeAt(a.elements[i]), pt = tupleElementType(p);
-				return !at || !pt || matchInfer(pt, at, scope, out, depth - 1) !== false;
-			}))
-				return false;
-			if (!containsKind(last.argument, 'infer'))
-				return true;
-			const rest = a.elements.slice(lead.length).map(elementTypeAt);
-			return rest.every(t => !!t) && matchInfer(last.argument, TS.ArrayType(combineTypes(rest)), scope, out, depth - 1) !== false || undefined;
-		}
-		return a.elements.length === pattern.elements.length
-			&& a.elements.every((e, i) => {
-				const at = tupleElementType(e), pt = tupleElementType(pattern.elements[i]);
-				return !at || !pt || matchInfer(pt, at, scope, out, depth - 1) !== false;
-			})
-			|| undefined;
-	}
-	if (pattern.type === 'function' || pattern.type === 'constructor') {
-		// An overloaded value (`((s: sync._stream) => T) & ((s: async._stream) => Promise<T>)`) is a genuine
-		// `intersection` of signatures, not a single one -- matches if *any* overload does, same as a real call
-		// picking whichever signature fits.
-		if (a.type === 'intersection')
-			return a.types.some(m => matchInfer(pattern, m, scope, out, depth - 1) === true) || undefined;
-		if (a.type !== pattern.type)
-			return false;
-		// `(...args: infer P) => R` binds `P` to the actual's whole parameter list as a tuple (`Parameters<T>`), an optional
-		// parameter as an optional element and its own rest as a spread -- the shape a call site writes.
-		const restInfer = pattern.rest?.typeAnnotation;
-		if (restInfer?.type === 'infer' && !pattern.params.length) {
-			const elements: TS.TupleElement[] = a.params.map(p => hasMod(p, 'optional') ? { type: 'optional', element: p.typeAnnotation ?? ANY } : p.typeAnnotation ?? ANY);
-			if (a.rest?.typeAnnotation)
-				elements.push({ type: 'spread', argument: a.rest.typeAnnotation });
-			if (matchInfer(restInfer, TS.Tuple(elements), scope, out, depth - 1) === false)
-				return false;
-		}
-		return pattern.returnType && a.returnType ? matchInfer(pattern.returnType, a.returnType, scope, out, depth - 1)
-			: undefined;
-	}
-
-	if (pattern.type === 'union') {
-		// non-distributive: `infer` inside a pattern-side union is rare and real TS's handling here is itself subtle -- best-effort only.
-		for (const p of pattern.types) {
-			if (matchInfer(p, actual, scope, out, depth - 1))
-				return true;
-		}
-		return undefined;
-	}
-	if (pattern.type === 'object') {
-		// `a` may be a plain object/intersection with call/construct signature *members* (`{new(...): infer R}`
-		// matched structurally), or itself a bare `constructor`/`function` value (e.g. a class reference used as
-		// a spec entry) -- semantically the same thing for matching purposes, so both are checked below.
-		// A class ref stays nominal through `resolve`; its instance members are what a structural pattern is matched against.
-		const shaped	= a.type === 'ref' && isClassRef(a, scope) ? resolveMembers(a, scope) : a;
-		const aMembers	= shaped.type === 'object' ? shaped.members : shaped.type === 'intersection' ? shaped.types.flatMap(x => x.type === 'object' ? x.members : []) : undefined;
-		for (const m of pattern.members) {
-			// `new(...): infer R` / `(...): infer R` -- a call/construct signature, not a keyed property: matched
-			// against `a`'s own signature of the same kind, if it has one (a plain data-spec object never does,
-			// which correctly fails this branch rather than silently binding nothing, as an unhandled member
-			// kind falling through the loop below used to).
-			if (m.type === 'call' || m.type === 'construct') {
-				if (!m.returnType || !containsKind(m.returnType, 'infer'))
-					continue;
-				const aReturnType = m.type === 'construct' && a.type === 'constructor' ? a.returnType
-					: m.type === 'call' && a.type === 'function' ? a.returnType
-					: (aMembers?.find(x => x.type === m.type) as TS.CallSig)?.returnType;
-				if (!aReturnType)
-					return false;
-				if (matchInfer(m.returnType, aReturnType, scope, out, depth - 1) === false)
-					return false;
-				continue;
-			}
-			if ((m.type !== 'property' && m.type !== 'method') || typeof m.key === 'object')
-				continue;
-			// A method is its function type, as `lookupMember` gives it; a required member the actual lacks is a confident miss, `infer` or not.
-			const want	= m.type === 'property' ? m.typeAnnotation : TS.FunctionType(methodSignature(m));
-			const infers	= containsKind(want, 'infer');
-			// A function/constructor type HAS no keyed members, so a required property is a confident miss; a primitive has its boxed interface's.
-			if (!aMembers && !(isPrimitive(a) || a.type === 'literal' || a.type === 'range')) {
-				if (!infers)
-					continue;
-				return a.type === 'function' || a.type === 'constructor' ? (hasMod(m, 'optional') ? undefined : false) : undefined;
-			}
-			// `lookupMember` gets its own fresh budget, not `matchInfer`'s remaining `depth` -- unrelated recursions.
-			const t = lookupMember(a.type === 'literal' || a.type === 'range' ? widenLiterals(a, false, true) : a, String(m.key), scope);
-			if (!t)
-				return hasMod(m, 'optional') ? undefined : false;
-			if (infers && matchInfer(want, t, scope, out, depth - 1) === false)
-				return false;
-		}
-		return true;
-	}
-	return undefined;
-}
-
 // TS's choice among a type parameter's candidates: covariant ones if any -- the object/array-literal ones first pooled into one
 // union (`unionObjectAndArrayLiteralCandidates`), then literals of one primitive UNION, otherwise the leftmost candidate every
 // later one is a supertype of (`getSupertypeOrUnion`); else the contravariant ones' common subtype.
@@ -3317,7 +3147,8 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 			const sameName	= argT.type === 'ref' && argT.name === paramT.name;
 			// Array-like to array-like is element to element, covariantly, as TS infers it -- not structurally through the methods,
 			// whose callback parameters would add CONTRAVARIANT candidates (`ReadonlyArray<T>` from a `(string | number)[]`).
-			const el = (paramT.name === 'Array' || paramT.name === 'ReadonlyArray') && paramT.typeArgs.length === 1 ? arrayLikeElement(a) : undefined;
+			const el = (paramT.name === 'Array' || paramT.name === 'ReadonlyArray') && paramT.typeArgs.length === 1
+				? arrayLikeElement(a) ?? (a.type === 'tuple' ? combineTypes(elementTypes(a, scope)) : undefined) : undefined;
 			if (el) {
 				recurse(paramT.typeArgs[0], el, depth - 1);
 			} else if (paramT.name === 'PromiseLike' && paramT.typeArgs.length === 1 && (argT.type === 'union' ? argT.types : [argT]).some(m => asPromiseRef(m, scope))) {
@@ -3356,12 +3187,16 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 			// `[K, V]` as a parameter type inferred NOTHING before this case existed, so every entries-style
 			// constructor (`Map`/`Set`'s own `[K, V][]`) came out `<any, any>` -- and towasm then rejected it
 			// outright ("class 'Map' needs 2 explicit type argument(s)"), blocking 30 declarations.
+			// A trailing spread (`[H, ...R]`) takes the argument's remaining elements, as a tuple of them.
+			const last = paramT.elements.at(-1), lead = last?.type === 'spread' ? paramT.elements.slice(0, -1) : paramT.elements;
 			if (a.type === 'tuple') {
-				paramT.elements.forEach((el, i) => {
+				lead.forEach((el, i) => {
 					const p = tupleElementType(el), q = tupleElementType(a.elements[i]);
 					if (p && q)
 						recurse(p, q, depth - 1);
 				});
+				if (last?.type === 'spread')
+					recurse(last.argument, TS.Tuple(a.elements.slice(lead.length)), depth - 1);
 			} else if (a.type === 'union') {
 				a.types.forEach(m => recurse(paramT, m, depth - 1));
 			}
@@ -3396,11 +3231,20 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 				// inference); against one still naming this call's own parameters, at its constraints.
 				const informative = !paramT.typeParams?.length && !paramT.params.some(p => p.typeAnnotation && mentionsNames(p.typeAnnotation, tparams));
 				const fn = callable.typeParams?.length && informative ? instantiateInContextOf(callable, callable.typeParams, paramT, scope, declScope) : baseSignature(callable);
-				flipped(() => paramT.params.forEach((p, i) => {
-					const q = fn.params[i];
-					if (p.typeAnnotation && q?.typeAnnotation)
-						recurse(p.typeAnnotation, q.typeAnnotation, depth - 1);
-				}));
+				// The argument's parameters as positions, as a call writes them: a rest of a tuple type is its elements.
+				const restT		= fn.rest?.typeAnnotation && resolveOwn(fn.rest.typeAnnotation, scope);
+				const positions	= [...fn.params.map((q): TS.TupleElement => hasMod(q, 'optional') ? { type: 'optional', element: q.typeAnnotation ?? ANY } : q.typeAnnotation ?? ANY),
+					...restT?.type === 'tuple' ? restT.elements : fn.rest?.typeAnnotation ? [{ type: 'spread' as const, argument: fn.rest.typeAnnotation }] : []];
+				flipped(() => {
+					paramT.params.forEach((p, i) => {
+						const q = tupleElementType(positions[i]);
+						if (p.typeAnnotation && q)
+							recurse(p.typeAnnotation, q, depth - 1);
+					});
+					// A rest parameter takes the remaining positions, as a tuple (`Parameters<T>`).
+					if (paramT.rest?.typeAnnotation)
+						recurse(paramT.rest.typeAnnotation, TS.Tuple(positions.slice(paramT.params.length)), depth - 1);
+				});
 				// The one case `deferred` exists for: `fn.returnType` is the *argument's own*, independently
 				// inferred return type -- for a generic callback literal (`() => ({...})`) with no declared
 				// return-type annotation, that's whatever anonymous, non-nominal structural shape the checker's
@@ -3432,6 +3276,14 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 					const from		= idx?.typeAnnotation ?? elements;
 					if (from)
 						recurse(m.typeAnnotation, from, depth - 1);
+					continue;
+				}
+				// A call or construct signature member: the argument's own (a function value is one), its return type.
+				if (m.type === 'call' || m.type === 'construct') {
+					const own = a.type === (m.type === 'call' ? 'function' : 'constructor') ? a
+						: collectMembers(a, scope).find((x): x is TS.CallSig & TS.TypeMember => x.type === m.type);
+					if (m.returnType && own?.returnType)
+						recurse(m.returnType, own.returnType, depth - 1);
 					continue;
 				}
 				const key = (m.type === 'property' || m.type === 'method') ? memberKey(m.key) : undefined;

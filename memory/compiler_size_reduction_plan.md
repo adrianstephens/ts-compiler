@@ -115,6 +115,11 @@ default re-emission all go through `lowering(ctx)` (temp / emit = check then com
 via `checkMember` split out of `checkClass`) fixes it. That exposed a checker bug, fixed: under `precise` (TS's subtype relation)
 an `any` source related structurally to every object target, so `any[] <: number[][]` held and `Array.isArray` narrowed
 `number[][]` to `any[]`. With every declaration checked, `case 'var_decl'`'s unstamped fallback is deleted.
+Then type-core.ts: conditional-type `infer` is inferred by `inferTypeArgs` (each `infer X` a type parameter, the instantiated
+pattern then checked by assignability, as TS) -- `matchInfer`, a second structural walk, deleted: -148. `inferTypeArgs` gained
+what only `matchInfer` had (array from tuple, `[H, ...R]`, a rest parameter against the argument's positions with a tuple
+rest expanded, call/construct signature members). Corpus GAP -27; ERROR +3, all real (promiseTry.ts lines under
+`@ts-expect-error`, unsupported: [[diagnostic-positions-are-lookahead]]).
 Commit-message deltas that are wrong: 835a5d9 (-20, truly -6), 981a774 (-96, -95), 3ac24ad (-4, -2), the fresh-node commit (+3,
 +1), the method-instance commit (+18, truly +12). This log is right.
 Measured: the fallback typing that exists ONLY for synthesized nodes is small (most of the 47 `checkerTypeOf` calls query source
