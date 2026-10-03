@@ -3717,6 +3717,9 @@ export class Scope {
 			const d = from.decl(local);
 			if (d)
 				this.addDecl(pub, d);
+			const dr = from.declarator(local);
+			if (dr)
+				this.addDeclarator(pub, dr);
 		}
 		const te = from.type(local);
 		if (te)

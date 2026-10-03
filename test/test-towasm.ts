@@ -1697,6 +1697,13 @@ async function main() {
 			main:	`import { shared } from './lib'; export function importedVar(): number { return shared[1]; }`,
 		}, 'main');
 		check("importedVar() (an imported module's var)", importedVar(), 4);
+		// A const read through a NON-entry module's import, under an alias, and through a namespace: one lazy global.
+		const { importedConst } = await compileMulti({
+			a:		`export const K = [1, 2, 3];`,
+			b:		`import { K } from './a'; export function g(): number { return K[0]; }`,
+			main:	`import { K as Q } from './a'; import * as A from './a'; import { g } from './b'; export function importedConst(): number { return Q[1] + A.K[2] + g(); }`,
+		}, 'main');
+		check("importedConst() (a const through imports)", importedConst(), 6);
 	}
 
 	{

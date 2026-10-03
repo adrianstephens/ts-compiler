@@ -1505,13 +1505,16 @@ function hoist(block: Stmt[], scope: Scope) {
 				break;
 			}
 			case 'import':
-				// `TStypeCheckAsync`'s import resolution already resolves these into `scope`'s *parent`, not `scope` itself -- this always
-				// materializes an own-map entry (preferring `value()` over the `any` fallback), so a `scope`-own-map-only reader still sees it.
-				if (stmt.default)
-					scope.addValue(stmt.default, scope.value(stmt.default) ?? T.ANY);
-				if (stmt.namespace)
-					scope.addValue(stmt.namespace, scope.value(stmt.namespace) ?? T.ANY);
-				stmt.specifiers?.forEach(s => scope.addValue(s.local, scope.value(s.local) ?? T.ANY));
+				// Resolved into `scope`'s PARENT (`TStypeCheckAsync`): an own entry here serves an own-map reader, and carries the
+				// declarator, which an own value would otherwise hide (a cross-module const's identity).
+				[stmt.default, stmt.namespace, ...stmt.specifiers?.map(s => s.local) ?? []].forEach(name => {
+					if (name) {
+						const d = scope.declarator(name);
+						scope.addValue(name, scope.value(name) ?? T.ANY);
+						if (d)
+							scope.addDeclarator(name, d);
+					}
+				});
 				break;
 
 			case 'var_decl':

@@ -2367,9 +2367,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// `Scope.decl(name)` gives back the declaration object but not the file it came from, and a plain top-level
 	// `var_decl` (unlike a function/class) has no module-scoped registration -- so the home module is recorded here.
 	const stmtHomeModule		= new Map<object, string>();
-	// The entry module's top-level `const`/`let` declarators, by name -- see the `moduleBodies` scan's own
-	// comment on why `Scope.decl` can't answer this for the entry module.
-	const topLevelVars			= new Map<string, { stmt: TS.Stmt; d: JS.Var<Type> }>();	// keyed by `homeKey(module, name)`
+	// Every module's top-level `const`/`let` (with an initializer, an entry `var` aside) by its declarator: its declaring name and module.
+	const moduleBindings			= new Map<T.Declarator, { d: JS.Var<Type>; name: string; home: string }>();
 	// An enum is COMPILE-TIME here: no runtime object, a member read folds to its constant (see `case 'member'`)
 	// and the declaration emits nothing.
 	const enumMembers			= new Map<string, number | string>();
@@ -2633,49 +2632,35 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 
 	// A top-level `const X = C`/`const X = T.C`: a class has no runtime value here (nominal, never first-class), so such a const is a compile-time alias, not a global to evaluate.
 	// `ensureClass` resolves through it and `__toplevel` emits nothing; `seen` guards a self- or mutually-referential chain.
-	function classAliasTarget(name: string, scope: Scope, seen = new Set<string>(), homeModule = '.'): { name: string; scope: Scope } | undefined {
+	function classAliasTarget(name: string, scope: Scope, seen = new Set<string>()): { name: string; scope: Scope } | undefined {
 		if (seen.has(name))
 			return undefined;
 		seen.add(name);
-		const varStmt	= scope.decl(name);
-		const d			= varStmt?.type === 'var_decl' ? varStmt.declarations.find(v => v.name === name) : topLevelVars.get(homeKey(homeModule, name))?.d;
-		return d?.init ? classRefTarget(d.init, scope, seen) : undefined;
+		const init = moduleVarOf(name, scope)?.d.init;
+		return init && classRefTarget(init, scope, seen);
+	}
+
+	// The module-level `const`/`let` (with an initializer) `name` resolves to in `scope`, imports included.
+	function moduleVarOf(name: string, scope: Scope) {
+		const d = scope.declarator(name);
+		return d && moduleBindings.get(d);
 	}
 
 	// `scope`: where to resolve `name` -- the reading function's own by default, or an `import * as NS`
 	// namespace's scope for an `NS.name` read, reaching the same const its qualified name does (`case 'member'`).
 	function lazyGlobalFor(name: string, ctx: FunctionContext, scope: Scope = ctx.scope) {
-		const varStmt	= scope.decl(name);
-		const own		= varStmt?.type === 'var_decl'
-			? { stmt: varStmt as TS.Stmt, d: varStmt.declarations.find(d => d.name === name) }
-			: scope === ctx.scope ? topLevelVars.get(homeKey(ctx.homeModule, name)) : undefined;
-		if (!own?.d) {
-			// A named import of another module's const (`import { isJsStatement } from './walker'` in printer.ts): the same lazy
-			// global under its DECLARING module's identity, since the reading module's own scope never declares it.
-			const imported	= scope === ctx.scope ? namedImportsByModule.get(ctx.homeModule)?.get(name) : undefined;
-			const target	= imported && topLevelVars.get(homeKey(imported.module, imported.name));
-			if (imported && target?.d) {
-				const wrapper	= ensureLazyGlobal(imported.name, imported.module, target.d, moduleScopeOf(imported.module) ?? scope);
-				const slot		= lazyGlobalSlots.get(homeKey(imported.module, imported.name));
-				return wrapper && slot ? { wrapper, slot } : undefined;
-			}
-			// A module-level binding in a STATIC lib file (`LIB_AST`): those files are never in `moduleBodies`, so they are
-			// absent from `topLevelVars`, but share one flat `libGlobal` -- so the identity must be a FIXED one, since falling
-			// back to `ctx.homeModule` would give each referencing module its own copy of the same shared state.
-			const lib = LIB_DECL_MAP.get(name);
-			if (lib?.type === 'var_decl' && lib.init && !isAsm(lib.init)) {
-				const wrapper	= ensureLazyGlobal(name, LIB_MODULE, lib as unknown as JS.Var<Type>, libGlobal);
-				const slot		= lazyGlobalSlots.get(homeKey(LIB_MODULE, name));
-				return wrapper && slot ? { wrapper, slot } : undefined;
-			}
-			return undefined;
-		}
-		const homeModule	= stmtHomeModule.get(own.stmt) ?? ctx.homeModule;
-		// `scope` is only where `name` was FOUND: an `NS.name` read finds it in the module's export scope, which lacks
-		// that module's own imports. The initializer compiles in its home module's own scope, as its functions do.
-		const wrapper		= ensureLazyGlobal(name, homeModule, own.d, moduleScopeOf(homeModule) ?? scope);
-		const slot			= lazyGlobalSlots.get(homeKey(homeModule, name));
-		return wrapper && slot ? { wrapper, slot } : undefined;
+		const lazyGlobal = (name: string, homeModule: string, d: JS.Var<Type>, declScope: Scope) => {
+			const wrapper	= ensureLazyGlobal(name, homeModule, d, declScope);
+			const slot		= lazyGlobalSlots.get(homeKey(homeModule, name));
+			return wrapper && slot ? { wrapper, slot } : undefined;
+		};
+		const own = moduleVarOf(name, scope);
+		// The initializer compiles in its home module's own scope, as its functions do: an `NS.name` read finds it in the export scope.
+		if (own)
+			return lazyGlobal(own.name, own.home, own.d, moduleScopeOf(own.home) ?? scope);
+		// A STATIC lib file's module-level binding (`LIB_AST`, never in `moduleBodies`) has one fixed identity, shared by every module.
+		const lib = LIB_DECL_MAP.get(name);
+		return lib?.type === 'var_decl' && lib.init && !isAsm(lib.init) ? lazyGlobal(name, LIB_MODULE, lib as unknown as JS.Var<Type>, libGlobal) : undefined;
 	}
 
 	// A top-level `const` naming something already declared elsewhere (a class, a cross-module binding) has no module-init effect: reads resolve through `ensureClass`/`lazyGlobalFor` to the real declaration.
@@ -9743,9 +9728,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				for (const d of s.declarations) {
 					if (typeof d.name !== 'string' || !d.init)
 						continue;
-					// Only `exportScope` stamps `Scope.addDecl` for a var_decl, and only for an EXPORTED one, so a
-					// non-exported module-level `const` (js-parser.ts's `import_attributes`) resolved nowhere; keyed per module.
-					topLevelVars.set(homeKey(moduleId, d.name), { stmt: s, d });
+					moduleBindings.set(d, { d, name: d.name, home: moduleId });
 					if (s.kind === 'const' && !d.typeAnnotation && (d.init.type === 'arrow' || d.init.type === 'function')) {
 						if (moduleId === '.')
 							promotedConsts.add(d.name);
