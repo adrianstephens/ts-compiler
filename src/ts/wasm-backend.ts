@@ -5856,14 +5856,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			worklist.push(() => {
 				const wctx	= new FunctionContext(`<method value>.${cls.name}.${e.property}`, new Scope(libGlobal), plainReturn(sig.result), undefined, ctx.homeModule);
 				const env	= wctx.declareLocal('#envParam', { typeIndex: types.envBase(), nullable: false });
-				const args	= sig.params.map((p, i) => {
-					wctx.declareValue(`$arg$${i}`, p, sig.resolvedParams![i].tsType);
-					return sig.hasRest && i === sig.params.length - 1 ? JS.Spread(Identifier(`$arg$${i}`)) : Identifier(`$arg$${i}`);
-				});
-				const self	= wctx.declareValue('this', cls.thisWtype!, cls.thisTsType);
-				wctx.emit(I.local.get(env.index), I.ref.cast(envThis()), I.struct.get(envThis(), 0), I.ref.cast(cls.typeIndex), I.local.set(self.index));
-				emitStmt(JS.Return(JS.Call(JS.Member({ type: 'this' }, e.property), args)) as Stmt, wctx);
-				wctx.emitTrailingUnreachable(sig.result);
+				// A rest parameter's array is the method's own rest array: the wrapper's caller built it fresh.
+				const args	= sig.params.map((p, i) => localArg(wctx, wctx.declareLocal(`$arg$${i}`, p).index, p, sig.resolvedParams![i].tsType));
+				wctx.emit(I.local.get(env.index), I.ref.cast(envThis()), I.struct.get(envThis(), 0), I.ref.cast(cls.typeIndex));
+				const got	= emitCallOn(cls, e.property, args, wctx);
+				if (sig.result !== 'void')
+					coerceAs(fnType.returnType, got, wctx, sig.result);
+				else if (got !== 'void')
+					wctx.emit(I.drop);
 				made.body = wctx.toFuncBody(1 + sig.params.length, toValType);
 			});
 		}
