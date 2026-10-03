@@ -465,6 +465,45 @@ export function lowerExpr(e: TS.Expr, typeOf: (e: TS.Expr) => Type, scope: Scope
 	}
 }
 
+// `Object.assign(target, {k: v}, ...)` whose sources write their keys out: the target held, then an ordinary `t.k = v` per key.
+export function lowerObjectAssign(target: TS.Expr, writes: { key: string; value: TS.Expr }[], temp: (role: string) => string, emit: (s: Stmt) => void): TS.Expr {
+	const t = temp('assign');
+	emit(JS.VarDecl('const', JS.Var(t, target)));
+	writes.forEach(w => emit(ExprStmt(Assign<TS.Expr, never>(JS.Member(Identifier(t), w.key), w.value))));
+	return Identifier(t);
+}
+
+// `{...a, ...(c ? {k: v} : {}), ...}` is the literal either arm makes, `c ? {...a, k: v, ...} : {...a, ...}`: what precedes the conditional
+// is held first, so each value is still read once and in order. `undefined` when no spread is such a conditional.
+export function lowerConditionalSpread(e: Extract<TS.Expr, { type: 'object' }>, temp: (role: string) => string, emit: (s: Stmt) => void): TS.Expr | undefined {
+	const bare	= (x: TS.Expr): TS.Expr => x.type === 'as' ? bare(x.expression) : x;
+	const picks	= (p: typeof e.properties[number]) => {
+		const c = p.type === 'spread' ? bare(p.operand) : undefined;
+		const a = c?.type === 'conditional' ? bare(c.consequent) : undefined, b = c?.type === 'conditional' ? bare(c.alternate) : undefined;
+		return c?.type === 'conditional' && a?.type === 'object' && b?.type === 'object' ? { test: c.test, arms: [a.properties, b.properties] } : undefined;
+	};
+	const at = e.properties.findIndex(p => picks(p));
+	if (at < 0)
+		return undefined;
+	const { test, arms } = picks(e.properties[at])!;
+	// Each held value read through a fresh node per arm: a checked node holds one type.
+	const hold = (value: TS.Expr) => {
+		const name = temp('cspread');
+		emit(JS.VarDecl('const', JS.Var(name, value)));
+		return () => Identifier(name);
+	};
+	const before = e.properties.slice(0, at).map(p => {
+		if (p.type === 'spread')
+			return (v => () => ({ ...p, operand: v() }))(hold(p.operand));
+		if (p.type !== 'field' || !p.value)
+			return () => p;
+		const key = typeof p.key === 'object' ? hold(p.key.computed) : undefined, value = hold(p.value);
+		return () => ({ ...p, key: key ? { computed: key() } : p.key, value: value() });
+	});
+	const [yes, no] = arms.map(props => ({ ...e, properties: [...before.map(b => b()), ...props, ...e.properties.slice(at + 1)] }));
+	return Conditional<TS.Expr>(test, yes, no);
+}
+
 // How a destructuring is lowered for its consumer. Codegen names each level (`temp`), so each value is read once, and asks the
 // checked types how a level iterates (`iterates`: by the protocol, else by position) and whether a position may hold `undefined`.
 export interface PatternLowering {

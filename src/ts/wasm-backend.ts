@@ -4,11 +4,11 @@ import * as TS from './ts-parser';
 import * as JS from './js-parser';
 import * as T from './type-utils';
 import * as W from '../wasm/codegen';
-import { Literal, Identifier, Binary, Assign, Conditional, Member, hasMod, Module as CModule } from '@isopodlabs/tison/ast';
+import { Literal, Identifier, Binary, Assign, hasMod, Module as CModule } from '@isopodlabs/tison/ast';
 import { checkHoisted, checkImported, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, checkedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr } from './checker';
 import { Walker, walker, walkerB } from './walker';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
-import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator, lowerExpr } from './transform';
+import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread } from './transform';
 import * as wasm from '@isopodlabs/binary_libs/wasm';
 import * as WAT from '../wasm/wat-parser';
 
@@ -4318,30 +4318,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			&& g.fields.every((f, i) => f.name === w.fields[i].name && (W.typeEq(f.wtype, w.fields[i].wtype) || W.isAny(f.wtype)));
 	}
 
-	// `{...a, ...(c ? {k: v} : {}), ...}` is the literal either arm makes: `c ? {...a, k: v, ...} : {...a, ...}`, a spread of a plain literal
-	// being its properties. What precedes the conditional is evaluated first, into temps, so each value is still read once and in order.
-	function conditionalSpread(e: JS.ObjectExpr<Type>, ctx: FunctionContext): Expr | undefined {
-		const picks = (p: JS.ObjectExpr<Type>['properties'][number]) => {
-			const c = p.type === 'spread' ? unwrapAs(p.operand) : undefined;
-			const a = c?.type === 'conditional' ? unwrapAs(c.consequent) : undefined, b = c?.type === 'conditional' ? unwrapAs(c.alternate) : undefined;
-			return c?.type === 'conditional' && a?.type === 'object' && b?.type === 'object' ? { test: c.test, arms: [a.properties, b.properties] } : undefined;
-		};
-		const at = e.properties.findIndex(p => picks(p));
-		if (at < 0)
-			return undefined;
-		const { test, arms } = picks(e.properties[at])!;
-		const temp = (value: Expr): Expr => {
-			const name = `#cspread$${ctx.tempCounter++}`;
-			emitStmt(JS.VarDecl('const', JS.Var(name, value)), ctx);
-			return Identifier(name);
-		};
-		const before = e.properties.slice(0, at).map(p => p.type === 'spread' ? { ...p, operand: temp(p.operand) }
-			: p.type === 'field' && p.value ? { ...p, key: typeof p.key === 'object' ? { computed: temp(p.key.computed) } : p.key, value: temp(p.value) }
-			: p);
-		const [yes, no] = arms.map(props => ({ ...e, properties: [...before, ...props, ...e.properties.slice(at + 1)] }));
-		return Conditional<Expr>(test, yes, no);
-	}
-
 	// `value`'s elements (on the stack as `got`: raw storage of another kind, an indexable class, or a boxed `any`), read through its own
 	// `length` and index and converted to `want`, into new storage `typeIndex` left in `dst` -- read now, so a later element of the
 	// same literal (`[...a, a.pop()]`) cannot change them.
@@ -5077,16 +5053,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		}
 		if (!W.isRef(wtype))
 			throw `'Object.assign': '${T.showType(tsType)}' is not an object to assign onto`;
-		const name	= `$assign$${ctx.tempCounter++}`;
-		const local	= ctx.declareValue(name, wtype, tsType);
-		emitAs(target, ctx, wtype);
-		ctx.emit(I.local.set(local.index));
-		for (const w of call.writes) {
-			const slot: Expr = Member(Identifier(name), w.key);
-			emitDiscarded(Assign(slot, w.value), ctx);
-		}
-		ctx.emit(I.local.get(local.index));
-		return wtype;
+		const { temp, emit, check } = lowering(ctx);
+		return emitExpr(check(lowerObjectAssign(target, call.writes, temp, emit)), ctx);
 	}
 
 	// A function given its properties where it is made (`Object.assign(fn, {k: v})`, a literal typed as a callable object) is built as one
@@ -6266,9 +6234,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			case 'object': {
 				// A declared shape first (the one `ownerFor` builds for that type), then the union-shaped literal, and an anonymous shape last: a discriminant
 				// whose value is a union of literals fits no single member, and as anonymous it would build a struct no reader of the union tests for.
-				const split = conditionalSpread(e, ctx);
+				const { temp, emit, check } = lowering(ctx);
+				const split = lowerConditionalSpread(e, temp, emit);
 				if (split)
-					return emitExpr(split, ctx, want);
+					return emitExpr(check(split), ctx, want);
 				const declared = (W.isRef(want) ? ensureClass(want.ref) : undefined)
 					?? contextualDynamicOwner(e, ctx)
 					?? matchContextualUnionMember(e, ctx)
