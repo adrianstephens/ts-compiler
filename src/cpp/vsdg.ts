@@ -1,43 +1,15 @@
 // ===================================================================
 //  The C++ half of the language-neutral VSDG.
 // ===================================================================
-// Same three pieces as ts/vsdg.ts and py/vsdg.ts: `CPPDialect` (the facts the core asks about),
-// `CPPBuilder` (this AST's tags onto graph nodes), `CPPEmitter` (graph nodes back onto this AST,
-// printed by cpp/printer.ts) -- plus, at the bottom, the pipeline entry points this language exposes:
-//
-//     BuildVSDG(defs) -> Optimize(graph) -> applyGlobalCodeMotion(graph) -> BuildProgram(graph)
-//
-// Where C++ differs from both existing dialects, the difference is absorbed here:
-//
-//   * THE TOP LEVEL IS DEFINITIONS, not statements. A function definition is not a `Stmt` on this AST
-//     at all, so `S` is the widened `TopLevel = Definition | Stmt`, and the walker's own
-//     definition/statement split is bridged in `walkerB` (see DEFINITION_ONLY);
-//   * a declaration carries its TYPE, so a `var` node's `T` is the whole `DeclarationSpec`. There is
-//     no `let`/`const` keyword to print, and -- unlike every other dialect -- a name's type can never
-//     be invented, which is why an assignment to a name nobody modelled (`x = 1;`) prints as a plain
-//     assignment rather than as a declaration;
-//   * assignment is an EXPRESSION and `++`/`--` are pre/post mutations, so neither is ever treated as
-//     an ordinary pure value (see `lowerAssign` and the effect fallback);
-//   * a body is ONE `Block` statement, not an array (unlike py), so it's handed to
-//     `buildFunctionBody` as a one-element list and reaches the builder's own 'block' case.
-//
-// Deliberately NOT modelled yet -- each prints verbatim, so output stays correct and everything the
-// text mentions keeps a real reader, but the construct's interior isn't scheduled or optimised:
-// classes/structs/unions/templates/namespaces/`using`, typedefs, `switch`, `goto`/labels,
-// `throw`/`try`, range-`for`, initializer lists, declarators that aren't a plain name
-// (`int *p` / `a[10]` / `f(int)`), and the expressions `new`/`delete`/lambdas/`functional_cast`/
-// `cpp_cast`/`typeid`/`alignof`/`++`/`--`.
-//
-// `++`/`--` are the one exception to that list's "nothing is modelled": the expression still prints
-// verbatim (see `lowerUnmodelledMutation` for why C++ gives no safe way to do better), but the NAME it
-// rewrites IS re-bound afterwards, because an unmodelled mutation that leaves the name alone lets CSE
-// merge a read from before it with one from after it.
-//
-// Constant FOLDING has a TYPE MODEL of its own, because C++'s arithmetic is defined in terms of one
-// (unsigned wraps, `/` truncates, `-1 < 1u` is false). It is worth exactly what a literal's own
-// spelling can pin down -- the model lives in `walker.ts`, beside the walker (as TS/PY keep their own
-// `calcBinary`/`calcUnary` there), and `cppDialect` below just asks it. It is not visible to the core:
-// `literalValue`/`foldValue`/`literal` pass it through `unknown`.
+// The same three pieces as ts/vsdg.ts and py/vsdg.ts (`CPPDialect`, `CPPBuilder`, `CPPEmitter`, printed by cpp/printer.ts) and the pipeline
+// entry points. Where C++ differs:
+//   * the top level is DEFINITIONS: `S` is `TopLevel = Definition | Stmt`, bridged in `walkerB` (DEFINITION_ONLY);
+//   * a declaration carries its TYPE (a `var` node's `T` is its `DeclarationSpec`), which can never be invented, so an assignment to an
+//     unmodelled name prints as an assignment, not a declaration;
+//   * assignment is an EXPRESSION and `++`/`--` are mutations, never pure values; a body is ONE `Block`, handed over as a one-element list.
+// Not modelled, printed verbatim (correct, everything they mention kept read): classes/templates/namespaces/`using`, typedefs, `goto`/labels,
+// `throw`/`try`, range-`for`, initializer lists, non-name declarators (`int *p`), and `new`/`delete`/casts/`typeid`/`alignof`. `++`/`--` print
+// verbatim too, but the name they rewrite IS re-bound (`lowerUnmodelledMutation`). Constant folding uses C++'s arithmetic type model (walker.ts).
 
 import * as C from './c-parser';
 import * as CPP from './cpp-parser';
@@ -66,9 +38,8 @@ type NOf<K extends NodeType> = NodeOf<Expr, TopLevel, Spec, K>;
 // ===================================================================
 //  Which top-level items are definitions
 // ===================================================================
-// The walker keeps definitions and statements apart (`Kinds`), while the core has one entry point per item -- so the two have to be matched back up.
-// Only the tags that CANNOT be a statement need routing to the definition walker; `declaration`/`typedef`/`static_assert`/`using` appear in both
-// unions and are handled identically by either, so they stay on the statement path.
+// The walker keeps definitions and statements apart; only tags that CANNOT be a statement go to the definition walker (`declaration`,
+// `typedef`, `static_assert`, `using` are in both unions, handled alike).
 const DEFINITION_ONLY = new Set<string>([
 	'function_def', 'namespace', 'linkage', 'template', 'method_def', 'operator_def', 'constructor_def', 'destructor_def', 'static_member_def',
 ]);
@@ -88,8 +59,7 @@ const cppPrinter = () => (printerInstance ??= cppPrinterFactory());
 function MaybeLiteral(value: unknown) {
 	if (value === undefined)
 		return undefined;
-	// A folded scalar knows its own type, and spells itself from it. The core's own values reach here
-	// too: a rotated loop's condition is `literal(true)`, and the buildExpr fallback is `null`.
+	// A folded scalar spells itself from its type; the core's own values reach here too (a rotated loop's `literal(true)`, buildExpr's `null`).
 	if (typeof value === 'boolean')
 		return Common.Literal(value);
 	const s = value as Scalar | null;
@@ -115,10 +85,8 @@ export const cppDialect: Dialect<Expr, TopLevel, Spec> =  {
 			: cppPrinter().statement(s);
 	},
 	isCSEUnsafe(node) {
-		// A read whose VALUE an intervening mutation can change, while its printed form stays
-		// identical: `a[i]` (C++'s `[]` can call a user-defined `operator[]`), `this` (bound per
-		// call), and `A::b` (a global, or a static member). `a.b` never reaches here -- CSE skips the
-		// 'member' tag by type already.
+		// A read an intervening mutation can change while its text stays identical: `a[i]` (a user `operator[]`), `this`, `A::b`. `a.b` never
+		// reaches here: CSE skips 'member'.
 		return node.type === 'floating'
 			&& (['index', 'this', 'qualified'] as Expr['type'][]).includes(node.expr.type);
 	},
@@ -134,9 +102,8 @@ export const cppDialect: Dialect<Expr, TopLevel, Spec> =  {
 			:	e.type === 'unary'	? MaybeLiteral(calcUnary(e.operator, ops[0] as Scalar))
 			: undefined;
 	},
-	// What is a constant here: a literal, whose own spelling is its type (`true`/`false` are `bool`), and
-	// a single-character `'a'`, which is an `int` after promotion. A string literal is a pointer, `nullptr` has a type but no
-	// value, and `sizeof(T)` needs the declarations this AST never resolves.
+	// A constant: a literal (its spelling is its type; `true`/`false` are `bool`), and `'a'`, an `int` after promotion. A string literal is a
+	// pointer, `nullptr` has no value, and `sizeof(T)` needs declarations this AST never resolves.
 	literalValue(e) {
 		if (e.type === 'char_literal')
 			return e.value.length === 1 ? { kind: 'int', value: e.value.charCodeAt(0) & 0xFF } : undefined;
@@ -160,12 +127,8 @@ export const cppDialect: Dialect<Expr, TopLevel, Spec> =  {
 //  Lowering
 // ===================================================================
 
-// This language's own parameter list -> the core's neutral slots. A parameter's name comes out of
-// whatever declarator shape it was spelled with (`declaratorName` digs through pointer/array/reference
-// wrappers), so `int *p` binds `p` like any other name. An unnamed parameter binds nothing: only the
-// signature's own verbatim text mentions it.
-// c-parser's own `declaratorName` is typed against ITS declarator (no reference wrappers), so the same
-// dig has to be spelled once more against this module's wider one.
+// A parameter's name from whatever declarator spelled it (through pointer/array/reference wrappers, `int *p` binds `p`); unnamed binds nothing.
+// c-parser's own `declaratorName` is typed against its narrower declarator.
 function declaratorName(d: CPP.Declarator): string {
 	switch (d.type) {
 		case 'identifier':			return d.name;
@@ -178,15 +141,11 @@ function declaratorName(d: CPP.Declarator): string {
 	}
 }
 
-/** The type every one of switch's own hidden helpers is declared with: C++ has no keyword-less
- *  declaration form (see `makeTempDecl`), and the source never spells a type for them either. */
+/** The type of switch's hidden helpers: C++ has no keyword-less declaration (`makeTempDecl`), and the source spells none. */
 const AUTO: Spec = { type: C.RefType('auto') };
 
-/** C's switch body is a FLAT list of statements -- `case 1: g(); break;` parses as three siblings, the
- *  label holding only its own FIRST statement -- so the labels have to be regrouped into one entry per
- *  case, exactly as `transpile.ts`'s own `cppSwitchToTs` does it. A label whose own body is another
- *  label (`case 1: case 2: g();`) chains through it. Undefined for a shape this can't regroup (a
- *  statement before the first label, a second `default:`) -- those stay verbatim, which is correct. */
+/** C's switch body is a FLAT list (`case 1: g(); break;` is three siblings, the label holding only its first statement): regrouped per case,
+*  as transpile.ts's `cppSwitchToTs` does. Undefined for a shape that will not regroup (a statement before the first label), left verbatim. */
 function switchCasesOf(s: Stmt & { type: 'switch' }): { test?: Expr, body: Stmt[] }[] | undefined {
 	if (s.body.type !== 'block')
 		return undefined;
@@ -241,9 +200,7 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 
 	lowerDefinition(d: Definition, process: (d: Definition) => boolean, recurse: Recurse<Expr, TopLevel>): boolean {
 		if (d.type === 'function_def' && this.modellable(d)) {
-			// The body is a single `Block` statement on this AST, not an array -- handing it over as a
-			// one-element list is what routes it through the builder's own 'block' case, which is what
-			// gives the body its own scope.
+			// The body is one `Block`: as a one-element list it reaches the builder's 'block' case, which gives it its own scope.
 			const fn = this.buildFunctionBody(recurse, paramSlots(d.declarator), [d.body]);
 			fn.stmt = d;
 			this.end = fn;
@@ -253,9 +210,8 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 		return this.lowerVerbatim(d, () => process(d));
 	}
 
-	// A function definition this builder can lower: a plain function whose parameters are all
-	// bindable names. A parameter with a DEFAULT is not -- its default's own text only ever appears in
-	// the verbatim signature, so a name that default mentions would look unreferenced and get elided.
+	// A plain function whose parameters are all bindable names; a parameter DEFAULT appears only in the verbatim signature, so a name it mentions
+	// would look unread and be elided.
 	private modellable(d: FunctionDef): boolean {
 		if (d.declarator.type !== 'function')
 			return false;
@@ -266,19 +222,15 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 	}
 
 	lowerStatement(s: TopLevel, process: (s: Stmt) => boolean, recurse: Recurse<Expr, TopLevel>): boolean {
-		// c-parser keeps BOTH readings of a construct it found ambiguous -- an unknown type name makes
-		// `S *p = 0;` fork into a pointer declaration and a multiplication, and the two are returned as
-		// a nested list. They are ALTERNATIVES, not a sequence: lowering both runs the statement twice
-		// (and the second reading usually isn't the one the source meant). The first is taken, which is
-		// also the only reading a printer that can't spell an alternative list could ever emit.
+		// c-parser keeps BOTH readings of an ambiguous construct (`S *p = 0;` as a declaration and a multiplication) as a nested list: ALTERNATIVES,
+		// not a sequence. The first is taken, the only one a printer could emit.
 		if (Array.isArray(s)) {
 			console.log(`ambiguous statement: ${s.length} readings, taking the first`);
 			if (s.length)
 				recurse.statement(s[0] as TopLevel);
 			return false;
 		}
-		// Everything else that reaches here IS a statement: `walkerB` routed the definition-only tags to
-		// `lowerDefinition`, and every other `Definition` member is also a statement tag.
+		// Everything else IS a statement: `walkerB` routed the definition-only tags to `lowerDefinition`.
 		const stmt = s as Stmt;
 		switch (stmt.type) {
 			case 'declaration':
@@ -315,8 +267,7 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 
 			case 'switch': {
 				const cases = switchCasesOf(stmt);
-				// An empty switch (or a shape that won't regroup) has no case body that could break, so it
-				// stays verbatim -- which also beats declaring the hidden helpers for nothing.
+				// An empty switch, or one that will not regroup, stays verbatim, without hidden helpers declared for nothing.
 				if (!cases?.length) {
 					console.log(`not handling switch body`);
 					return this.lowerVerbatim(stmt, () => process(stmt));
@@ -329,8 +280,7 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 			}
 
 			case 'for': {
-				// Run init once, then desugar to `while (test) { body; update; }` with the update folded
-				// into the body's own non-`continue` tail -- same shape TS's own `for` lowering uses.
+				// `init` once, then `while (test) { body; update; }`, `update` on the body's non-`continue` tail, as TS's lowering does.
 				if (stmt.init) {
 					if (isExpr(stmt.init))
 						recurse.expression(stmt.init);
@@ -344,8 +294,7 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 			}
 
 			case 'return': {
-				// The marker carries its value at port 1 (unconnected for a bare `return;`); `exited`
-				// makes an enclosing `if` build a real gamma around this path.
+				// The marker carries its value at port 1 (unconnected for a bare `return;`); `exited` makes an enclosing `if` build a real gamma.
 				if (stmt.argument)
 					recurse.expression(stmt.argument);
 				const marker = this.makeMarker('EARLY_RETURN_MARKER');
@@ -369,25 +318,19 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 				return false;
 
 			case 'expression':
-				// A call reaches the state chain from inside `lowerExpression`'s own 'call' case, so
-				// descending is all this needs; anything with no effect at all is dead and drops.
+				// A call reaches the state chain from `lowerExpression`'s 'call' case; anything with no effect is dead and drops.
 				break;
 
 			default:
-				// `switch`/`case`/`goto`/labels/`throw`/`try`/range-`for`/`typedef`/`using`/... -- all of
-				// it prints verbatim, with everything it mentions kept alive by the descent.
+				// Everything else prints verbatim, what it mentions kept read by the descent.
 				console.log(`not handling statement ${(stmt as {type: string}).type}`);
 				return this.lowerVerbatim(stmt, () => process(stmt));
 		}
 		return process(stmt);
 	}
 
-	// `int x = 1;` -- one graph binding per declarator, each printing as its own declaration. Only a
-	// plain initialised name is modelled:
-	//   * `int *p = ...` needs its own TYPE rewrite (`int *p` is not `int p`), which the declarator
-	//     system would have to be modelled to do;
-	//   * `int x;` with no initializer has no value to bind, but must still PRINT -- nothing else may
-	//     declare it -- so it stays verbatim.
+	// `int x = 1;`: one binding per declarator, each printing as its own declaration. `int *p = ...` needs a TYPE rewrite the declarator model
+	// lacks, and `int x;` has no value to bind yet must print: both stay verbatim.
 	private lowerDeclaration(recurse: Recurse<Expr, TopLevel>, s: Stmt & { type: 'declaration' }): boolean {
 		const declarators = s.initDeclarators;
 		if (!declarators?.length)
@@ -396,25 +339,20 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 			if (!('declarator' in d) || d.declarator.type !== 'identifier' || !d.initializer || !isExpr(d.initializer))
 				return false;
 
-		// Walked THEN bound, one declarator at a time -- C++'s declarators also bind strictly left to
-		// right, so `int i = 0, e = i + 1;` needs `i` already in scope for `e`'s own read.
+		// Walked THEN bound, one declarator at a time, left to right (`int i = 0, e = i + 1;`).
 		for (const d of declarators as { declarator: Common.Identifier, initializer: Expr }[]) {
 			recurse.expression(d.initializer);
 			const varNode = this.makeNode({ type: 'var', name: d.declarator.name });
 			connectValue(this.getExprNode(d.initializer), 0, varNode, 0);
-			// The declaration's own type, replayed by `emitNamedSlot`. No declKind: this AST has no
-			// declaration keyword, and the core's `isInlinableVarDecl` reads declKind as "this value may be
-			// elided" -- which would make an assignment's own TARGET resolve to the initializer (`0 = 1`).
-			// What keeps the declaration printed is `typeAnnotation` (see the core's own
-			// `needsDirectPlacement`) plus this emitter's own `nameStoredTo`.
+			// The declaration's type, replayed by `emitNamedSlot`. No declKind: `isInlinableVarDecl` would read it as "elidable", making an assignment's
+			// TARGET resolve to the initializer (`0 = 1`); `typeAnnotation` and `nameStoredTo` keep the declaration printed.
 			varNode.typeAnnotation = s.specifiers;
 			this.bindVar(varNode);
 		}
 		return true;
 	}
 
-	// Every assignment, statement-level or as a subexpression. The graph node is a 'mutation' either
-	// way; only WHERE the target lives decides what else it needs.
+	// Every assignment, statement or subexpression: a 'mutation', whose target's location decides what else it needs.
 	private lowerAssign(recurse: Recurse<Expr, TopLevel>, e: Common.Assign<Expr, C.assignableOps>): boolean {
 		recurse.expression(e.target);
 		recurse.expression(e.value);
@@ -425,42 +363,28 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 
 		if (e.target.type === 'identifier') {
 			const fresh = this.scope.get(e.target.name) === undefined;
-			// A name this builder never saw declared is either a global or something a verbatim
-			// statement declared: it's read by NAME only, and a store to it is observable, so the
-			// assignment always prints (and prints as a plain assignment, never as a declaration -- the
-			// type is exactly what isn't known here).
+			// A name never seen declared (a global, or one a verbatim statement declares) is read by NAME, so a store to it always prints, as a plain
+			// assignment: its type is what is unknown.
 			if (fresh || !this.scope.isLocalToCurrentFunction(e.target.name))
 				node.forcedPrint = true;
 			this.rebindVar(e.target.name, node, fresh);
 		} else {
-			// A member/subscript target mutates something outside this pass's scope tracking, so
-			// nothing reads it back through scope -- it must print regardless of consumer count.
+			// A member/subscript target mutates outside this pass's scope tracking: it prints whatever its consumer count.
 			node.forcedPrint = true;
 			this.threadMutation(node);
 		}
 		return false;
 	}
 
-	// A name whose only mention is TEXT the graph never prints -- a verbatim statement's, a lambda's
-	// capture list -- still needs a READER, or the declaration it depends on is elided as dead. The
-	// reader itself is consumer-less, so it never prints a statement of its own.
+	// A name mentioned only in TEXT the graph never prints (a verbatim statement, a lambda's captures) needs a READER, or its declaration is elided.
 	private readOnly(e: Expr) {
 		connectValue(this.getExprNode(e), 0, this.makeExprNode(e), 0);
 	}
 
 	/**
-	 * A `++`/`--` this dialect does not model: the EXPRESSION becomes an opaque effect holding the raw
-	 * payload, printed where it stands. C++'s own text already means "increment, and yield the old (or
-	 * new) value", and rewriting it is unsafe here for a reason js doesn't have -- a user-defined
-	 * `operator++` is a real call, and its old value is a COPY (`auto t0 = x; x++;` is not `g(x++)` for a
-	 * class type), which no amount of graph work can tell apart from a scalar without the type.
-	 *
-	 * What IS modelled is the name it rewrites. Re-binding it to a fresh, never-bound 'var' is what stops
-	 * a read on the far side of the increment from being the same NODE as one before it -- and since CSE
-	 * merges equal nodes, without this `g(i * 2); i++; h(i * 2);` printed `auto t0 = i * 2;` with the
-	 * PRE-increment product handed to `h`. (A member/index target needs nothing: each of its reads is its
-	 * own `member`/`index` node, and both tags are CSE-skipped.)
-	 */
+	* An unmodelled `++`/`--`: an opaque effect printed in place. Rewriting it is unsafe (a user `operator++` is a call whose old value is a COPY),
+	* but the name it rewrites is re-bound, so CSE cannot merge a read before it with one after (`g(i * 2); i++; h(i * 2);`).
+	*/
 	private lowerUnmodelledMutation(e: { type: 'unary' | 'unary_post', operand: Expr } & Expr): false {
 		console.log(`not handling expression ${e.type}`);
 		const node = this.makeExprNode(e, 'effect');
@@ -468,23 +392,14 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 
 		const name = this.dialect.identifierName(e.operand);
 		if (name !== undefined) {
-			// The operand is a real READ of `name` -- it is what the increment yields -- so it needs an
-			// edge of its own (port 1; nothing reads it, the payload prints verbatim). Without one the
-			// name looks unread, and a later `i++` would not be seen to depend on this one, which is what
-			// makes the dead-store claim below safe to make at all.
+			// The operand is a real READ of `name` (port 1, never read as the payload prints verbatim): without it a later `i++` would not depend on this one.
 			connectValue(this.getExprNode(e.operand), 0, node, 1);
-			// Same shape as an import binding: a name-only 'var', never `bound`, so it prints nothing (see
-			// `emitNamedSlot`'s first branch) and every read of it resolves by name. Its own threadMutation
-			// anchor is what orders those reads after this increment.
+			// A name-only 'var' like an import binding, never `bound`, resolved by name; its threadMutation anchor orders those reads after this increment.
 			const alias = this.makeNode({ type: 'var', name });
 			this.threadMutation(alias);
 			this.scope.set(name, alias);
-			// Beyond rewriting this name, a builtin `++`/`--` does nothing -- so between them, the name and the
-			// increment account for everything it does, and with nothing reading that binding the core drops
-			// the whole thing as a dead write. `name` was not declared as anything in particular here:
-			// whether `operator++` is really the builtin one is a TYPES question this pass cannot answer, so
-			// "builtin" is the documented assumption, the same stand-in as `pure<name>` for calls. A
-			// member/index target claims nothing -- an `operator[]`/`operator++` behind it can do anything.
+			// A builtin `++`/`--` only rewrites the name, so with no reader of the binding the core drops it as a dead write. Whether `operator++` is the
+			// builtin is a TYPES question: "builtin" is the documented assumption (as `pure<name>` is for calls); a member/index target claims nothing.
 			node.mutatesBindingId = alias.id;
 		}
 		return false;
@@ -517,11 +432,8 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 	lowerExpression(e: Expr, process: (e: Expr) => boolean, recurse: Recurse<Expr, TopLevel>): boolean {
 		switch (e.type) {
 			case 'identifier':
-				// A statement printed VERBATIM mentions this name in text the graph never prints -- but the
-				// mention still has to look like a READ, or a declaration that text depends on is elided as
-				// dead (`int x = 1; switch (x) {...}` lost its declaration, since the switch is verbatim and
-				// nothing else read `x`). The reading node is created inside a verbatim descent, so it is
-				// inherently `suppressed` and never prints itself.
+				// A verbatim statement mentions this name in text: the mention must look like a READ, or a declaration it depends on is elided (`int x = 1;
+				// switch (x) {...}`). Created inside a verbatim descent, the reader is `suppressed` and never prints.
 				if (this.verbatim)
 					this.readOnly(e);
 				return false;
@@ -537,8 +449,7 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 			case 'null_literal':
 			case 'this':
 			case 'qualified':
-				// A leaf with nothing to thread. `'a'` IS a constant (see the dialect's `literalValue`),
-				// while `sizeof(T)`/`nullptr` are not. `this`/`A::b` are marked CSE-unsafe by the dialect.
+				// A leaf: `'a'` IS a constant (`literalValue`), `sizeof(T)`/`nullptr` are not; `this`/`A::b` are CSE-unsafe.
 				process(e);
 				this.makeExprNode(e);
 				return false;
@@ -553,8 +464,7 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 			}
 
 			case 'unary_post':
-				// `x++`/`x--` likewise -- and their value is the PRE-mutation one, which C++ gives no safe
-				// way to rewrite either (see `lowerUnmodelledMutation`).
+				// Likewise, and their value is the PRE-mutation one, which C++ gives no safe way to rewrite (`lowerUnmodelledMutation`).
 				process(e);
 				return this.lowerUnmodelledMutation(e);
 
@@ -570,18 +480,13 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 				return this.lowerAssign(recurse, e);
 
 			case 'lambda': {
-				// The same 'function' entry a definition gets, with `.expr` set: the lambda's own text is a
-				// VALUE printed verbatim, while its BODY is lowered into that entry's own region. Descending
-				// into it here instead -- which the unmodelled-expression fallback below does -- printed the
-				// body's statements in the ENCLOSING function: `auto g = [](int x) { return x; };` emitted a
-				// bare outer `return x;`.
+				// A definition's 'function' entry with `.expr` set: the lambda's text prints verbatim as a VALUE, its BODY lowered into its own region
+				// (descending here would print the body's statements in the enclosing function).
 				const entry = this.buildFunctionBody(recurse, paramSlotsOf(e.params), [e.body]);
 				entry.expr = e;
 				this.expnodes.set(e, entry);
 				this.end = entry;
-				// The lambda's text still prints verbatim, so a name only IT mentions -- a capture that the
-				// body never reads, a parameter default -- needs a reader of its own or the declaration it
-				// depends on is elided as dead.
+				// A name only the lambda's text mentions (an unread capture, a parameter default) needs a reader, or its declaration is elided.
 				for (const c of e.captures) {
 					if (c.init)
 						recurse.expression(c.init);
@@ -614,8 +519,7 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 
 			case 'member':
 			case 'pointer_member': {
-				// One tag for both: `.` and `->` differ only in the operator, which is the stamp. The
-				// whole expr isn't kept (unlike py's index), so `pointer_member` is recorded on the node.
+				// One tag for `.` and `->`, the operator a stamp; the whole expr is not kept, so `pointer_member` is recorded on the node.
 				process(e);
 				const node = this.makeNode({ type: 'member', name: e.property });
 				if (e.type === 'pointer_member')
@@ -634,8 +538,7 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 			}
 
 			case 'call': {
-				// Same convention as TS/PY: a callee named `pure...` is the placeholder for real purity
-				// analysis; every other call is an effect and threads the state chain.
+				// As in TS/PY, a callee named `pure...` stands in for purity analysis; every other call is an effect.
 				process(e);
 				const pure = e.callee.type === 'identifier' && e.callee.name.startsWith('pure');
 				const node = pure ? this.makeExprNode(e) : this.makeExprNode(e, 'effect');
@@ -647,9 +550,7 @@ export class CPPBuilder extends VSDGBuilder<Expr, TopLevel, Spec> implements Swi
 			}
 		}
 
-		// An expression form this dialect doesn't model (`new`/`delete`/a lambda/`cpp_cast`/...): the
-		// only safe assumption about a value whose evaluation order and purity are unknown is that it
-		// is an effect, which is also what keeps it printed verbatim, in place.
+		// An unmodelled expression form: an effect, the only safe assumption about unknown evaluation order and purity, which also keeps it verbatim.
 		console.log(`not handling expression ${(e as {type: string}).type}`);
 		process(e);
 		this.connectEnd(this.makeExprNode(e, 'effect'));
@@ -666,9 +567,7 @@ export class CPPEmitter extends Emitter<Expr, TopLevel, Spec> {
 		super(graph, cppDialect, blocks, blockIds);
 	}
 
-	// ---- statement constructors ----
-	// A C++ body is ONE statement (a `Block` when the source braced it), so the arrays the core hands
-	// over get wrapped -- the other way round from py, whose bodies ARE arrays.
+	// A C++ body is ONE statement (a `Block` when braced), so the core's arrays are wrapped (py's bodies ARE arrays).
 
 	makeBlock(body: TopLevel[] | undefined): Stmt | undefined {
 		// A body slot never holds a definition; the cast is that contract, not a guess.
@@ -684,8 +583,7 @@ export class CPPEmitter extends Emitter<Expr, TopLevel, Spec> {
 
 	makeSwitch(discriminant: Expr, cases: { test?: Expr, consequent: TopLevel[] }[]): TopLevel {
 		const body: TopLevel[] = [];
-		// Labels still waiting for a body: `case 1: case 2: g();` is a label whose own body IS the next
-		// label, so an empty case chains onto whatever follows instead of printing a `case 1: ;`.
+		// Labels waiting for a body: `case 1: case 2: g();` chains an empty case onto the next instead of printing `case 1: ;`.
 		let open: Stmt[] = [];
 		const close = (label: Stmt): Stmt => {
 			let node: TopLevel = label;
@@ -701,8 +599,7 @@ export class CPPEmitter extends Emitter<Expr, TopLevel, Spec> {
 				open.push(label);
 				continue;
 			}
-			// C++ forbids jumping past a declaration's initialisation into its scope: without a block,
-			// `case 1: int y = 1; break; case 2:` is ill-formed, since case 2's jump enters y's scope.
+			// C++ forbids jumping past an initialisation into its scope (`case 1: int y = 1; break; case 2:`), so such a case gets a block.
 			if (c.consequent.some(st => (st as { type?: string }).type === 'declaration')) {
 				body.push(close({ ...label, body: Common.Block<TopLevel>(...c.consequent) } as unknown as Stmt));
 				continue;
@@ -727,23 +624,19 @@ export class CPPEmitter extends Emitter<Expr, TopLevel, Spec> {
 		return node.stmt;
 	}
 	rebuildClassDecl(node: NOf<'class_decl'>): TopLevel {
-		// A class is never modelled here -- its declaration stays a passthru -- so this is only reached
-		// if some future lowering starts creating class_decl nodes.
+		// A class is never modelled (it stays a passthru): reached only if a future lowering creates class_decl nodes.
 		return node.stmt;
 	}
 	rebuildFunctionDecl(node: NOf<'function'>, body: TopLevel[]): TopLevel {
 		return { ...(node.stmt as FunctionDef), body: this.makeBlock(body) } as TopLevel;
 	}
 
-	// A `var` node prints as a declaration when it carries the type the source declared it with, and as
-	// a plain assignment when it doesn't (a binding created by an assignment to a name declared
-	// elsewhere -- see the builder's own `lowerAssign`).
+	// A declaration when it carries its declared type, else a plain assignment (a binding made by assigning a name declared elsewhere).
 	emitNamedSlot(name: string, node: N): TopLevel | undefined {
 		this.names.add(name);
 
 		if (node.type === 'var') {
-			// An external name (a global, a built-in, or a name a verbatim statement declared) has no
-			// initializer of its own to print -- it's resolved by name wherever it's read.
+			// An external name has no initializer to print: read by name wherever used.
 			if (!node.inputs[0])
 				return undefined;
 			if (!this.graph.hasRealConsumer(node) && !this.nameStoredTo(name, node.id))
@@ -758,14 +651,8 @@ export class CPPEmitter extends Emitter<Expr, TopLevel, Spec> {
 		return Common.ExprStmt(Common.Assign(Common.Identifier(name), this.buildExpr(node)));
 	}
 
-	// True when anything else in the program still names this variable as a STORE TARGET -- either a
-	// node that currently binds it (`x = 2` merged into a ternary) or a mutation whose own target is
-	// that name. C++ has no implicit declaration, so the declaration has to survive even when nothing
-	// reads its VALUE: `int x = 1; if (c) { x = 2; } else { x = 3; }` prints `return c ? x = 2 : (x = 3);`,
-	// and `if (0)` would print `return x = 3;` -- a name with no declaration at all. A scan rather than
-		// a slotName() lookup because folding a constant branch bypasses the gammaValue that held the name,
-		// leaving only the store. (`hasForcedSibling` would miss both: such a store is never forcedPrint.)
-		// A PARAMETER never matches: it is never bound and the signature already declares it.
+	// Whether anything still names this variable as a STORE TARGET: C++ has no implicit declaration, so it must survive when nothing reads its value.
+	// Scanned, since folding a constant branch bypasses the merge that held the name. A PARAMETER never matches.
 	private nameStoredTo(name: string, excludeId: NodeId): boolean {
 		for (const other of this.graph.values()) {
 			if (other.id === excludeId)
@@ -835,8 +722,7 @@ export class CPPEmitter extends Emitter<Expr, TopLevel, Spec> {
 	private rebuildEffect(node: NOf<'effect'>): Expr {
 		const e = node.expr;
 		if (e.type === 'call') {
-			// The callee is normally left raw; only a callee that embeds a real effect (or was hoisted
-			// into a temp) has to be resolved, or printing the raw source would duplicate its execution.
+			// The callee prints raw, unless it embeds an effect (or was hoisted into a temp), which raw source would run again.
 			const calleeEdge	= node.inputs[e.arguments.length + 1];
 			const calleeNode	= calleeEdge && this.graph.get(calleeEdge.nodeId);
 			const calleeTemp	= calleeNode && this.nodeVariableNames.get(calleeNode.id);
