@@ -2533,7 +2533,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	function toParams(params: W.Type[]): wasm.ParamType[] {
 		return params.map(p => ({ type: toValType(p) }));
 	}
-	function toParams2(params: ResolvedParam[]): wasm.ParamType[] {
+	function toParams2(params: readonly { key: BindingTarget; wtype: W.Type }[]): wasm.ParamType[] {
 		return params.map((p) => ({ type: toValType(p.wtype), id: typeof p.key === 'string' ? p.key : undefined }));
 	}
 	function builtinTypeOwner(name: string) {
@@ -3138,7 +3138,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// class that can hold these keys", which only the finished `classes` map knows, exactly as `ensureAnyField` scans it.
 	function ensureAnySpreadClone(slots: (string | undefined)[]): FuncInfo {
 		return synthesize(`<any spread>.${slots.map(k => k ?? '...').join(',')}`, () => ({
-			params: slots.map((k, i) => k === undefined ? anyParam('src') : anyParam(`val$${i}`, W.REF_ANY_NULLABLE)), result: W.REF_ANY,
+			params: slots.map((k, i) => k === undefined ? param('src') : param(`val$${i}`, W.REF_ANY_NULLABLE)), result: W.REF_ANY,
 		}), (dctx, locals, { result }) => {
 			// Only a key written AFTER the spread overrides it -- one written before is what the spread overwrites, so it comes
 			// off the source like any other field. Both are still evaluated at the call site, in written order, as JS does.
@@ -5823,7 +5823,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// `.call`'s rebinding for a function held as `any` (a union of signatures): which closure type it is, is known only at run
 	// time, so every closure type the program has is a candidate. Built by `lateWorklist`, once that set is final.
 	function ensureAnyRebindThis(): FuncInfo {
-		return synthesize('<any dispatch>.#rebindThis', () => ({ params: [anyParam('callee'), anyParam('this', W.REF_ANY_NULLABLE)], result: W.REF_ANY }), (dctx, [callee, thisVal]) => {
+		return synthesize('<any dispatch>.#rebindThis', () => ({ params: [param('callee'), param('this', W.REF_ANY_NULLABLE)], result: W.REF_ANY }), (dctx, [callee, thisVal]) => {
 			const base = types.closureBase();
 			const arms = [...closureTypes.values()].reduceRight<wasm.Instr[]>((rest, c) => [
 				I.local.get(callee), I.ref.test(c.structTypeIndex),
@@ -9123,7 +9123,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 
 	// A runtime helper, built once per `key`: reserved at first use so call sites can `call` it, its body built LATE (once every class the program
 	// reaches is known) when its candidates are open-ended, or on the ordinary worklist when they are a bounded set.
-	function synthesize<P extends { params: { key: string; wtype: W.Type; tsType: Type }[]; result: W.Type; info?: Partial<FuncInfo> }>(
+	function synthesize<P extends { params: { key: string; wtype: W.Type }[]; result: W.Type; info?: Partial<FuncInfo> }>(
 		key: string, prepare: () => P, build: (ctx: FunctionContext, locals: number[], p: P) => void, late = true): FuncInfo {
 		const existing = funcs.get(key);
 		if (existing)
@@ -9134,12 +9134,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		funcs.set(key, info);
 		(late ? lateWorklist : worklist).push(W.withCatch(() => {
 			const ctx = new FunctionContext(key, new Scope(libGlobal), plainReturn(p.result), undefined);
-			build(ctx, p.params.map(q => ctx.declareValue(`$${q.key}`, q.wtype, q.tsType).index), p);
+			build(ctx, p.params.map(q => ctx.declareLocal(`$${q.key}`, q.wtype).index), p);
 			info.body = ctx.toFuncBody(p.params.length, toValType);
 		}, key));
 		return info;
 	}
-	const anyParam = (key: string, wtype: W.Type = W.REF_ANY) => ({ key, wtype, tsType: T.ANY });
+	const param = (key: string, wtype: W.Type = W.REF_ANY) => ({ key, wtype });
 
 	// A `ref.test` chain: the first arm whose heap type `recv` passes runs with `recv` cast to it on the stack; a value passing none runs `otherwise`.
 	function emitTypeCascade(ctx: FunctionContext, recv: number, arms: { heap: wasm.HeapType; emit: () => void }[], otherwise: () => void, result?: W.Type): void {
@@ -9303,7 +9303,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// A struct cannot lose a slot, so `delete` stores `undefined` in a field, as a typed `delete` does; a dynamic object drops its entry.
 	function ensureAnyKey(kind: 'get' | 'set' | 'delete'): FuncInfo {
 		return synthesize(`<any key ${kind}>`, () => ({
-			params: [anyParam('recv'), { key: 'key', wtype: typeOf(T.STRING)!, tsType: T.STRING }, ...(kind === 'set' ? [anyParam('value', W.REF_ANY_NULLABLE)] : [])],
+			params: [param('recv'), param('key', typeOf(T.STRING)!), ...(kind === 'set' ? [param('value', W.REF_ANY_NULLABLE)] : [])],
 			result: kind === 'get' ? W.REF_ANY_NULLABLE : kind === 'delete' ? 'i32' : 'void' as W.Type,
 		}), (dctx, [recv, key, value], { result }) => {
 			const keyArg		= localArg(dctx, key, typeOf(T.STRING)!);
@@ -9351,7 +9351,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// any other key is the string key JS makes of it.
 	function ensureAnyIndex(kind: 'get' | 'set'): FuncInfo {
 		return synthesize(`<any index ${kind}>`, () => ({
-			params: [anyParam('recv'), { key: 'idx', wtype: 'f64' as W.Type, tsType: T.NUMBER }, ...(kind === 'set' ? [anyParam('value', W.REF_ANY_NULLABLE)] : [])],
+			params: [param('recv'), param('idx', 'f64'), ...(kind === 'set' ? [param('value', W.REF_ANY_NULLABLE)] : [])],
 			result: kind === 'get' ? W.REF_ANY_NULLABLE : 'void' as W.Type,
 		}), (dctx, [recv, idx, value], { result }) => {
 			const index		= localArg(dctx, idx, 'f64', T.NUMBER);
@@ -9404,7 +9404,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// `x.name` where `x` is genuinely `any`: a `ref.test` over every representation that declares `name`. Always `REF_ANY`, since the candidates' own
 	// types differ; a receiver declaring nothing is an object lacking it and reads `undefined`, while a NULL receiver, which JS throws on, traps.
 	function ensureAnyField(name: string): FuncInfo {
-		return synthesize(`<any field>.${name}`, () => ({ params: [anyParam('recv')], result: W.REF_ANY_NULLABLE }), (dctx, [recv], { result }) => {
+		return synthesize(`<any field>.${name}`, () => ({ params: [param('recv')], result: W.REF_ANY_NULLABLE }), (dctx, [recv], { result }) => {
 			const readOf = ({ heap, cls }: Receiver) => {
 				const idx = cls.fieldIndex.get(name);
 				if (idx !== undefined && cls.typeIndex !== -1)
@@ -9431,7 +9431,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// `x.name = v` where `x` is a union or `any`: the write side of `ensureAnyField`, over the struct-backed owners only (a field write needs a real
 	// `struct.set`). The value arrives boxed, as every expando field holds it. A receiver matching nothing traps: dropping a write silently is worse.
 	function ensureAnyFieldWrite(name: string): FuncInfo {
-		return synthesize(`<any field write>.${name}`, () => ({ params: [anyParam('recv'), anyParam('value', W.REF_ANY_NULLABLE)], result: 'void' as W.Type }), (dctx, [recv, value]) => {
+		return synthesize(`<any field write>.${name}`, () => ({ params: [param('recv'), param('value', W.REF_ANY_NULLABLE)], result: 'void' as W.Type }), (dctx, [recv, value]) => {
 			const owners	= distinctHeaps(dynamicReceivers(false).filter(r => r.cls.typeIndex !== -1 && r.cls.fieldIndex.has(name)));
 			const dynamic	= dynamicObjectArms(cls => {
 				emitCallOn(cls, 'set', [stringArg(dctx, name), localArg(dctx, value, W.REF_ANY_NULLABLE)], dctx);
@@ -9449,7 +9449,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 
 	// `instanceof` a generic class: a `ref.test` over every instantiation of it reached.
 	function ensureInstanceTest(cls: ClassInfo): FuncInfo {
-		return synthesize(`<instanceof>.${homeKey(cls.homeModule ?? '.', cls.decl.name!)}`, () => ({ params: [anyParam('recv', W.REF_ANY_NULLABLE)], result: 'i32' as W.Type }), (dctx, [recv]) =>
+		return synthesize(`<instanceof>.${homeKey(cls.homeModule ?? '.', cls.decl.name!)}`, () => ({ params: [param('recv', W.REF_ANY_NULLABLE)], result: 'i32' as W.Type }), (dctx, [recv]) =>
 			emitTestsAny(dctx, recv, [...classes.values()].filter(c => c.typeIndex !== -1 && c.decl.name === cls.decl.name && c.homeModule === cls.homeModule).map(c => c.typeIndex)));
 	}
 
@@ -9459,10 +9459,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		const names = (cls: ClassInfo) => [...cls.fieldIndex.keys(), ...cls.getterNames ?? [], ...cls.methodDecls.keys()].filter(n => !n.startsWith('#'));
 		const has = (dctx: FunctionContext, key: HeldArg) => dynamicObjectArms(cls => coerceTop(emitCallOn(cls, 'has', [key], dctx), dctx, 'i32'));
 		if (name !== undefined)
-			return synthesize(`<any in>.${name}`, () => ({ params: [anyParam('recv', W.REF_ANY_NULLABLE)], result: 'i32' as W.Type }), (dctx, [recv], { result }) =>
+			return synthesize(`<any in>.${name}`, () => ({ params: [param('recv', W.REF_ANY_NULLABLE)], result: 'i32' as W.Type }), (dctx, [recv], { result }) =>
 				emitTypeCascade(dctx, recv, [...has(dctx, stringArg(dctx, name)), ...distinctHeaps(dynamicReceivers(false).filter(({ cls }) => names(cls).includes(name)))
 					.map(({ heap }) => ({ heap, emit: () => dctx.emit(I.drop, I.i32.const(1)) }))], () => dctx.emit(I.i32.const(0)), result));
-		return synthesize('<any in>', () => ({ params: [{ key: 'key', wtype: typeOf(T.STRING)!, tsType: T.STRING }, anyParam('recv', W.REF_ANY_NULLABLE)], result: 'i32' as W.Type }), (dctx, [key, recv], { result }) => {
+		return synthesize('<any in>', () => ({ params: [param('key', typeOf(T.STRING)!), param('recv', W.REF_ANY_NULLABLE)], result: 'i32' as W.Type }), (dctx, [key, recv], { result }) => {
 			const owners = distinctHeaps(dynamicReceivers(false).filter(({ cls }) => names(cls).length));
 			emitTypeCascade(dctx, recv, [...has(dctx, localArg(dctx, key, typeOf(T.STRING)!)), ...owners.map(({ heap, cls }) => ({ heap, emit: () => {
 				dctx.emit(I.drop);
@@ -9478,7 +9478,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// `Object.keys/values/entries(x)` where what fields exist is the receiver's RUNTIME type's (no field list, or a class extended somewhere). Deepest
 	// first, as a subclass passes its base's `ref.test` too. Only struct-backed classes have fields to list; `Map`'s `K[]`/`V[]` has no `any[]` form.
 	function ensureAnyEntries(which: 'entries' | 'keys' | 'values'): FuncInfo {
-		return synthesize(`<any ${which}>`, () => ({ params: [anyParam('recv')], result: W.ARRAY.ref }), (dctx, [recv], { result }) => {
+		return synthesize(`<any ${which}>`, () => ({ params: [param('recv')], result: W.ARRAY.ref }), (dctx, [recv], { result }) => {
 			const owners = distinctHeaps(dynamicReceivers(false).filter(({ cls }) => cls.typeIndex !== -1 && cls.decl.name !== 'Map' && W.isRef(cls.thisWtype))
 				.sort((a, b) => depthOf(b.cls) - depthOf(a.cls)));
 			emitTypeCascade(dctx, recv, [...dynamicObjectArms(cls => coerceTop(emitCallOn(cls, 'anyEntries', [stringArg(dctx, which)], dctx), dctx, result)),
@@ -9489,7 +9489,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// JS `===` when either side is a boxed `any`: a string or boxed primitive compares by VALUE, anything else by identity. Only kinds whose wasm type
 	// exists are tested -- a value of an absent kind can't be in the slot.
 	function ensureAnyStrictEq(): FuncInfo {
-		return synthesize('<any ===>', () => ({ params: [anyParam('a', W.REF_ANY_NULLABLE), anyParam('b', W.REF_ANY_NULLABLE)], result: 'i32' as W.Type }), (dctx, [a, b]) => {
+		return synthesize('<any ===>', () => ({ params: [param('a', W.REF_ANY_NULLABLE), param('b', W.REF_ANY_NULLABLE)], result: 'i32' as W.Type }), (dctx, [a, b]) => {
 			const arms: { heap: number; compare: wasm.Instr[] }[] = [];
 			if (types.hasArray('i16')) {
 				const heap = types.array('i16');
@@ -9541,7 +9541,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 
 	function ensureAnyCallDispatch(argWtypes: W.Type[], want: W.Type): FuncInfo {
 		return synthesize(`<any dispatch>.#call(${argWtypes.map(W.typeKey).join(',')})=>${W.typeKey(want)}`, () => ({
-			params: [anyParam('callee'), ...argWtypes.map((wtype, i) => anyParam(`arg${i}`, wtype))], result: want,
+			params: [param('callee'), ...argWtypes.map((wtype, i) => param(`arg${i}`, wtype))], result: want,
 		}), (dctx, [callee, ...args]) => {
 			const candidates = [...closureTypes.values()].filter(c => !c.sig.hasRest && c.sig.params.length >= argWtypes.length
 				&& argWtypes.every((w, i) => fits(w, c.sig.params[i])) && (want === 'void' || fits(c.sig.result, want))
@@ -9558,7 +9558,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// its static representation to that owner's parameter, and the result to what the call wants.
 	function ensureAnyDispatch(name: string, argWtypes: W.Type[], argTs: Type[], want: W.Type, ctx: FunctionContext): FuncInfo {
 		return synthesize(`<any dispatch>.${name}(${argWtypes.map(W.typeKey).join(',')})=>${W.typeKey(want)}`, () => ({
-			params: [anyParam('recv'), ...argWtypes.map((wtype, i) => ({ key: `arg${i}`, wtype, tsType: argTs[i] }))], result: want,
+			params: [param('recv'), ...argWtypes.map((wtype, i) => param(`arg${i}`, wtype))], result: want,
 		}), (dctx, [recv, ...args]) => {
 			// A candidate whose result cannot become what the call wants is never the one a correct program calls.
 			const methods = findAnyDispatchCandidates(name, argTs, ctx).filter(c => want === 'void' || fits(c.funcInfo.result, want));
@@ -9617,7 +9617,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			// `Array<T>.length`'s `u32` getter) and would box inconsistently. An optional field may be absent, so it widens as `addField` widens the field.
 			const declared	= resultTsType && typeOf(resultTsType) || W.REF_ANY;
 			const absent	= memberFields.some(f => !f.getter && f.cls.fields[f.fieldIdx].optional);
-			return { params: [anyParam('recv')], result: absent && declared !== 'void' ? types.nullable(declared) : declared, memberFields };
+			return { params: [param('recv')], result: absent && declared !== 'void' ? types.nullable(declared) : declared, memberFields };
 		}, (dctx, [recv], { result, memberFields }) => emitTypeCascade(dctx, recv, memberFields.map(f => ({ heap: f.cls.typeIndex, emit: () => {
 			if (f.getter)
 				emitMethodCall(f.cls, accessorKey('get', name), [], dctx);
@@ -9639,7 +9639,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					throw `internal: '${m.name}' (a member of a union type) has no '__get' method`;
 				return { cls: m, wtype: sig.result };
 			});
-			return { params: [anyParam('recv'), { key: 'idx', wtype: 'i32' as W.Type, tsType: T.NUMBER }], result: W.combineUnion(memberGets.map(m => m.wtype)), memberGets };
+			return { params: [param('recv'), param('idx', 'i32')], result: W.combineUnion(memberGets.map(m => m.wtype)), memberGets };
 		}, (dctx, [recv], { result, memberGets }) => emitTypeCascade(dctx, recv, memberGets.map(m => ({ heap: m.cls.typeIndex, emit: () => {
 			emitMethodCall(m.cls, '__get', [Identifier('$idx')], dctx);
 			coerceUnionArm(m.wtype, dctx, result);
@@ -9656,7 +9656,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			if (!base)
 				throw `internal: virtual dispatch requested for unknown method '${owner.name}.${name}'`;
 			return {
-				params: [anyParam('recv', owner.thisWtype!), ...base.params.map((wtype, i) => anyParam(`arg$${i}`, wtype))], result: base.result, base,
+				params: [param('recv', owner.thisWtype!), ...base.params.map((wtype, i) => param(`arg$${i}`, wtype))], result: base.result, base,
 				info: { params: base.params, defaults: base.defaults, hasRest: base.hasRest },
 			};
 		}, (dctx, [recv, ...args], { base }) => {
