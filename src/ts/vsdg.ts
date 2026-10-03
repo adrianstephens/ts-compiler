@@ -1,19 +1,8 @@
 // ===================================================================
 //  The TypeScript/JavaScript half of the language-neutral VSDG.
 // ===================================================================
-// This is the old monolithic ts/vsdg.ts, split by language: everything language-neutral moved to
-// ../vsdg.ts and everything TypeScript-shaped stayed here. Three pieces:
-//
-//   * `TSDialect`   -- how to walk this AST, and the few shape facts the core asks about;
-//   * `TSBuilder`   -- lowering: this AST's statement/expression tags onto graph nodes;
-//   * `TSEmitter`   -- reconstruction: graph nodes back onto this AST (JS/printer.ts prints it).
-//
-// plus, at the bottom, the pipeline entry points this language exposes:
-//
-//     BuildVSDG(ast) -> Optimize(graph) -> applyGlobalCodeMotion(graph) -> BuildProgram(graph, ...)
-//
-// Everything they call (`makeNode`/`connectValue`/`rebindVar`/`bindVar`/`buildLoop`/`walkBranch`/`mergeState`/
-// `reconcileVariables`/`buildFunctionBody`/`emitChain`/`resolveOperand`/...) is the core's.
+// The core (`../vsdg.ts`) plus three TypeScript-shaped pieces: `TSDialect` (shape facts the core asks), `TSBuilder` (lowering this AST's tags onto
+// graph nodes) and `TSEmitter` (reconstruction onto this AST); at the bottom the pipeline entry points, BuildVSDG -> Optimize -> GCM -> BuildProgram.
 
 import * as JS from './js-parser';
 import * as TS from './ts-parser';
@@ -45,8 +34,7 @@ const tsDialect: Dialect<Expr, Stmt, Type> = {
 	identifier(name) {
 		return Identifier(name);
 	},
-	// A 'floating' node's real discriminator is its own expr's type, except for these three, whose
-	// OPERATOR is what separates `a + b` from `a - b` (cheaper than printing either).
+	// A 'floating' node's discriminator is its expr's type, except these three, whose OPERATOR separates `a + b` from `a - b`.
 	exprKey(e) {
 		switch (e.type) {
 			case 'assign':
@@ -59,11 +47,8 @@ const tsDialect: Dialect<Expr, Stmt, Type> = {
 		return tocode.statement(s);
 	},
 	isCSEUnsafe(node) {
-		// 'this'/'super': identical structural key regardless of which method they're in, but each
-		// one's real value is bound per call, so merging them conflates two different receivers.
-		// 'array'/'object' get a fresh identity per evaluation in real JS, unlike a true literal.
-		// 'member'/'index' reads can observe an intervening mutation between two textually-identical
-		// occurrences.
+		// 'this'/'super' key alike in every method but are bound per call; 'array'/'object' are a fresh identity per evaluation; 'member'/'index'
+		// reads may observe a mutation between two identical-looking occurrences.
 		return node.type === 'floating' && ['array', 'object', 'index', 'this', 'super'].includes(node.expr.type);
 	},
 	foldable(e) {
@@ -94,13 +79,10 @@ const tsDialect: Dialect<Expr, Stmt, Type> = {
 //  Lowering
 // ===================================================================
 
-// Flattens this language's own parameter list into the core's neutral slots. A plain name gets its
-// own param node; a destructured one gets a hidden temp, plus the step that binds its names off that
-// temp -- a closure here rather than a `Dialect` question, because finishing a pattern is LOWERING:
-// it walks statements (see ParamSlot's own comment).
+// This language's parameter list as the core's neutral slots: a plain name its own param node, a destructured one a hidden temp plus the
+// step binding its names off it (a closure, since finishing a pattern walks statements: lowering, not a Dialect fact).
 function paramSlots(params: JS.Params<Type> | undefined, recurse: Recurse<Expr, Stmt>): ParamSlot[] | undefined {
-	// Only `key` is read: a plain parameter and the trailing rest differ elsewhere, and on both a key
-	// is either a name or a destructuring pattern.
+	// Only `key` is read: on a plain parameter and on the rest it is a name or a pattern.
 	const slot = (p: { key: string | JS.BindingTarget }): ParamSlot => {
 		const key = p.key;
 		return typeof key === 'string' ? { name: key }
@@ -160,10 +142,8 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				return false;
 
 			case 'return': {
-				// The marker carries its value directly at port 1 (unconnected for bare `return;`)
-				// rather than through scope -- scope can't represent "hasn't returned yet, keep
-				// going". `exited = true` makes 'if' build a real gamma around this path instead, so
-				// each return prints itself, in place, with no value-merge needed here at all.
+				// The marker carries its value at port 1 (unconnected for a bare `return;`), not through scope, which cannot say "not returned yet";
+				// `exited` makes 'if' build a real gamma, so each return prints in place.
 				if (s.argument)
 					recurse.expression(s.argument);
 				const marker = this.makeMarker('EARLY_RETURN_MARKER');
@@ -174,9 +154,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				return false;
 			}
 			case 'throw': {
-				// Only an EXPLICIT throw is modeled -- a call inside `try` that might itself throw
-				// isn't a control-flow edge to `catch`; real JS's own exception routing handles
-				// that at runtime regardless, since nothing here reorders the try body's statements.
+				// Only an EXPLICIT throw is modelled; a call in `try` that may throw needs no edge, since nothing reorders the try body.
 				recurse.expression(s.argument);
 				const marker = this.makeMarker('THROW_MARKER');
 				this.connectEnd(marker);
@@ -185,14 +163,10 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				return false;
 			}
 			case 'break': {
-				// A labeled break can target an OUTER loop/switch, not just the nearest enclosing
-				// one -- not supported here (no label-aware target tracking exists), so flag it
-				// rather than silently mistargeting.
+				// A labeled break may target an OUTER loop/switch, which no target tracking here supports: flagged rather than mistargeted.
 				if (s.label)
 					console.log(`not handling labeled break`);
-				// No target-tracking needed: just mark `exited` (so enclosing `if`s treat this
-				// branch as not falling through) and leave a marker for the literal `break;` to
-				// print here -- real JS routes it to the nearest enclosing loop/switch at runtime.
+				// Marks `exited` (enclosing `if`s see the branch not falling through) and leaves a marker printing `break;`, which JS routes at run time.
 				this.connectEnd(this.makeMarker('BREAK_MARKER'));
 				this.exited = true;
 				this.brokeOut = true;
@@ -201,10 +175,8 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 			case 'continue': {
 				if (s.label)
 					console.log(`not handling labeled continue`);
-				// A real `for` loop's `update` still runs on `continue` -- but this is lowered onto
-				// the same while-shaped graph `while` uses, where a bare `continue;` would otherwise
-				// skip it. Re-walks a FRESH clone of `update` first (switch pushes nothing onto
-				// loopUpdateStack, so it's correctly transparent to a `continue` inside a case).
+				// A `for`'s `update` still runs on `continue`, but this lowers onto the while-shaped graph, where `continue;` would skip it: a FRESH clone
+				// of it is walked first (switch pushes nothing on loopUpdateStack, staying transparent to `continue`).
 				const forUpdate = this.loopUpdateStack[this.loopUpdateStack.length - 1];
 				if (forUpdate)
 					recurse.expression(structuredClone(forUpdate));
@@ -213,30 +185,22 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				return false;
 			}
 			case 'var_decl': {
-				// Each declarator's initializer is walked THEN immediately bound, one at a time --
-				// not all-then-all -- since real declarators in one statement bind strictly left to
-				// right (`let i = off, e = i + len;` needs `i` already in scope for `e`'s own read).
+				// Each declarator is walked THEN bound, one at a time, left to right (`let i = off, e = i + len;` needs `i` for `e`).
 				for (const v of s.declarations) {
 					if (typeof v.name === 'string') {
 						if (v.init)
 							recurse.expression(v.init);
-						// A dedicated wrapper node per declared variable, not an alias to the
-						// initializer's own node -- otherwise `let x = 5; let y = 5;` would bind both
-						// names to the same node, with no way to tell which name to print.
+						// A wrapper node per declared variable, never an alias to the initializer's node, or `let x = 5; let y = 5;` would share one.
 						const varNode = this.makeNode({type: 'var', name: v.name});
 						if (v.init)
 							connectValue(this.getExprNode(v.init), 0, varNode, 0);
 						varNode.declKind = s.kind;
 						varNode.typeAnnotation = v.typeAnnotation;
-						// A declaration is an observable event too, like a reassignment: without this,
-						// GCM could schedule `let a = 1;` after code that already reads `a`, since both
-						// look like ordinary data to the scheduler otherwise.
+						// A declaration is an observable event, as a reassignment is: else GCM could schedule `let a = 1;` after a read of `a`.
 						this.bindVar(varNode);
 					} else if (v.init) {
-						// Bind the real initializer to a hidden temp exactly once (patternBindings may
-						// read it multiple times, so it must never see an effectful expression
-						// directly), then desugar the pattern off that temp -- a nested pattern is
-						// handled for free by re-entering this same case for each flattened result.
+						// The initializer bound once to a hidden temp (patternBindings may read it several times), then the pattern desugared off it; a nested
+						// pattern re-enters this case.
 						const tempName = `__destructure${this.freshId()}`;
 						recurse.statement(JS.VarDecl<Type>(s.kind, JS.Var<Type>(tempName, v.init)) as Stmt);
 						for (const stmt of patternBindings(s.kind, v.name, Identifier(tempName)))
@@ -258,8 +222,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				recurse.expression(s.test);
 				const test		= this.getExprNode(s.test);
 				const parent	= this.getState();
-				// `recurse`, not `process`: a bare, non-block consequent (`if (x) let y = 1;`) still
-				// needs its own var_decl/if/while dispatch, which `process` alone wouldn't give it.
+				// `recurse`, not `process`: a bare consequent (`if (x) let y = 1;`) still needs its own dispatch.
 				const trueState		= this.walkBranch(parent, () => recurse.statement(s.consequent));
 				const falseState	= this.walkBranch(parent, () => { if (s.alternate) recurse.statement(s.alternate!); });
 				this.mergeState(parent, test, trueState, falseState);
@@ -277,20 +240,14 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				return false;
 
 			case 'for': {
-				// `for await...of` needs the async iterator protocol -- `await` has no dedicated
-				// case anywhere in this file, so it stays verbatim rather than silently dropping the
-				// loop and running its body once.
+				// `for await...of` needs the async iterator protocol, unmodelled here, so it stays verbatim rather than run its body once.
 				if (s.kind === 'of await') {
 					console.log(`not handling for-${s.kind}`);
 					return this.lowerVerbatim(s, process);
 				}
 				if (s.kind !== 'normal') {
-					// Desugars to the real synchronous iterator protocol, reusing buildLoop's
-					// existing while-shaped machinery: `const __iterN = iterable[Symbol.iterator]();
-					// while (true) { const __rN = __iterN.next(); if (__rN.done) break; binding =
-					// __rN.value; body }`. `for...in` reuses the same shape over `Object.keys(iterable)`
-					// (own enumerable keys only, not the full prototype-chain walk). No `forUpdate`:
-					// an ordinary `continue` already re-runs the advance, same as real for-of.
+					// Desugared to the synchronous iterator protocol over buildLoop: `const __iterN = iterable[Symbol.iterator](); while (true) { const __rN =
+					// __iterN.next(); if (__rN.done) break; binding = __rN.value; body }`; `for...in` over `Object.keys(iterable)`. `continue` re-runs the advance.
 					const suffix		= String(this.freshId());
 					const iterName		= `__iter${suffix}`;
 					const resultName	= `__r${suffix}`;
@@ -310,8 +267,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 					)), false);
 					return false;
 				}
-				// Run init once, before the loop, then desugar to `while (test) { body; update; }`,
-				// folding `update` into the body's own normal (non-continue) tail.
+				// `init` once, then `while (test) { body; update; }`, `update` on the body's normal tail.
 				if (s.init) {
 					if (s.init.type === 'var_decl')
 						recurse.statement(s.init);
@@ -325,9 +281,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 			}
 
 			case 'switch': {
-				// The cascade itself is the core's (`buildSwitch`); what follows is js/ts's spelling of the
-				// scaffolding it asks for. Note `continue` inside a case is routed past the switch to the
-				// enclosing loop, and an empty switch's own break_scope reconstructs to nothing.
+				// The cascade is the core's (`buildSwitch`); this is js/ts's scaffolding for it. `continue` in a case reaches the enclosing loop.
 				this.buildSwitch(recurse, s.discriminant, s.cases.map(c => ({
 					test: c.test,
 					body: () => { for (const stmt of c.consequent) recurse.statement(stmt); },
@@ -335,9 +289,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				return false;
 			}
 			case 'try': {
-				// A bare `try { } finally { }` (no catch) isn't attempted here -- there's no
-				// value to merge in that shape (nothing diverges, since only one path exists),
-				// which is a genuinely different, simpler case this doesn't cover yet.
+				// A bare `try { } finally { }` (no catch) is not attempted: nothing diverges there to merge.
 				const handler = s.handlers[0];
 				if (!handler) {
 					console.log(`not handling try without catch`);
@@ -345,18 +297,15 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				}
 				const parent = this.getState();
 
-				// Each branch gets its own dedicated start marker between the shared predecessor
-				// and its own walk -- without one, a branch's own first statement needing a real
-				// gamma/mu/break_scope/except would share the exact same predecessor as `except`.
+				// Each branch gets its own start marker after the shared predecessor, or a branch's first gamma/mu/break_scope/except would share `except`'s.
 				const startMarker = (pred: N, tag: 'TRY_START' | 'CATCH_START' | 'FINALLY_START') => {
 					const marker = this.makeMarker(tag);
 					connectValue(pred, 0, marker, 0);
 					return marker;
 				};
 
-				// Each branch gets TWO nested scopes: an outer one the reconciliation loop reads
-				// (matching if/else), and an inner one closeAndFlush()'d first so a `let`/const
-				// declared directly in the block/handler body doesn't leak into the outer bindings.
+				// Each branch gets TWO scopes: an outer one the reconciliation reads (as if/else), an inner one flushed first so a block-level `let`/`const`
+				// does not leak into the outer bindings.
 				this.setState(new Scope(parent.scope), startMarker(parent.end, 'TRY_START'));
 
 				this.scope = new Scope(this.scope);
@@ -367,8 +316,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 
 				this.setState(new Scope(parent.scope), startMarker(parent.end, 'CATCH_START'));
 				this.scope = new Scope(this.scope);
-				// For a destructured catch param, catchParamName is the hidden temp that actually
-				// prints in `catch (<here>)`, with the real pattern desugared right after.
+				// A destructured catch param prints as its hidden temp in `catch (<here>)`, the pattern desugared after it.
 				let catchParamName: string | undefined;
 				if (typeof handler.param === 'string') {
 					catchParamName = handler.param;
@@ -384,9 +332,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				this.scope = this.scope.closeAndFlush()!;
 				const catchState	= this.getState();
 
-				// Unlike an `if`'s gamma, this is never skipped even with no real effect in either
-				// branch -- try/catch is observable syntax in its own right, so it always needs a
-				// real anchor to reconstruct from.
+				// Never skipped like an `if`'s gamma: try/catch is observable syntax, which needs an anchor to reconstruct from.
 				const exc = this.makeNode({ type: 'except' });
 				if (catchParamName !== undefined)
 					exc.catchParam = catchParamName;
@@ -395,10 +341,8 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				connectValue(catchState.end, 0, exc, 2);
 				this.end = exc;
 
-				// Per-variable merges -- mirrors 'if', except neither branch's binding is ever
-				// cleared: there's no printable condition for a ternary, so each branch keeps (and
-				// force-prints) its own `x = ...;` under its own name, and the merge just connects
-				// both as real dependencies.
+				// Per-variable merges as 'if' makes them, except no branch's binding is cleared: with no condition to print, each branch force-prints its own
+				// `x = ...;` and the merge connects both.
 				this.scope = parent.scope;
 				const diverged = new Set([...tryState.scope.bindings.keys(), ...catchState.scope.bindings.keys()]);
 				for (const name of diverged) {
@@ -417,17 +361,14 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 					}
 				}
 
-				// `finally` runs after the merge, walked like ordinary code (not modeled at the
-				// graph level as "runs on every exit path" -- reconstructed as a real `finally`
-				// clause, real JS semantics already guarantee that on their own).
+				// `finally` runs after the merge, walked as ordinary code and reconstructed as a real `finally` clause (JS guarantees every exit runs it).
 				let finallyExited = false;
 				let finallyBrokeOut = false;
 				if (s.finalizer) {
 					this.end		= startMarker(exc, 'FINALLY_START');
 					this.exited		= false;
 					this.brokeOut	= false;
-					// Same reasoning as try/catch's own inner scope: a `let`/const in the finalizer
-					// shouldn't leak out, but an ordinary reassignment should still propagate.
+					// As try/catch's inner scope: a `let`/`const` in the finalizer stays local; a reassignment propagates.
 					this.scope		= new Scope(this.scope);
 					for (const stmt of s.finalizer)
 						recurse.statement(stmt);
@@ -438,8 +379,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 					connectValue(this.end, 0, exc, 3);
 					this.end = exc;
 				}
-				// A return/throw/break/continue inside `finally` itself overrides try/catch, so
-				// the WHOLE construct only falls through when finally (if present) does too.
+				// An exit inside `finally` overrides try/catch, so the construct falls through only when finally (if present) does.
 				this.exited = finallyExited || (tryState.exited && catchState.exited);
 				this.brokeOut = s.finalizer
 					? finallyBrokeOut
@@ -453,16 +393,11 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				break;
 
 			case 'export_decl': {
-				// `export class Foo {...}`/`export function f() {...}`/`export const x = 1;` --
-				// recursing here (rather than falling to `default:`, whose generic descent ALSO
-				// walks s.declaration independently) runs the declaration's own handler exactly
-				// once, avoiding a literal duplicate; `exported` is read back at that node's own
-				// print site to wrap it in `export `.
+				// `export class/function/const`: recursing here, rather than the default's generic descent that also walks `s.declaration`, runs its handler
+				// exactly once; `exported` is read at that node's print site.
 				recurse.statement(s.declaration);
 				if (s.declaration.type === 'var_decl') {
-					// `end` here is a MUTATION_MARKER wrapping only the LAST declarator's rebind --
-					// wrong for `export const a = 1, b = 2;` (every declarator needs the flag), so
-					// each declared name's real node is looked up directly from scope instead.
+					// `end` wraps only the LAST declarator's rebind, so each declared name's node is looked up in scope for the flag.
 					for (const v of s.declaration.declarations)
 						if (typeof v.name === 'string')
 							this.scope.get(v.name)!.exported = 'named';
@@ -473,12 +408,8 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 			}
 
 			case 'import': {
-				// Each bound name (namespace/default/named specifiers) gets its own declKind-less,
-				// never-bound 'var' node (same shape externalNodes uses, so it never gets its
-				// own declaration statement -- the import's own passthru node declares it) with a
-				// threadMutation anchor right after that passthru, so GCM can never place a read
-				// earlier than the import that provides it. A type-only import binds no real
-				// runtime value, so it's skipped.
+				// Each bound name gets a never-declared 'var' node (as `externalNodes`; the import's passthru declares it), anchored after that passthru so
+				// GCM never reads it earlier. A type-only import binds nothing.
 				this.lowerVerbatim(s, process);
 				if (!s.typeOnly) {
 					const bindImport = (name: string) => {
@@ -498,10 +429,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 			}
 
 			case 'export': {
-				// `export default class Foo {...}`/`function f() {...}` -- same double-processing
-				// risk and fix as export_decl above. A plain-expression default, or a re-export
-				// with no `default` (referencing only already-declared bindings by name), needs no
-				// VSDG resolution, so it prints verbatim.
+				// `export default class/function`: as export_decl above. A plain-expression default, or a re-export, prints verbatim.
 				if (s.default !== undefined && (isJsStatement(s.default) || isTsDeclaration(s.default))) {
 					recurse.statement(s.default);
 					this.end.exported = 'default';
@@ -512,10 +440,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 			}
 
 			case 'class_decl': {
-				// Its own dedicated type tag (not a bare 'passthru', which would need a runtime
-				// value-shape check to tell "resolved class" from "verbatim") makes "always needs
-				// rebuildClass" a property of the node itself. Anchored as a statement, not an
-				// 'effect' ('class' the expression uses that), since it produces no value.
+				// Its own tag (not 'passthru') makes "always needs rebuildClass" a property of the node; anchored as a statement, producing no value.
 				const node = this.makeNode({type: 'class_decl', stmt: s});
 				node.classInfo = this.buildClass(recurse, node, s);
 				this.connectEnd(node);
@@ -523,9 +448,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 			}
 
 			default:
-				// Anything this dialect doesn't model (`labeled`, `with`, `debugger`, an ambient
-				// declaration, ...) prints verbatim; an unreferenced declaration is otherwise an
-				// unanchored island nothing schedules.
+				// Anything this dialect does not model (`labeled`, `with`, `debugger`, an ambient declaration) prints verbatim, anchored.
 				this.lowerVerbatim(s, process);
 				return false;
 		}
@@ -535,9 +458,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 	lowerExpression(s: Expr, process: (e: Expr) => boolean, recurse: Recurse<Expr, Stmt>): boolean {
 		switch (s.type) {
 			case 'literal': {
-				// No dedicated tag: a literal is just a 'floating' node whose own expr is this AST's
-				// literal form -- which is what the dialect's `literalValue` reads back out, and what
-				// foldConstants folds a binary/unary into in place (same shape, no rewiring).
+				// A literal is a 'floating' node whose expr is this AST's literal form: what `literalValue` reads, and what foldConstants folds into in place.
 				this.makeExprNode(s);
 				return false;
 			}
@@ -551,8 +472,8 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 
 			case 'super':
 			case 'this': {
-				// Unlike 'identifier', `this`/`super` have no scope lookup -- they need a real node registered here, or any consumer throws "missing node" looking one up.
-				// See scopeAnchorId's own comment -- without this, a this-derived value GCM forces to materialize has nothing to floor it, escaping its own function/class.
+				// `this`/`super` have no scope lookup, so they get a node here, floored to their function by scopeAnchorId (a materialized this-derived value
+				// could otherwise escape it).
 				this.makeExprNode(s).scopeAnchorId = this.currentFunctionEntry?.id;
 				return false;
 			}
@@ -575,8 +496,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 					if (s.operand.type === 'identifier') {
 						this.rebindVar(s.operand.name, node);
 					} else {
-						// A property/index target mutates something outside this pass's own scope tracking -- same reasoning as unary_post's own non-identifier branch below:
-						// nothing reads this back through scope, so needsTemp would drop it entirely.
+						// A property/index target mutates outside this pass's scope tracking: nothing reads it back through scope, so needsTemp would drop it.
 						node.forcedPrint = true;
 						this.threadMutation(node);
 					}
@@ -584,17 +504,14 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				return false;
 			}
 			case 'unary_post': {
-				// The non-null assertion (`expr!`) shares the `unary_post` AST shape with a real mutating postfix `++`/`--`, but has no runtime effect at all
-				// -- alias straight through, no new node, no old-value snapshot, no rebind.
+				// `expr!` shares `unary_post`'s shape with `++`/`--` but has no runtime effect: aliased straight through.
 				if (s.operator === '!') {
 					process(s);
 					this.expnodes.set(s, this.getExprNode(s.operand));
 					return false;
 				}
-				// Unlike prefix, `i++`/`i--` evaluates to the OLD value -- can't alias to the operand's
-				// own node, since that stays reachable by name after the rebind and would silently
-				// pick up the NEW value. A dedicated snapshot node, threaded before the rebind, pins
-				// both its identity and schedule position to this exact moment.
+				// `i++` evaluates to the OLD value, so it cannot alias the operand's node, reachable by name after the rebind: a snapshot node, threaded before
+				// the rebind, pins its value and schedule.
 				process(s);
 				const operandNode	= this.getExprNode(s.operand);
 				const oldNode		= this.makeExprNode(s, 'unary_post_old' as 'floating');
@@ -603,18 +520,13 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 
 				const node = this.makeNode({ type: 'unary_post', expr: s });
 				connectValue(operandNode, 0, node, 0);
-				// Scheduling-only (see the core's own INVARIANT): the snapshot must be READ before the
-				// increment runs, and the mutation marker alone only floors it -- nothing stops GCM
-				// sinking the snapshot down to its consumer, past the increment, turning `g(i++)` into
-				// `g(<new i>)`. Making the increment a consumer pins the snapshot above it.
+				// Scheduling-only (the core's INVARIANT): the snapshot must be READ before the increment, and the marker only floors it; the increment
+				// consuming it stops GCM sinking it past (`g(i++)` reading the new `i`).
 				connectValue(oldNode, 0, node, 1);
 				if (s.operand.type === 'identifier') {
 					this.rebindVar(s.operand.name, node);
 				} else {
-					// A property/index target mutates something outside this pass's own scope
-					// tracking, with no name to rebind -- oldNode's own "materialize only if read"
-					// rule covers the snapshot, but says nothing about the mutation ITSELF still
-					// needing to run, so it gets its own forced anchor too.
+					// A property/index target has no name to rebind: the snapshot materializes if read, and the mutation itself gets a forced anchor.
 					node.forcedPrint = true;
 					this.threadMutation(node);
 				}
@@ -629,17 +541,12 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				connectValue(this.getExprNode(s.target), 0, node, 0);
 				connectValue(this.getExprNode(s.value), 0, node, 1);
 				if (s.target.type === 'identifier') {
-					// Reassigning a variable CAPTURED from an enclosing function is an effect
-					// that escapes this function -- its real consumer may be a not-yet-run
-					// caller, so a same-region consumer count can't decide it's dead/inlinable.
+					// Reassigning a variable CAPTURED from an enclosing function escapes it: its consumer may be a later caller, so no consumer count decides.
 					if (!this.scope.isLocalToCurrentFunction(s.target.name))
 						node.forcedPrint = true;
 					this.rebindVar(s.target.name, node);
 				} else {
-					// A property/index assignment mutates something outside this pass's scope
-					// tracking -- threadMutation anchors it (no name to bind); forcedPrint keeps
-					// it printing regardless of consumer count, since nothing reads it back
-					// through scope the way a bound variable would.
+					// A property/index assignment mutates outside this pass's scope tracking: threadMutation anchors it, forcedPrint keeps it printing.
 					node.forcedPrint = true;
 					this.threadMutation(node);
 				}
@@ -655,28 +562,22 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				return false;
 			}
 			case 'call': {
-				// 1. Thread the State Edge to preserve sequence
 				process(s);
-				// TEMPORARY placeholder for real purity analysis: a callee name starting with
-				// "pure" is treated as pure for testing, nothing to do with actual purity.
+				// TEMPORARY stand-in for purity analysis: a callee name starting with "pure" is treated as pure, for testing only.
 				const pure = s.callee.type === 'identifier' && s.callee.name.startsWith('pure');
 				const node = pure ? this.makeExprNode(s) : this.makeExprNode(s, 'effect');
 				if (!pure)
 					this.connectEnd(node); // Slot 0 = Input State
 
-				// 2. Thread Value Edges for the function arguments
 				s.arguments.forEach((arg, index) => connectValue(this.getExprNode(arg), 0, node, index + 1));
 
-				// The callee prints verbatim, unresolved -- but a bare identifier callee still needs
-				// a real graph edge, purely so hasRealConsumer sees it: without one, `const g =
-				// makeThing(); g();` looks like `g` is never read, and gets dropped as dead.
+				// The callee prints verbatim, but a bare identifier callee needs a real edge so hasRealConsumer sees it (`const g = makeThing(); g();`).
 				connectValue(this.getExprNode(s.callee), 0, node, s.arguments.length + 1);
 				return false;
 			}
 
 			case 'new': {
-				// Always treated as an effect, like an impure call -- a constructor can run
-				// arbitrary code, so there's no equivalent of `call`'s "pureFoo" opt-in here.
+				// An effect, like an impure call: a constructor can run arbitrary code.
 				process(s);
 				const node = this.makeExprNode(s, 'effect');
 				this.connectEnd(node);
@@ -686,7 +587,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				return false;
 			}
 			case 'yield': {
-				// Treated as an effect, like an impure call -- the only thing that matters here is that a yield never gets reordered relative to other effects
+				// An effect: a yield is never reordered against other effects.
 				process(s);
 				const node = this.makeExprNode(s, 'effect');
 				this.connectEnd(node);
@@ -695,8 +596,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				return false;
 			}
 			case 'tagged_template': {
-				// Desugars to calling `tag` with a strings array plus each interpolated expression --
-				// effectful like an ordinary impure call. Only the interpolated `.exp`s need threading; the literal string parts carry through in node.expr unchanged.
+				// Calls `tag` with a strings array and each interpolation, an effect; only the `.exp`s are threaded.
 				process(s);
 				const node = this.makeExprNode(s, 'effect');
 				this.connectEnd(node);
@@ -715,15 +615,14 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				return false;
 			}
 			case 'class': {
-				// A class expression's own definition can run arbitrary code (a computed key, or the heritage clause, can call out) -- always order-anchored, like 'new'
+				// A class expression can run code (a computed key, the heritage clause): always order-anchored, like 'new'.
 				const node = this.makeExprNode(s, 'effect');
 				node.classInfo = this.buildClass(recurse, node, s);
 				this.connectEnd(node);
 				return false;
 			}
 			case 'jsx': {
-				// Desugars to a factory call at runtime -- effectful for the same reason 'call' is.
-				// `name` and each attribute's own key are compile-time metadata, unchanged.
+				// A factory call at run time, an effect; `name` and attribute keys are compile-time metadata.
 				process(s);
 				const node = this.makeExprNode(s, 'effect');
 				this.connectEnd(node);
@@ -739,9 +638,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 			case 'function': {
 				if (!s.body)
 					return false;
-				// Same 'function' entry a declaration gets, but with `.expr` set -- marks it a
-				// printable value (prints `.expr` verbatim, GCM never moves function bodies).
-				// expnodes.set lets a later getExprNode(s) find this node.
+				// A declaration's 'function' entry with `.expr` set: a printable value (verbatim; GCM never moves bodies), registered for getExprNode.
 				const entry = this.buildFunctionBody(recurse, paramSlots(s, recurse), s.body);
 				entry.expr = s;
 				this.expnodes.set(s, entry);
@@ -783,10 +680,8 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				return false;
 			}
 			case 'object': {
-				// A field/spread property threads a real value port, index-matched against s.properties.
-				// A method/get/set gets its own function-scoped subgraph (entryNodeId, no graph edge of its own -- see buildClass) stored on classInfo instead --
-				// invisible to a generic graph walk like isPureSubgraph, so any object literal with a method is tagged 'effect' unconditionally, like a class expression, so it's never
-				// treated as freely inlinable/duplicable the way an ordinary pure value safely is.
+				// A field or spread threads a value port, index-matched to `s.properties`; a method/get/set gets its own function subgraph on classInfo,
+				// invisible to a generic walk like isPureSubgraph, so a literal with a method is an 'effect', never freely inlined.
 				const hasMethod = s.properties.some(p => p.type === 'method' || p.type === 'get' || p.type === 'set');
 				const node		= this.makeExprNode(s, hasMethod ? 'effect' : 'floating');
 				if (hasMethod)
@@ -822,10 +717,7 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 				return false;
 			}
 			case 'spread':
-				// A bare spread node is only ever reached as an OPERAND of something else (a call
-				// argument, an array/object element) -- never a standalone expression -- so it just
-				// needs a real node to be addressable BY those consumers via getExprNode/connectValue,
-				// carrying its own operand as a value input the same way 'unary' does.
+				// A spread is only reached as an OPERAND (an argument, an element): it needs a node addressable by its consumers, its operand an input.
 				process(s);
 				connectValue(this.getExprNode(s.operand), 0, this.makeExprNode(s), 0);
 				return false;
@@ -833,15 +725,13 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 			case 'as':
 			case 'satisfies':
 			case 'instantiation':
-				// Pure type-level annotation, no runtime effect -- alias straight through to
-				// whatever the wrapped expression resolves to instead of allocating a new node.
+				// A type-level annotation with no runtime effect: aliased straight through.
 				process(s);
 				this.expnodes.set(s, this.getExprNode(s.expression));
 				return false;
 
 			case 'sequence':
-				// `(a, b, c)` evaluates all three in order but its own value is only the last --
-				// without registering that, reading the sequence's own result throws "missing node".
+				// `(a, b, c)` evaluates all three in order, its value the last's.
 				process(s);
 				this.expnodes.set(s, this.getExprNode(s.expressions.at(-1)!));
 				return false;
@@ -851,11 +741,8 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 
 	// ---- things only a class/object literal needs ----
 
-	// Heritage and every member's own computed key are real expressions that can call out -- resolved
-	// through VSDG (not a print-blind generic walk) so a referenced outer variable isn't silently
-	// inlined/orphaned away. Each resolved value gets a REAL graph edge into `anchor` (ports 1.., 0
-	// being the state predecessor): classInfo's own NodeId references alone are invisible to
-	// ordinary consumer counting, so without an edge the value would look unused.
+	// Heritage and computed keys are expressions that can call out, resolved through VSDG so a referenced outer variable is not orphaned. Each gets
+	// a REAL edge into `anchor` (ports 1..; 0 is the state predecessor): classInfo's NodeIds alone are invisible to consumer counting.
 	buildClass(recurse: Recurse<Expr, Stmt>, anchor: N, s: { superClass?: JS.Expr<any>; body: JS.ClassMember<any>[] }): ClassInfo {
 		let port = 1;
 		let superClassNodeId: NodeId | undefined;
@@ -867,13 +754,10 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 		}
 		return {
 			superClassNodeId,
-			// Two ports per member (key, static field value) -- unused ones (a non-computed key, a
-			// non-static/non-field member) just go unclaimed, harmless.
+			// Two ports per member (key, static field value); unused ones go unclaimed.
 			members: s.body.map(m => {
 
-				// A computed member key is a real expression, resolved through VSDG like any other and
-				// wired into `anchor` at the next free port -- same reasoning as buildClass's own
-				// comment above (a phantom, edge-less reference would look unused).
+				// A computed key resolves through VSDG and is wired into `anchor` at the next port, as above.
 				let keyNodeId;
 				if ('key' in m && typeof m.key === 'object') {
 					const expr = m.key.computed;
@@ -894,19 +778,14 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 						if (!m.value)
 							return { keyNodeId };
 						if (m.modifiers?.includes('static')) {
-							// A static field's initializer runs once, at class-definition time, same as
-							// heritage/keys -- resolved and wired into `anchor` at its own port for the same
-							// reason (without a real edge, it's a phantom reference that looks unused).
+							// A static field's initializer runs once, at definition time: resolved and wired into `anchor` as heritage and keys are.
 							recurse.expression(m.value);
 							const valueNode = this.getExprNode(m.value);
 							connectValue(valueNode, 0, anchor, port++);
 							return { keyNodeId, valueNodeId: valueNode.id };
 						}
-						// An INSTANCE field's initializer runs once per `new`, not at class-definition time --
-						// threading it into the outer chain directly would wrongly force it into a single,
-						// one-time position. Reuses buildFunctionBody wholesale (own entry/return-anchor
-						// pair, no params), `m.value` as an expression body -- the emitter's own
-						// resolveFieldInitializer reads the resolved value straight off returnNode's port 1.
+						// An INSTANCE field's initializer runs once per `new`: its own function subgraph (no params, `m.value` as an expression body), whose resolved
+						// value `resolveFieldInitializer` reads off the return node's port 1.
 						return { keyNodeId, entryNodeId: this.buildFunctionBody(recurse, undefined, m.value).id };
 					}
 					default:
@@ -919,11 +798,8 @@ export class TSBuilder extends VSDGBuilder<Expr, Stmt, Type> implements SwitchSy
 	}
 }
 
-// Desugars a destructuring BindingTarget into flat var_decls reading off valueExpr -- which MUST
-// already be a stable, side-effect-free reference, never the raw initializer (a pattern reads its
-// value multiple times). Reuses transform.ts's own version (shared with wasm-backend.ts) rather than a
-// second copy; wrapped in try/catch since it hard-throws on two gaps (object rest, computed key)
-// this file otherwise degrades gracefully on -- accepted since both are already rare.
+// A destructuring desugared into flat var_decls off `valueExpr`, which MUST be a stable reference (a pattern reads it several times). transform.ts's
+// version, shared with codegen; it throws on two rare gaps (object rest, computed key), caught here.
 function patternBindings(kind: JS.DeclarationKind, target: JS.BindingTarget, valueExpr: Expr): Stmt[] {
 	try {
 		return buildPatternBindings(kind, target, valueExpr);
@@ -951,12 +827,10 @@ export class TSEmitter extends Emitter<Expr, Stmt, Type> {
 
 	// ---- statement constructors ----
 
-	// `undefined` is "no body at all" (an absent `else`), which stays absent; an EMPTY array is a
-	// genuinely empty body, which a braced block still spells out.
+	// `undefined` is no body (an absent `else`); an EMPTY array a genuinely empty one, which a braced block still spells.
 	makeBlock(body: Stmt[] | undefined) { return body === undefined ? undefined : Block(...body); }
 
-	// JS/C bodies are ONE statement in the slot -- a `Block` when the source braced it, so the
-	// braced/un-braced distinction survives -- which is why the dialect, not the core, wraps here.
+	// A JS/C body is ONE statement (a `Block` when braced, so the distinction survives): the dialect wraps, not the core.
 	makeSwitch(discriminant: Expr, cases: { test?: Expr, consequent: Stmt[] }[]): Stmt {
 		return JS.Switch(discriminant, ...cases);
 	}
@@ -990,27 +864,22 @@ export class TSEmitter extends Emitter<Expr, Stmt, Type> {
 					return JS.VarDecl(declKind, JS.Var(name, undefined, node.typeAnnotation));
 
 				const forced = this.hasForcedSibling(name, node.id);
-				// The initializer needn't print under x's name -- nothing reads x's value, or its sole
-				// reader recomputes the pure initializer inline (an effectful dead one still runs, emitted
-				// separately as an effect). A forced sibling reads x by name, so then x keeps its value.
+				// The initializer need not print under the name: nothing reads it, or its sole reader recomputes the pure initializer (an effectful dead one
+				// still runs, as an effect). A forced sibling reads it by name, so then it keeps its value.
 				if (!this.graph.hasRealConsumer(node) || (this.isInlinableVarDecl(node) && !forced)) {
-					// Keep a bare `let x;` only when the binding is still needed -- an export, or a forced
-					// sibling assigning x. (`const x;` is syntax-invalid, downgrade to `let`.)
+					// A bare `let x;` only when the binding is still needed (an export, a forced sibling); `const x;` is invalid, so `let`.
 					return node.exported || forced
 						? JS.VarDecl(node.declKind === 'const' ? 'let' : declKind, JS.Var(name, undefined, node.typeAnnotation))
 						: undefined;
 				}
-				// The FIRST emit of a real source variable is its declaration; every emit after is a plain
-				// reassignment (`first` is captured before the add at the top).
+				// The FIRST emit of a source variable is its declaration, later ones plain reassignments.
 				const expr = this.resolveOperand(node.id, 0);
 				return first
 					? JS.VarDecl(declKind, JS.Var(name, expr, node.typeAnnotation))
 					: ExprStmt(Assign<Expr, JS.assignableOps>(Identifier(name), expr));
 			}
 			if ((node.type === 'mutation' && node.expr.type === 'unary') || node.type === 'unary_post') {
-				// A prefix or postfix ++/-- already performs its own assignment as a side effect -- printed
-				// as a bare expression statement, `++i;`/`i++;` is both correct and sufficient. Wrapping it
-				// in a reassignment would give a redundant self-assignment: `i = ++i;`/`i = i++;`.
+				// A ++/-- already assigns: printed bare (`i++;`), never as `i = i++;`.
 				return ExprStmt(this.rebuildPayload(node));
 			}
 			return ExprStmt(Assign<Expr, JS.assignableOps>(Identifier(name), this.buildExpr(node)));
@@ -1027,9 +896,7 @@ export class TSEmitter extends Emitter<Expr, Stmt, Type> {
 			case 'unary_post':
 				return { ...(node.expr as Extract<Expr, {type: 'unary_post'}>), operand: this.resolveTarget(node.id, 0) };
 			case 'unary_post_old':
-				// resolveOperand, NOT resolveTarget: the snapshot's whole job is to freeze the value
-				// BEFORE the increment, so it must share the target's own materialised read rather
-				// than evaluating the property a second time (which `freshTarget` forces).
+				// resolveOperand, NOT resolveTarget: the snapshot freezes the value BEFORE the increment, sharing the target's read, not reading it again.
 				return this.resolveOperand(node.id, 0);
 			case 'member':
 				return JS.Member(this.resolveOperand(node.id, 0), node.name, node.optional);
@@ -1044,8 +911,7 @@ export class TSEmitter extends Emitter<Expr, Stmt, Type> {
 		return Literal(null);
 	}
 
-	// A mutation read as a VALUE rather than printed as its own statement -- only the value it
-	// produces is wanted, and a member/index target must rebuild fresh (see resolveTarget).
+	// A mutation read as a VALUE: only its value, a member/index target rebuilt fresh (resolveTarget).
 	rebuildMutationValue(node: NOf<'mutation'>): Expr {
 		const expr = node.expr;
 		switch (expr.type) {
@@ -1070,8 +936,7 @@ export class TSEmitter extends Emitter<Expr, Stmt, Type> {
 			: this.rebuildPayload(node));
 	}
 
-	// Every ordinary, genuinely pure value-producing expression shares the one 'floating' tag -- see
-	// the builder's own makeExprNode comment -- so node.expr's own .type picks the shape here.
+	// Every pure value-producing expression is 'floating' (`makeExprNode`), so `node.expr`'s type picks the shape.
 	rebuildFloating(node: N, expr: Expr): Expr {
 		switch (expr.type) {
 			case 'literal':
@@ -1091,9 +956,7 @@ export class TSEmitter extends Emitter<Expr, Stmt, Type> {
 		return Literal(null);
 	}
 
-	// Shared by buildObjectExpr's caller and the effect path below -- the reconstruction itself
-	// doesn't care which tag got it here, only whether classInfo has a resolved method body for
-	// this particular property.
+	// Shared by the floating and effect paths: what matters is whether classInfo has a resolved body for a property.
 	buildObjectExpr(node: N, expr: Expr & {type: 'object'}): Expr {
 		return {
 			...expr,
@@ -1111,12 +974,10 @@ export class TSEmitter extends Emitter<Expr, Stmt, Type> {
 	rebuildEffect(node: NOf<'effect'>): Expr {
 		const value = node.expr;
 		switch (value.type) {
-			// `await x` -- always has a real operand (unlike 'yield', which can be bare). The graph
-			// threads that operand at port 1, so the resolved one is what has to print.
+			// `await x` always has an operand, threaded at port 1: the resolved one prints.
 			case 'await':
 				return { ...value, operand: this.resolveOperand(node.id, 1) };
-			// A method/get/set-bearing object literal -- reconstructed via the same shared helper a
-			// field-only one uses; classInfo is what needs the graph, not the tag itself.
+			// A method-bearing object literal, through the same helper: classInfo needs the graph, not the tag.
 			case 'object':
 				return this.buildObjectExpr(node, value);
 			case 'yield':
@@ -1136,16 +997,11 @@ export class TSEmitter extends Emitter<Expr, Stmt, Type> {
 				};
 			}
 			case 'call': case 'new': {
-				// A call/new's own callee is normally left raw, unresolved -- wrong only when it embeds
-				// a real effect (e.g. `new Point(3,4).sum()`), since the graph also threads that effect
-				// into the state chain as its own node, and printing raw source there would duplicate
-				// its execution. Reuses the same edge added for consumer-counting (the builder's own
-				// 'call'/'new' cases) rather than a second way to reach the callee's node.
+				// A call's callee prints raw, wrong only when it embeds an effect (`new Point(3,4).sum()`), which the graph threads as its own node:
+				// the counting edge reaches that node instead.
 				const calleeEdge = node.inputs[value.arguments.length + 1];
 				const calleeNode = calleeEdge && this.graph.get(calleeEdge.nodeId);
-				// A PURE callee can still have been forced to materialize as its own named temp (e.g.
-				// hoisted loop-invariant) -- printing value.callee verbatim would duplicate the raw
-				// source instead of referencing that temp, discarding the point of hoisting it.
+				// A pure callee may have materialized as a named temp (hoisted loop-invariant): that temp prints, not the raw source.
 				const calleeTemp = calleeNode && this.nodeVariableNames.get(calleeNode.id);
 				const callee = calleeTemp ? Identifier(calleeTemp)
 					: calleeNode && !this.graph.isPureSubgraph(calleeNode) ? this.resolveNode(calleeNode.id) : value.callee;
@@ -1158,8 +1014,7 @@ export class TSEmitter extends Emitter<Expr, Stmt, Type> {
 
 	// ---- class / signature reconstruction ----
 
-	// A destructured param prints as its own hidden temp name in the SIGNATURE too, not just the
-	// body -- see destructuredParams. A no-op when this entry has no destructured params at all.
+	// A destructured param prints as its hidden temp in the SIGNATURE too (`destructuredParams`).
 	rebuildParams<T extends JS.Params<Type>>(raw: T, entryNode: NOf<'function'>): T {
 		if (!entryNode.destructuredParams)
 			return raw;
@@ -1170,9 +1025,8 @@ export class TSEmitter extends Emitter<Expr, Stmt, Type> {
 		return { ...raw, params: raw.params.map(rebuildKey), rest: raw.rest && rebuildKey(raw.rest) };
 	}
 
-	// Splices VSDG's own resolution of a class's heritage/keys/method bodies back into its otherwise
-	// verbatim member list. `raw` is loosely typed since both a class expression and a class_decl
-	// statement reach here, differing only in a few fields this never touches.
+	// Splices VSDG's resolution of heritage, keys and method bodies into the otherwise verbatim member list; a class expression and a class_decl
+	// both arrive, differing only in fields this never touches.
 	rebuildClass(raw: any, info: ClassInfo): any {
 		return {
 			...raw,
