@@ -5855,8 +5855,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		if (!closure && !W.isAny(w))
 			throw `'.call' needs a function value, got '${W.typeKey(w)}'`;
 		const n			= ctx.tempCounter++;
-		const fnName	= `$callfn$${n}`;
-		const fnLocal	= ctx.declareValue(fnName, w, ctx.narrowedTypeOf(fn));
+		const fnLocal	= ctx.declareLocal(`$callfn$${n}`, w);
 		ctx.emit(I.local.set(fnLocal.index));
 		const emitThis	= () => thisArg ? emitAs(thisArg, ctx, W.REF_ANY_NULLABLE) : ctx.emitDefaultValue(W.REF_ANY_NULLABLE, types, toValType);
 		if (closure) {
@@ -5870,7 +5869,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			emitThis();
 			ctx.emit(I.call(ensureAnyRebindThis().funcIndex), I.local.set(fnLocal.index));
 		}
-		return emitExpr(JS.Call(Identifier(fnName), args), ctx, want);
+		ctx.emit(I.local.get(fnLocal.index));
+		if (closure)
+			return emitClosureCall(w, sourceArgs('.call', w, args, ctx), ctx);
+		const info = ensureAnyCallDispatch(emitDynamicArgs(args, ctx), want ?? W.REF_ANY);
+		ctx.emit(I.call(info.funcIndex));
+		return info.result;
 	}
 
 	// The closure `held` with its env replaced by `envThis(thisVal)`: same code, same `length`.
