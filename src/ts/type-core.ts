@@ -65,7 +65,7 @@ export const tocode = printer({newline:'', indent:'', spaceAfterColon: false, sp
 // For messages: `typeKey` is an identity key, and a fluent builder's type prints exponentially larger than it is.
 export const show		= () => printer({ typeBudget: 4096 });
 export const showType	= (t: Type) => show().type(t);
-export function typeKey(t: Type) { const k = tocode.type(t); if (process.env.XK && k.length > 200000) { const st = new Error().stack!.split('\n').slice(2, 6).join(' | '); const g = ((globalThis as any).__xks ??= new Set()); if (g.size < 3 && !g.has(st)) { g.add(st); console.error('XKSTACK', k.length, st); } } return k; }
+export function typeKey(t: Type) { return tocode.type(t); }
 
 // A type's structural identity, linear in its DAG where `typeKey` prints the tree: a type naming a part twice at each of n steps
 // (`B<T & F<T>>`, chained) prints 2^n of it. Two independent 53-bit hashes over what `typeKey` prints, memoized on the node.
@@ -277,7 +277,6 @@ export function freeze(t: Type): Type {
 export interface NumRange { base: 'number' | 'bigint'; min?: number | bigint; max?: number | bigint; integer: boolean }
 
 export const isIntValue	= (v: number) => Number.isInteger(v) && !Object.is(v, -0);
-const holdsZero		= (r: NumRange) => (r.min === undefined || r.min <= 0) && (r.max === undefined || r.max >= 0);
 const holdsNegative	= (r: NumRange) => r.min === undefined || r.min < 0;
 
 // A machine type: what an application of the lib's `Int<Bits, Signed>` or `Float<Bits>` denotes.
@@ -431,7 +430,7 @@ export function rangeUnOp(op: JS.unaryOps, a: NumRange): NumRange | undefined {
 	switch (op) {
 		case '+':	return a;
 		case '-':	return {
-			base, integer: a.integer && (base === 'bigint' || !holdsZero(a)),
+			base, integer: a.integer && (base === 'bigint' || !rangeIncludesZero(a)),
 			min: a.max !== undefined ? negValue(a.max) : undefined,
 			max: a.min !== undefined ? negValue(a.min) : undefined
 		};
@@ -457,7 +456,7 @@ export function rangeBinOp(op: JS.binaryOps, a: NumRange, b: NumRange): NumRange
 			max: a.max !== undefined && b.min !== undefined ? subValue(a.max, b.min) : undefined };
 	}
 	function mul(a: NumRange, b: NumRange): NumRange | undefined {
-		const integer = a.integer && b.integer && (base === 'bigint' || !((holdsZero(a) && holdsNegative(b)) || (holdsZero(b) && holdsNegative(a))));
+		const integer = a.integer && b.integer && (base === 'bigint' || !((rangeIncludesZero(a) && holdsNegative(b)) || (rangeIncludesZero(b) && holdsNegative(a))));
 		if (a.min === undefined || a.max === undefined || b.min === undefined || b.max === undefined)
 			return { base, integer };
 		const corners = [mulValue(a.min, b.min), mulValue(a.min, b.max), mulValue(a.max, b.min), mulValue(a.max, b.max)];
@@ -475,9 +474,6 @@ export function rangeBinOp(op: JS.binaryOps, a: NumRange, b: NumRange): NumRange
 		case '-':	return sub(a, b);
 		case '*':	return mul(a, b);
 		case '/':	return div(a, b);
-		//case '<':	case '>': case '<=': case '>=':
-		//case '==':	case '!=':	case '===': case '!==':
-		//	return { base: 'number', integer: true, min: 0, max: 1 };
 		case '&':	case '|': case '^': case '<<': case '>>':
 			return base === 'number' ? { base, integer: true, min: -0x80000000, max: 0x7fffffff} : {base, integer: true};
 		case '>>>':
