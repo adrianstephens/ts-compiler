@@ -1517,15 +1517,11 @@ function classIdentity(stmtHomeModule: Map<object, string>, ref: TS.RefType, sco
 
 function collectExpandoFields(
 	stmtHomeModule: Map<object, string>,
-	moduleBodies: Map<string, Module>,
-	namedImportsByModule: Map<string, Map<string, {module: string; name: string }>>
+	moduleBodies: Map<string, Module>
 ) {
 	const accessorKeys = new Map<string, Set<string>>();
 	const pendingExtensions = new Map<string, string[] | 'dynamic'>();
 
-	// A local's declared ANNOTATION, by name: a parameter already types as its annotation, but `const p: P = {...}` types as the literal's inferred shape, its declared name gone, and only the local's name identifies the shape to grow.
-	// towasm's own local wtype comes from the annotation for exactly this reason. Not scope-precise: over-approximating adds an unused optional field, which costs a slot and breaks nothing.
-	const annots = new Map<string, Type>();
 	// Every member of a union gets the slot: the write lands on whichever one it turns out to be at runtime. A generic instantiation shares its shape's one struct, keyed by the bare name (`ensureObjectShape`); an array is `Array`'s.
 	// A structural shape (an interface, an alias, an inline object type) by its member names -- `shapeKey`, the identity `layoutTwin` merges by, so a named shape and its anonymous twin keep one layout; a class by name.
 	// A shape with no name (an inline object type) or a type parameter has nowhere to put one; nor has `{}`, whose empty literal is a dynamic object.
@@ -1550,109 +1546,50 @@ function collectExpandoFields(
 				pendingExtensions.set(name, [...new Set([...(prior ?? []), key])]);
 		}
 	};
-	// The RAW type, never `T.resolve`'s: resolving a ref expands it to its object shape and loses the NAME.
-	const note = (recv: Expr, key: string | undefined, scope: Scope, accessor = false) => {
-		const bare = unwrapAs(recv);
-		noteType((bare.type === 'identifier' ? annots.get(bare.name) : undefined) ?? checkerTypeOf(bare, scope), key, scope, accessor);
-	};
-	for (const [_, m] of moduleBodies) {
-		const modScope = m.scope as Scope;
-		if (!modScope)
-			continue;
-		// The checker stamps its scope on STATEMENTS, so the enclosing statement's scope is what types the receiver -- a parameter or a local is resolvable there and nowhere else.
-		// Tracked down the statement walk; the module scope is only the outermost fallback.
-		let scope = modScope;
-		walkerB(
-			(st, process) => {
-				const saved = scope;
-				scope = (st as unknown as { scope?: Scope }).scope ?? scope;
-				if (st.type === 'var_decl')
-					for (const d of st.declarations)
-						if (typeof d.name === 'string' && d.typeAnnotation)
-							annots.set(d.name, d.typeAnnotation);
-				const r = process(st);
-				scope = saved;
-				return r;
-			},
-			(e, process) => {
-				if (e.type === 'assign' && e.target.type === 'member') {
-					note(e.target.object, e.target.property, scope);
-				} else if (e.type === 'object') {
-					// A literal's own accessor: the shape it is built as -- where it flows, else its own type -- gets the key's companions.
-					for (const q of e.properties)
-						if ((q.type === 'get' || q.type === 'set') && typeof q.key !== 'object')
-							noteType(flowSlotOf(e)?.type ?? checkerTypeOf(e, scope), String(q.key), scope, true);
-				} else if (isDefinePropertyCall(e) && e.arguments[0]) {
-					const desc = e.arguments[2];
-					note(e.arguments[0], e.arguments[1]?.type === 'literal' && typeof e.arguments[1].value === 'string' ? e.arguments[1].value : undefined, scope,
-						desc?.type === 'object' && desc.properties.some(q => (q.type === 'field' || q.type === 'method') && (q.key === 'get' || q.key === 'set')));
-				} else {
-					const assign = objectAssignCall(e);
-					for (const w of assign?.writes ?? [])
-						note(assign!.target, w.key, scope);
-				}
-				return process(e);
-			}).statements(m.body);
-	}
-
 	// A key written onto a receiver whose static type names no struct -- a type parameter, `any`, `object` -- lands on whatever it holds at runtime, and only its SOURCES say what that is.
 	// So the receiver is followed backwards to types that name a struct -- with function values tracked, since a stamper passed as a value (`makeRule(stampPos)`) is called through a parameter.
 	// Flow- and context-insensitive: over-approximating only adds an unused optional slot. Not followed: a function value stored into an object or array field and called from there.
 	interface Fn		{ params: (Binding | undefined)[]; returns: Site[]; declaredReturn?: Type; callers: Set<Call> }
 	interface Binding	{ param?: { fn: Fn; index: number }; fn?: Fn; values: Site[]; declared?: Type; declScope?: Scope }
-	interface Container	{ parent?: Container; names: Map<string, Binding>; moduleId: string; fn?: Fn }
-	interface Site		{ e: Expr; c: Container; scope: Scope; from?: Fn }
+	interface Site		{ e: Expr; scope: Scope; from?: Fn }
 	interface Call		{ callee: Site; args: (Site | undefined)[] }
 
-	const fnOf			= new Map<object, Fn>();
-	const moduleOf		= new Map<object, string>();
-	const containerOf	= new Map<string, Container>();
-	const bindings: Binding[]	= [];
+	// By what the checker's scopes resolve a name to: a declarator or parameter, a function declaration, or (a named function
+	// expression's own name, which has neither) the scope declaring it.
+	const bindingAt	= new Map<object, Binding>();
+	const fnOf		= new Map<object, Fn>();
 	const calls: Call[]			= [];
 	const assigns: { target: Site; value: Site }[]	= [];
-	const seeds: { s: Site; key: string }[]			= [];
+	const writes: { s: Site; key?: string; accessor?: boolean }[]	= [];
 
-	const bindingIn = (c: Container, name: string): Binding => {
-		let b = c.names.get(name);
-		if (!b) {
-			c.names.set(name, b = { values: [] });
-			bindings.push(b);
-		}
-		return b;
-	};
-	const enter = (node: object, sig: TS.CallSig, c: Container, scope: Scope): Container => {
+	const bindingIn = (node: object): Binding => bindingAt.get(node) ?? (b => (bindingAt.set(node, b), b))({ values: [] });
+	const enter = (node: object, sig: TS.CallSig, scope: Scope): Fn => {
 		const contextual	= (node as { contextualType?: Type }).contextualType;
 		const fn: Fn		= { params: [], returns: [], callers: new Set(), declaredReturn: sig.returnType ?? (contextual?.type === 'function' ? contextual.returnType : undefined) };
 		fnOf.set(node, fn);
-		const inner: Container = { parent: c, names: new Map(), moduleId: c.moduleId, fn };
 		sig.params.forEach((p, index) => {
-			if (typeof p.key === 'string') {
-				const b: Binding = { param: { fn, index }, values: [], declared: p.typeAnnotation, declScope: scope };
-				inner.names.set(p.key, fn.params[index] = b);
-				bindings.push(b);
-			}
+			if (typeof p.key === 'string')
+				fn.params[index] = Object.assign(bindingIn(p), { param: { fn, index }, declared: p.typeAnnotation, declScope: scope });
 		});
-		return inner;
+		return fn;
 	};
 	// Some part of the receiver's own type names no struct, so its own type cannot say where the key lands.
 	const untyped = (recv: Expr, scope: Scope) => T.unionMembers(checkerTypeOf(unwrapAs(recv), scope), scope).some(m =>
 		m.type !== 'ref' || T.isAny(m) || m.name === 'object' || !!scope.type(m.name)?.isTypeParam);
 
-	for (const [moduleId, m] of moduleBodies) {
+	for (const m of moduleBodies.values()) {
 		const modScope = m.scope as Scope;
 		if (!modScope)
 			continue;
-		let c: Container = { names: new Map(), moduleId };
-		containerOf.set(moduleId, c);
-		for (const st of m.body)
-			moduleOf.set(st.type === 'export_decl' ? st.declaration : st, moduleId);
-		let scope = modScope;
-		const site = (e: Expr): Site => ({ e, c, scope });
-		const within = (inner: Container, process: () => boolean) => {
-			const saved = c;
-			c = inner;
+		let scope = modScope, current: Fn | undefined;
+		const site = (e: Expr): Site => ({ e, scope });
+		// A function's body, in the scope the checker stamped on it.
+		const within = (node: object, fn: Fn, process: () => boolean) => {
+			const saved = [scope, current] as const;
+			scope	= (node as { scope?: Scope }).scope ?? scope;
+			current	= fn;
 			const r = process();
-			c = saved;
+			[scope, current] = saved;
 			return r;
 		};
 		walkerB(
@@ -1661,22 +1598,22 @@ function collectExpandoFields(
 				scope = (st as unknown as { scope?: Scope }).scope ?? scope;
 				let r: boolean;
 				if (st.type === 'function_decl' && st.body) {
-					const inner = enter(st, st, c, scope);
-					bindingIn(c, st.name).fn ??= fnOf.get(st);
-					r = within(inner, () => process(st));
+					const fn = enter(st, st, scope);
+					bindingIn(st).fn ??= fn;
+					r = within(st, fn, () => process(st));
 				} else {
 					if (st.type === 'var_decl') {
 						for (const d of st.declarations) {
 							if (typeof d.name !== 'string')
 								continue;
-							const b = bindingIn(c, d.name);
+							const b = bindingIn(d);
 							b.declared ??= d.typeAnnotation;
 							b.declScope ??= scope;
 							if (d.init)
 								b.values.push(site(d.init));
 						}
-					} else if (st.type === 'return' && st.argument && c.fn) {
-						c.fn.returns.push(site(st.argument));
+					} else if (st.type === 'return' && st.argument && current) {
+						current.returns.push(site(st.argument));
 					}
 					r = process(st);
 				}
@@ -1685,11 +1622,11 @@ function collectExpandoFields(
 			},
 			(e, process) => {
 				if (e.type === 'arrow' || e.type === 'function') {
-					const inner = enter(e, e, c, scope);
-					const fn = fnOf.get(e)!;
-					if (e.type === 'function' && e.name)
-						inner.names.set(e.name, { fn, values: [] });
-					return within(inner, () => {
+					const fn = enter(e, e, scope);
+					const own = (e as { scope?: Scope }).scope?.parent;
+					if (e.type === 'function' && e.name && own)
+						bindingAt.set(own, { fn, values: [] });
+					return within(e, fn, () => {
 						if (e.type === 'arrow' && !Array.isArray(e.body))
 							fn.returns.push(site(e.body));
 						return process(e);
@@ -1697,50 +1634,55 @@ function collectExpandoFields(
 				}
 				if (e.type === 'call') {
 					calls.push({ callee: site(e.callee), args: e.arguments.map(a => a.type === 'spread' ? undefined : site(a)) });
-					const key = e.arguments[1];
-					if (isDefinePropertyCall(e) && e.arguments[0] && key?.type === 'literal' && typeof key.value === 'string' && untyped(e.arguments[0], scope))
-						seeds.push({ s: site(e.arguments[0]), key: key.value });
+					if (isDefinePropertyCall(e) && e.arguments[0]) {
+						const key = e.arguments[1], desc = e.arguments[2];
+						writes.push({ s: site(e.arguments[0]), key: key?.type === 'literal' && typeof key.value === 'string' ? key.value : undefined,
+							accessor: desc?.type === 'object' && desc.properties.some(q => (q.type === 'field' || q.type === 'method') && (q.key === 'get' || q.key === 'set')) });
+					}
 					const assign = objectAssignCall(e);
-					if (assign && untyped(assign.target, scope))
-						for (const w of assign.writes)
-							seeds.push({ s: site(assign.target), key: w.key });
-				} else if (e.type === 'assign') {
-					if (e.target.type === 'identifier')
-						assigns.push({ target: site(e.target), value: site(e.value) });
-					else if (e.target.type === 'member' && untyped(e.target.object, scope))
-						seeds.push({ s: site(e.target.object), key: e.target.property });
+					for (const w of assign?.writes ?? [])
+						writes.push({ s: site(assign!.target), key: w.key });
+				} else if (e.type === 'assign' && e.target.type === 'identifier') {
+					assigns.push({ target: site(e.target), value: site(e.value) });
+				} else if (e.type === 'assign' && e.target.type === 'member') {
+					writes.push({ s: site(e.target.object), key: e.target.property });
+				} else if (e.type === 'object') {
+					// A literal's own accessor: the shape it is built as -- where it flows, else its own type -- gets the key's companions.
+					for (const q of e.properties)
+						if ((q.type === 'get' || q.type === 'set') && typeof q.key !== 'object')
+							noteType(flowSlotOf(e)?.type ?? checkerTypeOf(e, scope), String(q.key), scope, true);
 				}
 				return process(e);
 			},
 			undefined,
 			(member, process) => (member.type === 'method' || member.type === 'get' || member.type === 'set') && 'body' in member && member.body
-				? within(enter(member, member as TS.CallSig, c, scope), () => process(member))
+				? within(member, enter(member, member as TS.CallSig, scope), () => process(member))
 				: process(member)
 		).statements(m.body);
 	}
 
-	const lookup = (name: string, c: Container): Binding | undefined => {
-		for (let k: Container | undefined = c; k; k = k.parent) {
-			const b = k.names.get(name);
-			if (b)
-				return b;
-		}
-		const imported = namedImportsByModule.get(c.moduleId)?.get(name);
-		return imported && containerOf.get(imported.module)?.names.get(imported.name);
+	const declared = (scope: Scope | undefined, name: string): Binding | undefined => {
+		const node = scope && (scope.declarator(name) ?? scope.decl(name) ?? scope.declaring(name));
+		return node && bindingAt.get(node);
 	};
 	// An identifier, or `NS.name` through an `import * as NS`.
-	const bindingOf = (s: Site, e: Expr): Binding | undefined => {
-		if (e.type === 'identifier')
-			return lookup(e.name, s.c);
-		if (e.type === 'member' && e.object.type === 'identifier' && !lookup(e.object.name, s.c)) {
-			const decl = s.scope.namespace(e.object.name)?.decl(e.property);
-			const home = decl && moduleOf.get(decl);
-			return home !== undefined ? containerOf.get(home)?.names.get(e.property) : undefined;
-		}
-		return undefined;
-	};
+	const bindingOf = (s: Site, e: Expr): Binding | undefined => e.type === 'identifier' ? declared(s.scope, e.name)
+		: e.type === 'member' && e.object.type === 'identifier' && !s.scope.declarator(e.object.name) ? declared(s.scope.namespace(e.object.name), e.property)
+		: undefined;
 	for (const { target, value } of assigns)
 		bindingOf(target, target.e)?.values.push(value);
+
+	// Each write lands on its receiver's type -- a local's annotation where it has one, since `const p: P = {...}` types as the
+	// literal's shape and loses `P`'s name; a receiver whose type names no struct is followed back to its sources below.
+	const seeds: { s: Site; key: string }[] = [];
+	for (const { s, key, accessor } of writes) {
+		const bare	= unwrapAs(s.e);
+		const b		= bindingOf(s, bare);
+		const local	= b && !b.param ? b.declared : undefined;
+		noteType(local ?? checkerTypeOf(bare, s.scope), key, local ? b!.declScope ?? s.scope : s.scope, accessor);
+		if (key !== undefined && untyped(s.e, s.scope))
+			seeds.push({ s, key });
+	}
 
 	// The functions each parameter or local may hold -- to a fixpoint, since a parameter holds what its callers
 	// pass, and who its callers are depends on which functions each callee expression may hold.
@@ -1799,7 +1741,7 @@ function collectExpandoFields(
 						hold(p, fnsOf(a));
 				});
 			}
-		for (const b of bindings)
+		for (const b of bindingAt.values())
 			for (const v of b.values)
 				hold(b, fnsOf(v));
 	}
@@ -9677,7 +9619,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	};
 	// A slot holding more than one array storage (`collectOpenShapes`) is stored as `any`, and so is what is read from it.
 	const openedAs = (d: Slot, t: Type) => openSlots.has(d) ? OPEN_SLOT : t;
-	const { accessorKeys, pendingExtensions } = collectExpandoFields(stmtHomeModule, moduleBodies, namedImportsByModule);
+	const { accessorKeys, pendingExtensions } = collectExpandoFields(stmtHomeModule, moduleBodies);
+
 
 	// Only *functions* are seeded across every module; a non-entry module's classes/scalar globals aren't yet
 	// module-scoped (`ensureClass`/`ensureGlobal` -- see `TStoWasm`'s header), so class/scalar promotion below stays entry-only.
