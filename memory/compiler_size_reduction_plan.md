@@ -120,6 +120,13 @@ pattern then checked by assignability, as TS) -- `matchInfer`, a second structur
 what only `matchInfer` had (array from tuple, `[H, ...R]`, a rest parameter against the argument's positions with a tuple
 rest expanded, call/construct signature members). Corpus GAP -27; ERROR +3, all real (promiseTry.ts lines under
 `@ts-expect-error`, unsupported: [[diagnostic-positions-are-lookahead]]).
+Family 2 (2026-10-02), identity = the declaration the checker's scope reaches: `resolvesGlobally` is "declared at or above the
+module's scope" (`Scope.declaring`): -15. `Scope.copy` and `hoist`'s `case 'import'` now carry the DECLARATOR across an import (an
+own value hid it), so `scope.declarator(name)` reaches a module const anywhere; `moduleBindings` (by declarator) replaces
+`topLevelVars` and `lazyGlobalFor`'s import branch: -11 (message says -12). `functionOf(name, scope)` (decl or promoted const's
+declarator -> `moduleFunctions`) replaces `resolveDecl`/`importedFunction`/per-site import lookups: -16; an imported promoted const
+is now called directly. Left: `collectExpandoFields`' import lookup, `stmtHomeModule`/`classIdentity`/`moduleTag` (class
+identity by module string), `funcs`/`functionDeclByName` keyed by `homeKey` strings, `LIB_DECL_MAP` (a re-parse of the lib).
 Commit-message deltas that are wrong: 835a5d9 (-20, truly -6), 981a774 (-96, -95), 3ac24ad (-4, -2), the fresh-node commit (+3,
 +1), the method-instance commit (+18, truly +12). This log is right.
 Measured: the fallback typing that exists ONLY for synthesized nodes is small (most of the 47 `checkerTypeOf` calls query source
