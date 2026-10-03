@@ -170,6 +170,8 @@ run it after a change to how the backend READS types. Read `REGRESSED` against a
   `PromiseLike`; `Promise<number>.then(async z => 2)` exhausts `isAssignable`'s depth. `gen.next()` with `N = undefined` demands an argument.
   The checker types `new Set([...a, ...b])` as `Set<any>`. `v.pos = 7` on `number[] & {pos}` is `unknown field`. 3 peg.ts rows: `cannot convert
   Generator<any> to Generator<NonTerminal>`. Numeric `let` messages print the precise value where tsc says `number`.
+  A class field inferred from an integer literal (`y = 1`, typed `i32`) is accepted where a `string` is wanted (MISSED error, found
+  2026-10-03; a `let k = 1` is rejected correctly).
 - Codegen: class-NAME triggers remain (`Map` in `ensureAnyEntries`, `Array` in `expandArrayMembers`); `var_decl`'s three statement-stamp queries
   decide representation and must wait for the layer; through `any`: reading a dynamic object traps (shares `Map`'s struct -- fix is a distinct
   struct, not a `Map` arm), `anyTypedArray.length`, `any + any` assumes numbers, `m.get(k)` into `number`; the object literal's three spread

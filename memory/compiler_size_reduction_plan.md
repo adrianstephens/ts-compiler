@@ -32,7 +32,10 @@ resolution, contextual types), plus several mechanisms built twice. Line counts 
 4. **Two type-to-representation walks (~370 -> ~220).** `typeOf`/`wasmTypeOf` and `ownerFor`/`flattenOwners`/`tupleArrayOwner` walk
    the same TS type cases separately; `layoutSketch`/`genericSketch`/`ownsLayout` are a third, pre-codegen copy. Target: one
    `representation(t) -> { wtype, owner }`.
-5. **Expandos and accessors on structs (~350 -> ~100). NEEDS A USER DECISION.** Statically computed expando fields
+5. **Expandos and accessors on structs. DECIDED 2026-10-02: keep the static fields** (the user: `#ext` must not exist on structs
+   that don't need it, and deciding that is the same analysis as deciding the precise field; adding fields lazily during codegen was
+   considered and rejected -- it cannot place a write through an `any`/type-parameter receiver, and needs late-bound field indices).
+   So only family 1's work applies to `collectExpandoFields`. Original note: Statically computed expando fields
    (`collectExpandoFields` first half, `addExpandoFields`), `#get:`/`#set:` companions in every field read/write, and
    `emitObjectDefineProperty`'s three cases. Option: every key a struct gains at run time lives in its one `#ext` dynamic object
    (slower reads of expandos -- the AST `scope`/`pos` stamps -- accepted before for dynamic objects).
@@ -127,6 +130,15 @@ own value hid it), so `scope.declarator(name)` reaches a module const anywhere; 
 declarator -> `moduleFunctions`) replaces `resolveDecl`/`importedFunction`/per-site import lookups: -16; an imported promoted const
 is now called directly. Left: `collectExpandoFields`' import lookup, `stmtHomeModule`/`classIdentity`/`moduleTag` (class
 identity by module string), `funcs`/`functionDeclByName` keyed by `homeKey` strings, `LIB_DECL_MAP` (a re-parse of the lib).
+Family 1 / expandos (2026-10-03): `collectExpandoFields` is ONE walk with names resolved through the checker's scopes: -57.
+The old private resolution ignored block scope (a `for (const [l, r] ...)` `r` linked to another block's `const r`; one false
+edge took checker.ts's walk from ~2k to ~57k visits and grew every AST shape a `typeAnnotation` field), read annotations by NAME
+program-wide, and typed writes in arrow bodies in the outer scope. Verified by running old and new side by side (new is a subset
+on checker/transform; every drop traced to a false edge). Typing it exposed a checker bug: `extends W.Base` made the class `any`
+(`superClassRef` moved to the checker: -3), which exposed three more false positives in wasm-backend.ts, each fixed: an array
+binding pattern gives its initializer a tuple context with elements widened by context (+4; message says +6), a `this is` guard
+narrows a union receiver (-3), intersection members dedupe by scoped identity, not name (+1). Then `collectModules`' named-import
+map and `TStoWasm`'s `namedImports` parameter, unread since `functionOf`, deleted: -60.
 Commit-message deltas that are wrong: 835a5d9 (-20, truly -6), 981a774 (-96, -95), 3ac24ad (-4, -2), the fresh-node commit (+3,
 +1), the method-instance commit (+18, truly +12). This log is right.
 Measured: the fallback typing that exists ONLY for synthesized nodes is small (most of the 47 `checkerTypeOf` calls query source
