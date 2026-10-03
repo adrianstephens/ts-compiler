@@ -5861,40 +5861,21 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						return W.ARRAY.i16;
 
 					case 'bigint': {
-						// A `bigint` VALUE is a two's-complement little-endian `u32[]` (see `typeOf`, and `lib/bigint.ts`'s own limb walks), so that
-						// is what a literal must build. An `i64` here disagrees with every other bigint: `10n - 4n` reinterprets it as limbs and
-						// gives -1, `Number(5n)` cannot convert, past 64 bits truncate. A real `i64` slot (an `i64` param or global) still gets
-						// the constant directly -- the one place the two agree.
-						// A machine-int representation takes the constant directly; `coerceTop` widens it to the limb array at any boundary.
+						// A machine-int slot takes the constant directly; `coerceTop` widens it to the limb array at any boundary.
 						if (want === 'i64' || want === 'i32') {
 							ctx.emit(want === 'i64' ? I.i64.const(e.value) : I.i32.const(Number(e.value)));
 							return want;
 						}
-						// Limbs in exactly the form `lib/bigint.ts` reads back: little-endian `u32`, TWO'S COMPLEMENT (not sign-magnitude), sign-
-						// extended so the top limb's high bit IS the sign, and trimmed the way `bigTrim` trims -- no top limb merely repeating the sign below.
-							
+						// Limbs as `lib/bigint.ts` reads them: little-endian, two's complement, ending at the first limb whose sign bit the rest
+						// merely extends (`bigTrim`'s form). `>>` on a bigint is arithmetic, so a negative one converges on `-1n`.
 						const limbs: number[] = [];
 						let x = e.value;
-						if (x >= 0n) {
-							while (x > 0n) {
-								limbs.push(Number(x & 0xffffffffn));
-								x >>= 32n;
-							}
-							// `0n`, and a value whose top limb would otherwise read as negative, both need a limb of room.
-							if (!limbs.length || (limbs[limbs.length - 1] & 0x80000000))
-								limbs.push(0);
-						} else {
-							// `>>` on a negative bigint is arithmetic in JS, so this converges on `-1n`, which is exactly
-							// the infinite sign extension the encoding wants.
-							while (x < -1n) {
-								limbs.push(Number(x & 0xffffffffn));
-								x >>= 32n;
-							}
-							if (!limbs.length || !(limbs[limbs.length - 1] & 0x80000000))
-								limbs.push(0xffffffff);
-						}
+						do {
+							limbs.push(Number(x & 0xffffffffn) | 0);
+							x >>= 32n;
+						} while (x !== (limbs[limbs.length - 1] < 0 ? -1n : 0n));
 						for (const l of limbs)
-							ctx.emit(I.i32.const(l | 0));
+							ctx.emit(I.i32.const(l));
 						ctx.emit(I.array.new_fixed(types.array('i32'), limbs.length));
 						return W.ARRAY.i32;
 					}
