@@ -139,7 +139,16 @@ on checker/transform; every drop traced to a false edge). Typing it exposed a ch
 binding pattern gives its initializer a tuple context with elements widened by context (+4; message says +6), a `this is` guard
 narrows a union receiver (-3), intersection members dedupe by scoped identity, not name (+1). Then `collectModules`' named-import
 map and `TStoWasm`'s `namedImports` parameter, unread since `functionOf`, deleted: -60.
-Commit-message deltas that are wrong: 835a5d9 (-20, truly -6), 981a774 (-96, -95), 3ac24ad (-4, -2), the fresh-node commit (+3,
+2026-10-03 session 2 (each WAT-identical unless noted; difftest 2229/2234 throughout): `declaredShape` shared by matchObjectShape/
+findObjectShapeByType (-47); contextualShapeOwner folded into matchContextualUnionMember, which gained method members and an
+anon fallback for an ambiguous member (-21); try's caught body and finally net, one helper each (-39); template literal lowers
+to the `stringTemplate` call in transform.ts (-32; 4 tests' WAT -1 line: substitutions pass as the rest's nullable `any`);
+bigint limb encoder one loop (-19); arrayKindOf folded into objectArrayKind (-14); dead commented-out code in TStoDecl/
+type-utils/vsdg (-11); switch's two strategies share `emitCases` (-43). **Tried and kept: `spreadOwner`** -- without it
+type-utils' `withReturnType` `{...m, returnType}` builds a sibling struct and needs a coercion (probe-decl WAT A/B).
+`contextualShapeOwner`/`matchContextualUnionMember` deletions are invisible to the suite: their cases depend on which shapes the
+whole program built (no small repro), so reason from the code and A/B a probe where one exists.
+Commit-message deltas that are wrong: the bigint-limb commit (-27, truly -19); 835a5d9 (-20, truly -6), 981a774 (-96, -95), 3ac24ad (-4, -2), the fresh-node commit (+3,
 +1), the method-instance commit (+18, truly +12). This log is right.
 Measured: the fallback typing that exists ONLY for synthesized nodes is small (most of the 47 `checkerTypeOf` calls query source
 nodes); kind 1's gain is architectural, not lines.
