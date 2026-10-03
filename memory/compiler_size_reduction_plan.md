@@ -105,9 +105,18 @@ Tested-style) and compound assignment (`$compound$`: needs `case 'binary'` to ta
 `emit`ted in order and codegen's emit checks then compiles it; `drainIterator` moved too). `checkSynthesized` checks INTO the scope
 it is given (callers make the child). **Rule for every lowering: never reuse a node object -- a checked node holds ONE stamp**, so a
 shared `elem`/`r`/`i` read in a narrowed branch got the unnarrowed type (found on patternDefaults; temps are now node factories).
-Left, kind 1: switch comparisons, the expression rewrites (`**`, `+str`, string `+`, tagged templates, delete), Object.assign,
-parameter defaults/binding, super(...) binding. Commit-message deltas for 3ac24ad (-4, truly -2) and the fresh-node commit (+3, truly
-+1) are off; this log is right.
+Then (2026-10-02, all WAT-verified): `lowerExpr` (regex literal, `+str`, `**`, string `+`, tagged template) + `checkSynthesizedExpr`;
+`lowerCompound` (`t op= v` -> `t = t op v`, the object/index held unless a pure path: WAT -2,894, arithmetic unchanged);
+`lowerConditionalSpread`, `lowerObjectAssign`; switch comparisons, delete, var redeclaration, param binding, super(...) binding,
+default re-emission all go through `lowering(ctx)` (temp / emit = check then compile / check). The union-shaped literal's arms bind
+`const m = src as M` (checked). Runtime helpers' params are plain locals. Made-up typed scope names: none left but `resolvedCall`'s
+`$receiver` (an oracle query for a call codegen itself makes; a type-level inference path would replace it).
+**Generic method instances were compiled UNCHECKED** (functions and classes were re-checked): `checkMethodInstance` (checker.ts,
+via `checkMember` split out of `checkClass`) fixes it. That exposed a checker bug, fixed: under `precise` (TS's subtype relation)
+an `any` source related structurally to every object target, so `any[] <: number[][]` held and `Array.isArray` narrowed
+`number[][]` to `any[]`. With every declaration checked, `case 'var_decl'`'s unstamped fallback is deleted.
+Commit-message deltas that are wrong: 835a5d9 (-20, truly -6), 981a774 (-96, -95), 3ac24ad (-4, -2), the fresh-node commit (+3,
++1), the method-instance commit (+18, truly +12). This log is right.
 Measured: the fallback typing that exists ONLY for synthesized nodes is small (most of the 47 `checkerTypeOf` calls query source
 nodes); kind 1's gain is architectural, not lines.
 
