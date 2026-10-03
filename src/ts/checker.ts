@@ -1229,20 +1229,17 @@ export function narrow(test: Expr, scope: Scope, sense: boolean): Scope {
 					}
 					return s;
 				}
-				// An overloaded type guard (a user interface declaring `is<U extends C>(...): this is X<U>` for more than one
-				// constraint) resolves to an `object` with several `call` members, not a bare `function` -- and when the
-				// receiver (`poly` in `poly.is(...)`) is itself still a union, `lookupMember`'s own union case combines each
-				// branch's own overload set into a union of such objects. Deliberately asymmetric with the object fallback
-				// below (which alone is predicate-filtered): a bare `function` match wins unconditionally, matching the
-				// pre-existing, already-verified-safe behavior for the common (non-overloaded) case.
-				const asObjectCallSigs = (t: Type): TS.CallSig[] => {
+				// A bare `function` callee wins; else an overload set's `call` members, or (a union receiver's `lookupMember`) each member's
+				// signatures -- the first predicate one the arguments fit, trailing optional parameters omitted (`every(p, thisArg?)`).
+				const callSigs = (t: Type): TS.CallSig[] => {
 					const r = T.resolveOwn(t, scope);
-					return r.type === 'object' ? r.members.filter((m): m is Extract<TS.TypeMember, { type: 'call' }> => m.type === 'call') : [];
+					return r.type === 'function' ? [r] : r.type === 'object' ? r.members.filter((m): m is Extract<TS.TypeMember, { type: 'call' }> => m.type === 'call') : [];
 				};
 				const parts = T.flattenIntersection(calleeT, scope);
 				const sig	= parts.find((p): p is Extract<Type, { type: 'function' }> => p.type === 'function')
-						?? parts.flatMap(p => p.type === 'union' ? p.types.flatMap(asObjectCallSigs) : asObjectCallSigs(p))
-						.find(m => m.returnType?.type === 'predicate' && (m.rest || m.params.length === test.arguments.length));
+						?? parts.flatMap(p => p.type === 'union' ? p.types.flatMap(callSigs) : callSigs(p))
+						.find(m => m.returnType?.type === 'predicate' && (m.rest || m.params.length >= test.arguments.length)
+							&& m.params.slice(test.arguments.length).every(p => hasMod(p, 'optional') || p.default));
 				const ret	= sig?.returnType;
 				if (ret && ret.type === 'predicate' && ret.assertedType && !ret.asserts) {
 					const arg = ret.paramName === 'this'
