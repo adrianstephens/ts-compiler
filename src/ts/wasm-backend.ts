@@ -6898,50 +6898,39 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					emitStmt(JS.ExprStmt(s.discriminant), ctx);
 					return;
 				}
-
-				/*if (wtypeOf(s.discriminant, ctx) === 'f64')*/ {
-					const values = new Map<number, number>;
-					let linear = true;
-					for (let i = 0; i < n; i++) {
-						if (s.cases[i].test) {
-							const test = foldConstants(s.cases[i].test!)!;
-							if (test.type !== 'literal' || typeof test.value !== 'number') {
-								linear = false;
-								break;
-							}
-							values.set(i, test.value);
-						}
+				// Case `i`'s block is the `i`-th opened (case 0 innermost), so a branch to depth `i` enters case `i` and falls through the
+				// rest; "no default" is depth `n`, the break target. `dispatch` branches, `defaultBr` taking a value no case matches.
+				const defaultIndex	= s.cases.findIndex(c => !c.test);
+				const defaultBr		= defaultIndex >= 0 ? defaultIndex : n;
+				const emitCases = (dispatch: () => void) => {
+					const old = ctx.swapOut();
+					ctx.enterBreakTarget();
+					ctx.enterLabel(n);
+					dispatch();
+					let content = ctx.out;
+					for (const c of s.cases) {
+						ctx.exitLabel();
+						ctx.out = [I.block(undefined, content)];
+						emitStmts(c.consequent, ctx);
+						content = ctx.out;
 					}
-					// Needs at least 2 distinct test values -- a single value has no meaningful gcd/stride.
-					if (linear && values.size >= 2) {
-						function gcd(a: number, b: number) {
-							while (b > 1e-10)
-								[a, b] = [b, a % b];
-							return a;
-						}
-						const sorted = [...values.values()].sort((a, b) => a - b);
-						let g = sorted[0];
-						sorted.slice(1).forEach((v, i) =>
-							g = gcd(g, v - sorted[i])
-						);
+					ctx.exitBreakTarget();
+					ctx.out = old;
+					ctx.emit(I.block(undefined, content));
+				};
 
-						const tableSize = Math.ceil((sorted.at(-1)! - sorted[0]) / g) + 1;
-						if (tableSize < values.size * 4) {
-
-							const old = ctx.swapOut();
-
-							ctx.enterBreakTarget();
-							ctx.enterLabel(n);
-
-							// `br`/`br_table` labels are relative to the branch point: case `i`'s block is the `i`-th opened above (case 0 innermost), and "no default"
-							// falls through all `n` case-blocks to the enclosing break-target block at relative depth `n`.
-							const defaultIndex	= s.cases.findIndex(c => !c.test);
-							const defaultBr		= defaultIndex >= 0 ? defaultIndex : n;
-
-							const table = new Array<number>(tableSize).fill(defaultBr);
-							values.forEach((v, i) => table[Math.round((v - sorted[0]) / g)] = i);
-
-							// The case's slot, `(disc - min) / g`: in i32 when the cases are consecutive integers.
+				// Numeric cases spaced densely enough index a `br_table` by `(disc - min) / gcd`: in i32 when the cases are consecutive integers.
+				const tests		= s.cases.flatMap((c, i) => c.test ? [[i, foldConstants(c.test)!] as const] : []);
+				const values	= new Map(tests.flatMap(([i, t]) => t.type === 'literal' && typeof t.value === 'number' ? [[i, t.value] as const] : []));
+				if (values.size === tests.length && values.size >= 2) {
+					const gcd		= (a: number, b: number): number => b > 1e-10 ? gcd(b, a % b) : a;
+					const sorted	= [...values.values()].sort((a, b) => a - b);
+					const g			= sorted.slice(1).reduce((g, v, i) => gcd(g, v - sorted[i]), sorted[0]);
+					const tableSize	= Math.ceil((sorted.at(-1)! - sorted[0]) / g) + 1;
+					if (tableSize < values.size * 4) {
+						const table = new Array<number>(tableSize).fill(defaultBr);
+						values.forEach((v, i) => table[Math.round((v - sorted[0]) / g)] = i);
+						return emitCases(() => {
 							if (g === 1 && Number.isInteger(sorted[0])) {
 								emitAs(s.discriminant, ctx, 'i32');
 								if (sorted[0])
@@ -6952,56 +6941,24 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 								coerceTop('f64', ctx, 'i32');
 							}
 							ctx.emit(I.br_table(table, defaultBr));
-
-							let content = ctx.out;
-							for (let k = 0; k < n; k++) {
-								ctx.exitLabel();
-								ctx.out = [I.block(undefined, content)];
-								emitStmts(s.cases[k].consequent, ctx);
-								content = ctx.out;
-							}
-							ctx.exitBreakTarget();
-							ctx.out = old;
-							ctx.emit(I.block(undefined, content));
-							return;
-
-						}
+						});
 					}
 				}
 
-				// One shared scope for the whole switch -- real JS gives every case a common lexical scope unless a case wraps its body in `{}`,
-				// which nests its own block via `case 'block'` as usual.
+				// One shared scope for the whole switch -- real JS gives every case a common lexical scope unless a case wraps its body in `{}`.
 				ctx.inScope(() => {
 					const { temp, emit, check } = lowering(ctx, (s as { scope?: Scope }).scope);
 					const disc = temp('switch');
 					emit(JS.VarDecl('const', JS.Var(disc, s.discriminant)));
-
-					const old = ctx.swapOut();
-
-					ctx.enterBreakTarget();
-					ctx.enterLabel(n);
-
-					for (let i = 0; i < n; i++) {
-						const c = s.cases[i];
-						if (c.test) {
-							emitAs(check(JS.JSBinary('===', Identifier(disc), c.test)), ctx, 'i32');
-							ctx.emit(I.br_if(i));
-						}
-					}
-
-					const defaultIndex = s.cases.findIndex(c => !c.test);
-					ctx.emit(I.br(defaultIndex >= 0 ? defaultIndex : n));
-
-					let content = ctx.out;
-					for (let i = 0; i < n; i++) {
-						ctx.exitLabel();
-						ctx.out = [I.block(undefined, content)];
-						emitStmts(s.cases[i].consequent, ctx);
-						content = ctx.out;
-					}
-					ctx.exitBreakTarget();
-					ctx.out = old;
-					ctx.emit(I.block(undefined, content));
+					emitCases(() => {
+						s.cases.forEach((c, i) => {
+							if (c.test) {
+								emitAs(check(JS.JSBinary('===', Identifier(disc), c.test)), ctx, 'i32');
+								ctx.emit(I.br_if(i));
+							}
+						});
+						ctx.emit(I.br(defaultBr));
+					});
 				});
 				return;
 			}
