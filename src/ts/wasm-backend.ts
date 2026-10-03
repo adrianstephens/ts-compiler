@@ -5899,40 +5899,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						return W.ARRAY.i32;
 					}
 
-					case 'object':
-						if (Array.isArray(e.value)) {
-							if (e.value.length === 1 && !e.value[0].exp) {
-								emitStringConst(e.value[0].str, ctx);
-								return W.ARRAY.i16;
-							}
-
-							// Resolved first: `stringTemplate` takes REAL arrays (`string[]`, `any[]`), so each storage array built below is coerced to its parameter as soon as it exists.
-							// A missing lib entry would otherwise emit the arrays and silently skip the call.
-							const decl = LIB_DECL_MAP.get('stringTemplate');
-							const info = decl && decl.type === 'function_decl' ? ensureFunc('stringTemplate', decl) : undefined;
-							if (!info)
-								throw "internal: lib 'stringTemplate' is unavailable";
-							for (const p of e.value)
-								emitStringConst(p.str, ctx);
-							const hasTrailingLiteral = !e.value[e.value.length - 1].exp;
-							if (!hasTrailingLiteral)
-								emitStringConst('', ctx);
-							ctx.emit(I.array.new_fixed(types.array('ref'), e.value.length + (hasTrailingLiteral ? 0 : 1)));
-							coerceTop(W.ARRAY.ref, ctx, info.params[0]);
-							let valueCount = 0;
-							for (const p of e.value) {
-								if (p.exp) {
-									emitAs(p.exp, ctx, W.REF_ANY);
-									valueCount++;
-								}
-							}
-							ctx.emit(I.array.new_fixed(types.array('ref'), valueCount));
-							coerceTop(W.ARRAY.ref, ctx, info.params[1]);
-							ctx.emit(I.call(info.funcIndex));
-							return W.ARRAY.i16;
-						}
-						throw `unsupported literal type '${typeof e.value}'`;
-
 					default:
 						throw `unsupported literal type '${typeof e.value}'`;
 				}
