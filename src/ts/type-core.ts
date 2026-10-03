@@ -3530,6 +3530,7 @@ export class Scope {
 	hasSources(): boolean							{ return !!this.sources || !!this.parent?.hasSources(); }
 	namespace(name: string): Scope | undefined		{ return this.namespaces?.get(name) ?? this.parent?.namespace(name); }
 	decl(name: string): TS.Stmt | undefined	{ return this.decls?.get(name) ?? this.parent?.decl(name); }
+	declaring(name: string): Scope | undefined	{ return this.values.has(name) || this.lazyValues?.has(name) || this.namespaces?.has(name) ? this : this.parent?.declaring(name); }
 
 	// Reverse of a normal ref lookup: a resolved structural type may happen to be *exactly* some declared class/
 	// interface/alias's own registered shape (e.g. `infer R` binding to a class reference's instance type, reached

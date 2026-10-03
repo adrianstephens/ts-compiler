@@ -2371,9 +2371,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// comment on why `Scope.decl` can't answer this for the entry module.
 	const topLevelVars			= new Map<string, { stmt: TS.Stmt; d: JS.Var<Type> }>();	// keyed by `homeKey(module, name)`
 	// An enum is COMPILE-TIME here: no runtime object, a member read folds to its constant (see `case 'member'`)
-	// and the declaration emits nothing. `enumNames` lets `resolvesGlobally` report one needs no capture slot.
+	// and the declaration emits nothing.
 	const enumMembers			= new Map<string, number | string>();
-	const enumNames				= new Set<string>();
 	// The backing slot of each `ensureLazyGlobal` wrapper, so a WRITE can reach the same storage the
 	// wrapper reads. Keyed exactly like `lazyGlobals`.
 	const lazyGlobalSlots		= new Map<string, { index: number; wtype: W.Type }>();
@@ -2399,23 +2398,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	function resolveDecl(homeModule: string, name: string) {
 		return functionDeclByName.get(homeKey(homeModule, name)) ?? LIB_DECL_MAP.get(name);
 	}
-	// True for a name that resolves without ever needing a closure capture slot: reachable from anywhere via
-	// the ordinary `case 'identifier'` fallback chain, regardless of lexical nesting.
-	function resolvesGlobally(homeModule: string, name: string): boolean {
-		return globals.has(name) || LIB_DECL_MAP.get(name)?.type === 'var_decl' || !!resolveDecl(homeModule, name)
-			|| !!namedImportsByModule.get(homeModule)?.has(name)
-			// A namespace import binds a compile-time namespace, not a value, so it never needs a capture slot:
-			// without this, `TS.parse(...)` inside a callback read as a free variable and threw "unresolved identifier".
-			|| !!moduleScopeOf(homeModule)?.namespace(name)
-			// A class name is a declaration, not a value, resolved at its own use site -- `freeIn` cannot
-			// tell the two apart, so without this ANY closure or nested function mentioning a module-level class threw.
-			|| moduleScopeOf(homeModule)?.decl(name)?.type === 'class_decl'
-			// An ENUM name, for the same reason: every read of it folds to a constant at its own site.
-			|| enumNames.has(homeKey(homeModule, name))
-			// The same for the entry module's own top-level `const`/`let`: `hoist` deliberately doesn't hoist a
-			// plain `var_decl` into a scope, so `resolveDecl` cannot see one -- `topLevelVars` is where they live,
-			// and without this a closure referencing one read as a free variable ("unresolved identifier 'LIB_DIR'").
-			|| topLevelVars.has(homeKey(homeModule, name));
+	// Declared at the module's top level or above it (an import, the lib): reached from anywhere, so never a capture.
+	function resolvesGlobally(ctx: FunctionContext, name: string): boolean {
+		const s = ctx.scope.declaring(name);
+		for (let m = moduleScopeOf(ctx.homeModule); m; m = m.parent) {
+			if (m === s)
+				return true;
+		}
+		return false;
 	}
 
 	const worklist:			(()=>void)[] = [];
@@ -5568,15 +5558,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 			throw "'this' inside a function expression is not supported -- only an arrow function's lexical 'this' is";
 
 		for (const name of free) {
-			// `undefined`/`NaN`/`Infinity` are always-valid identifiers `case 'identifier'` handles directly (`isNullLiteral` for
-			// `undefined` specifically), not real bindings `freeIn` should have marked for capture/resolution -- treating
-			// them as free vars made any nested closure using one (e.g. `extra !== undefined`) throw here unconditionally.
-			if (name === 'undefined' || name === 'NaN' || name === 'Infinity' || (name === 'this' && thisHolder))
+			// `undefined` is no declared value (`case 'identifier'` reads it as `isNullLiteral`).
+			if (name === 'undefined' || (name === 'this' && thisHolder))
 				continue;
-			// Module-scoped, so `resolvesGlobally` can never see them; the read site substitutes a constant.
-			if ((name === '__dirname' || name === '__filename') && moduleFilename(ctx.homeModule))
-				continue;
-			if (!ctx.resolvesName(name) && !resolvesGlobally(ctx.homeModule, name) && !ensureForwardHolder(ctx, name))
+			if (!ctx.resolvesName(name) && !resolvesGlobally(ctx, name) && !ensureForwardHolder(ctx, name))
 				throw `unresolved identifier '${name}'`;
 		}
 
@@ -9735,7 +9720,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				// Same numbering rule the checker's own `hoist` uses: an implicit member continues from
 				// the previous explicit one, a string member has no successor to continue from.
 				let next = 0;
-				enumNames.add(homeKey(moduleId, s.name));
 				for (const m of s.members) {
 					const init = m.init;
 					const value = !init ? next++
