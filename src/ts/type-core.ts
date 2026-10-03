@@ -2088,7 +2088,8 @@ export function lookupMember(t: Type, prop: string, scope: Scope, depth = 10, sk
 				// dedupe first, which collapses back to the `matches.length === 1` case and keeps single-declaration behavior untouched.
 				// A machine type keys as its value type `number`: an ambient interface and the lib class implementing it declare one
 				// member each way (`number` vs `i32`), the same type. Interfaces hoist first, so the class's precise one survives.
-				const dedupKey = (m: Type) => typeKey(machineOf(m, scope) ? NUMBER : m);
+				// Keyed WITH declaring scopes: two modules' same-named `ClassInfo` are two types, and the base's must not replace the own.
+				const dedupKey = (m: Type) => typeId(machineOf(m, scope) ? NUMBER : m, true);
 				const distinct = [...new Map(matches.map(m => [dedupKey(m), m])).values()];
 				if (distinct.length === 1)
 					return distinct[0];
