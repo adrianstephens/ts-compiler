@@ -164,7 +164,12 @@ Then type-core: holdsZero = rangeIncludesZero, the XK debug hook and dead cases 
 **What is left that is big is architectural:** (1) the backend's own contextual-type channel (`ctx.contextualReturn`/`withContext`/
 `callContext`, ~25 sites) replaced by the checker stamping the expected type each expression was checked against -- but codegen's
 `callTypeArgs` deliberately instantiates by flow, unlike the checker, so expect many WAT diffs; (2) comments (user declined a pass).
-Commit-message deltas that are wrong: the bigint-limb commit (-27, truly -19); 835a5d9 (-20, truly -6), 981a774 (-96, -95), 3ac24ad (-4, -2), the fresh-node commit (+3,
+**Comment pass (2026-10-03, user chose it over the architectural options):** narration out, the why kept, <= 2 lines, per file with a
+printer-proven code identity ([[tison_comment_pass_tooling]]): wasm-backend -567, vsdg -451, checker -392, type-core -299, ts/vsdg -146,
+cpp/vsdg -114, wasm/codegen -109, transform -85, py/vsdg -84, type-utils -56. Stale facts corrected on the way: checker's "Known gaps"
+header, cpp/vsdg's not-modelled list (switch, lambdas are lowered), TStypeCheck's nonexistent `libScope` parameter, comments naming
+deleted functions (ensureClassExtension, closureFuncSigType, unionClassMembers, ...). Tracked src 31,484 -> 29,149 for the session.
+Commit-message deltas that are wrong: cpp/vsdg's (-110, truly -114); the bigint-limb commit (-27, truly -19); 835a5d9 (-20, truly -6), 981a774 (-96, -95), 3ac24ad (-4, -2), the fresh-node commit (+3,
 +1), the method-instance commit (+18, truly +12). This log is right.
 Measured: the fallback typing that exists ONLY for synthesized nodes is small (most of the 47 `checkerTypeOf` calls query source
 nodes); kind 1's gain is architectural, not lines.

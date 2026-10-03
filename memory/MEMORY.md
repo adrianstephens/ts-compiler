@@ -71,6 +71,9 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 - [AST convergence](tison_ast_convergence.md) — 3 parser ASTs converged onto common.ts shapes
 - [py-parser](tison_py_parser.md) — off-side rule done purely in the lexer
 - [jsx-parser](tison_jsx_parser.md) — LALR reduce-lookahead leaks + JSX-vs-generic-arrow ambiguity
+- [glsl-parser](tison_glsl_parser.md) — GLSL over c-parser; the two LALR conflicts (unit-reduction nonterminal, scalar_type reduce/reduce) and the `ArrayDecl` size seam
+- [hlsl-msl-parsers](tison_hlsl_msl_parsers.md) — HLSL/MSL over cpp-parser; the `Definition<S>` statement seam, exported `scope_prefix`/`skip`/`>>` terminals, semantics-vs-bitfield and qualified-name resolutions; Cg/Slang ride HLSL
+- [slang-parser](tison_slang_parser.md) — Slang over hlsl-parser; `interface` as a Definition to dodge chain re-instantiation, and the `__target_switch` label-folding technique (its `case` is token-identical to a `switch` case)
 - [wat-parser exceptions](tison_wat_parser_exceptions.md) — exceptions + multi-value blocktypes, verified vs wasmtime
 
 ## TS-to-wasm compiler
@@ -81,7 +84,7 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 - [type vs representation](tison_type_vs_representation.md) — many-to-one and must stay separable; tags name representations, and it is what lets `Node[]`/`Foo[]` share one physical array type
 - [array identity — RESOLVED](tison_array_identity.md) — `Array<T>` owns a `RawArray` field; the compiler knows only `RawArray`; the traps hit, the pre-existing bugs found, and why struct merging wasn't built
 - [towasm](tison_towasm.md) — **the authoritative gap list is `ts/wasm-backend.ts`'s own header comment**; this covers design invariants
-- [comment pass tooling](tison_comment_pass_tooling.md) — rewriting wasm-backend.ts comments safely: edits anchored to ORIGINAL lines + a printer-based code-identity gate; never analyse the file with a bare `ts.createScanner` (template bug)
+- [comment pass tooling](tison_comment_pass_tooling.md) — rewriting comments in any file safely: `comment-blocks.js` lists, compact `@a-b`/`@+n` edits, `towasm-comment-pass.js apply`+`verify` (printer-proven code identity); never a bare `ts.createScanner`
 - [CROSS-LANGUAGE PLAN](tison_towasm_cross_language_plan.md) — why/where the TS-specific half of the wasm backend separates from `wasm/codegen.ts`: the file-splitting rule (**no split without a reason; a component's axis is the file's axis**), the rejected `TSEmitter`/relaxed-VSDG, the shelved `TypeOracle`+IR seam, unfinished generic-core extractions, do-not-merge traps
 - [module records](tison_module_records.md) — a module is `TS.Module` (body+scope+filename), not a bare `Stmt[]`; run all FOUR tsconfigs
 - [nested array element kind](tison_nested_array_element_kind.md) — inner arrays keep their DECLARED kind (`objectArrayKind`'s comment lies); `a.push([])` into `number[][]` still traps

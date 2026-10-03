@@ -97,8 +97,8 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
 
 ## Next up (2026-09-30, end of session)
 
-0. **Size** ([[feedback_track_total_size]]): tracked src (`ts/` sans lib + `wasm/` + `vsdg.ts` + `transpile.ts`) 31,254 at the
-   2026-10-03 session end (wasm-backend.ts 9,741; measured from committed content -- the user's transpile.ts edits are uncommitted). The work queue is [[compiler_size_reduction_plan]] (whole-file examination, 2026-10-02); near-clone
+0. **Size** ([[feedback_track_total_size]]): tracked src (`ts/` sans lib + `wasm/` + `vsdg.ts` + `transpile.ts`) 29,149 at the
+   2026-10-03 session end (wasm-backend.ts 9,174, after the comment pass; measured from committed content -- the user's transpile.ts edits are uncommitted). The work queue is [[compiler_size_reduction_plan]] (whole-file examination, 2026-10-02); near-clone
    scanning is NOT the method (user: it only finds local copies).
 1. **Step 4b DONE `0c24195`** (user chose "unbuilt shapes"): the open-shape walk records each object literal's `shapeKey` (member
    names; at its slot and as its own type); a struct shape no literal builds is open (`isOpen` in the backend, shared by typeOf/
