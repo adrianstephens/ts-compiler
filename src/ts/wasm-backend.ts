@@ -3300,27 +3300,15 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		return el ? W.elementKind(typeOf(el)) : undefined;
 	}
 
-	// The element kind an array-valued expression resolves to -- raw storage's own, else its `Array` type's -- or `undefined`.
-	function arrayKindOf(e: Expr, ctx: FunctionContext): W.ElementI | undefined {
-		const wt = wtypeOf(e, ctx);
-		return storageKindOf(wt) ?? elementKindOfType(checkerTypeOf(e, ctx.scope), ctx.scope);
-	}
-
-	// `arrayKindOf` for a value about to be indexed into (`e[i]`). The ref-collapse below is DISABLED: an inner
-	// array keeps its own declared kind (`x[0]` of `number[][]` is a real f64 array), and every read casts back down to it.
+	// The element kind an array-valued expression resolves to -- raw storage's own, else its `Array` type's -- or `undefined`. An inner array
+	// keeps its declared kind (`x[0]` of `number[][]` is a real f64 array). Narrowed: a value narrowed out of `T | undefined` has an element kind.
+	// A value STORED as `any` (an opened `u8[]`) holds whatever storage reached it, whatever its type's element says.
 	function objectArrayKind(e: Expr, ctx: FunctionContext): W.ElementI | undefined {
-		//if (e.type === 'index' && objectArrayKind(e.object, ctx) === 'ref')
-		//	return 'ref';
-		// `narrowedTypeOf`, not `arrayKindOf`'s plain `ctx.scope` view: a value NARROWED out of `T | undefined` still reads
-		// as the whole union there, so a field off it comes back `any` with no array kind (`[...a.rights, ...b.rights]` after `a && b`).
-		// A value STORED as `any` (an opened `u8[]`) holds whatever storage reached it, whatever its type's element says.
 		const nt = ctx.narrowedTypeOf(e);
 		const wt = typeOf(nt);
 		return W.isAny(wt) ? undefined : storageKindOf(wt) ?? elementKindOfType(nt, ctx.scope);
 	}
 
-	// `ownerOf` for a value about to be indexed into (`e[i]`) via generic class-method dispatch (`Array<T>.get(i)`); the
-	// Array-at-`any` override below is DISABLED, same reason as `objectArrayKind`'s: an inner array is a real `Array<number>`.
 	// A value STORED as `any` has no statically bound members, whatever its checker type names -- an open shape
 	// (`openShapes`), or a genuinely dynamic value; its members are reached by the runtime dispatchers instead.
 	function physicallyAny(e: Expr, ctx: FunctionContext): boolean {
@@ -3340,8 +3328,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (physicallyAny(e, ctx))
 			return undefined;
 		const cls = ownerOf(e, ctx);
-		//if (cls?.decl.name === 'Array' && e.type === 'index' && objectArrayKind(e.object, ctx) === 'ref')
-		//	return ensureClass('Array', [T.ANY]);
 		// A union of array types (`string[] | never[]`) names no single class, but its members share ONE physical class --
 		// dispatch through that one's own accessors. Members of genuinely different shapes are `any`, and dispatch below.
 		const w = cls ? undefined : wtypeOf(e, ctx);
@@ -6191,7 +6177,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 			case 'array': {
 				// `want`'s own kind wins whenever it asks for something boxable-as-`any`, either directly (`{arr:'ref'}`, a real `any[]` target) or because this literal
-				// is itself about to be boxed as one `anyref` value (`const values: any[] = [1, 2, 3]`) -- `arrayKindOf` only sees the elements, so it would otherwise
+				// is itself about to be boxed as one `anyref` value (`const values: any[] = [1, 2, 3]`) -- `objectArrayKind` only sees the elements, so it would otherwise
 				// build a real `number[]`, and a scalar-kind wasm array and a ref-kind one are physically incompatible types (not just a missing cast).
 				//
 				// The `{ref:'any'}` case covers one more shape: a literal merely an *element* of an outer ref-kind array (`[1,2]` inside `number[][]`), where the array
@@ -6209,11 +6195,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const contextualElement = contextualArr?.type === 'array' ? contextualArr.element
 					: contextualArr?.type === 'tuple' ? undefined : contextual && T.iterationTypes(T.nonNullable(contextual, ctx.scope), ctx.scope)?.yield;
 				const contextForcesAny = !contextualElement || T.isAny(T.resolve(ctx.scope, contextualElement));
-				// An empty literal has no elements for `arrayKindOf` to read and the checker types it `never[]`/`any[]` (always 'ref'): `want`'s kind, else the CONTEXTUAL
+				// An empty literal has no elements for `objectArrayKind` to read and the checker types it `never[]`/`any[]` (always 'ref'): `want`'s kind, else the CONTEXTUAL
 				// element type, which is what its non-empty sibling would infer (`[]` beside `[1,2]` in `number[][]` must be the same `f64` array, not boxed-`any`).
 				// A slot naming its storage is what the literal is built AS (a `u8[]` is packed bytes), whatever its elements' own kind.
 				const contextKind = contextualElement && (e.elements.length === 0 || !contextForcesAny) ? rawElemKind(contextualElement, typeOf) : undefined;
-				const kind = wantArr === 'ref' || (W.isAny(want) && contextForcesAny) ? 'ref' : wantArr ?? contextKind ?? arrayKindOf(e, ctx);
+				const kind = wantArr === 'ref' || (W.isAny(want) && contextForcesAny) ? 'ref' : wantArr ?? contextKind ?? objectArrayKind(e, ctx);
 				if (!kind)
 					throw 'array literals are only supported for number[]/boolean[]/T[]';
 				emitArrayElements(e.elements, ctx, elementValueType(kind), kind, types.array(kind), contextualElement);
