@@ -342,40 +342,17 @@ export class ModuleLoader {
 	}
 }
 
-// Walks every `import` statement reachable from `entryBody` (via the given, already-warm `loader` --
-// typically the very same instance a preceding `TStypeCheckAsync` call resolved against), collecting
-// every other module's own body (keyed by its `LoadedModule.canonical`, entry excluded -- callers
-// conventionally treat `'.'` as the entry itself) plus, per module, its plain `import { foo } from '...'`
-// bindings mapped to where they really come from (foo, or its local alias, -> {module: target canonical,
-// name: the *exported* name, which may differ from the local one}). `TStoWasm` (wasm-backend.ts) needs the
-// bodies to compile a real cross-file call, and `namedImports` because a named import's local binding
-// carries no module of its own. An `import * as X` needs nothing here: the checker's `Scope` already
-// binds `X` to the target module's own scope, declarations included. `export ... from` is
-// walked too, and a named import resolves through re-exports to the module that DECLARES the name (tison.ts is a barrel).
+// Every module reachable from `entryBody` through `import` and `export ... from`, by its `LoadedModule.canonical` (the entry, which
+// callers call `'.'`, excluded), via the same already-warm `loader` the checking pass used: the bodies `TStoWasm` compiles.
 export async function collectModules(entryBody: TS.Stmt[], loader: ModuleLoader) {
 	const modules = new Map<string, Module<TS.Stmt>>();
-	const namedImports = new Map<string, Map<string, { module: string; name: string }>>();
-	const reexports = new Map<string, { stmt: Extract<TS.Stmt, { type: 'export' }>; module: string }[]>();
 	const seen = new Set<string>(['.']);
 
 	async function walk(canonical: string, body: TS.Stmt[]) {
 		for (const s of body) {
 			const source = s.type === 'import' || s.type === 'export' ? s.source : undefined;
-			if (!source)
-				continue;
-			const target = await loader.get(source, canonical);
-			if (!target)
-				continue;
-			if (s.type === 'export') {
-				(reexports.get(canonical) ?? reexports.set(canonical, []).get(canonical)!).push({ stmt: s, module: target.canonical });
-			} else if (s.type === 'import' && s.specifiers) {
-				let bindings = namedImports.get(canonical);
-				if (!bindings)
-					namedImports.set(canonical, bindings = new Map());
-				for (const spec of s.specifiers)
-					bindings.set(spec.local, { module: target.canonical, name: spec.imported });
-			}
-			if (!seen.has(target.canonical)) {
+			const target = source && await loader.get(source, canonical);
+			if (target && !seen.has(target.canonical)) {
 				seen.add(target.canonical);
 				// The module RECORD carries this, not the body array -- `TStoWasm` receives these records,
 				// and a module's `__filename`/`__dirname` are derived from where it really lives.
@@ -386,32 +363,5 @@ export async function collectModules(entryBody: TS.Stmt[], loader: ModuleLoader)
 		}
 	}
 	await walk('.', entryBody);
-
-	const declares = (s: TS.Stmt, name: string) =>
-		((s.type === 'function_decl' || s.type === 'class_decl') && s.name === name)
-		|| (s.type === 'var_decl' && s.declarations.some(d => d.name === name));
-
-	// Where `module`'s export `name` is really declared: in `module` itself, or through `export {x as name} from`
-	// / `export * from`. `visiting` guards a re-export cycle.
-	function origin(module: string, name: string, visiting = new Set<string>()): { module: string; name: string } | undefined {
-		const key = `${module}\0${name}`;
-		if (visiting.has(key))
-			return undefined;
-		visiting.add(key);
-		if ((module === '.' ? entryBody : modules.get(module)?.body)?.some(s => declares(s.type === 'export_decl' ? s.declaration : s, name)))
-			return { module, name };
-		for (const { stmt, module: target } of reexports.get(module) ?? []) {
-			if (stmt.namespace)
-				continue;
-			const spec = stmt.specifiers?.find(sp => sp.exported === name);
-			const found = stmt.specifiers ? spec && origin(target, spec.local, visiting) : origin(target, name, visiting);
-			if (found)
-				return found;
-		}
-		return undefined;
-	}
-	for (const bindings of namedImports.values())
-		for (const [local, b] of bindings)
-			bindings.set(local, origin(b.module, b.name) ?? b);
-	return { modules, namedImports };
+	return { modules };
 }

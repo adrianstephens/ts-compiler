@@ -57,7 +57,7 @@ async function compile(src: string) {
 	return instantiate(mod.toBytes());
 }
 
-// Real multi-file codegen (`TStoWasm`'s `modules`/`namedImports` params) needs a real `ModuleLoader`
+// Real multi-file codegen (`TStoWasm`'s `modules` param) needs a real `ModuleLoader`
 // resolving real files -- an in-memory `parser.parse(src)` string, unlike `compile()` above, has no file
 // system location for a relative `import` to resolve against. `files`: every module's own source, keyed
 // by its filename (no `.ts` extension) relative to a fresh temp directory; `entry` names which one is the
@@ -78,8 +78,8 @@ async function compileMulti(files: Record<string, string>, entry: string) {
 		if (errors.length)
 			throw new Error('type errors:\n' + errors.map(d => `  ${d.pos.line}:${d.pos.col} - ${d.message}`).join('\n'));
 
-		const { modules, namedImports } = await collectModules(program.body, loader);
-		const mod = TStoWasm(program, modules, namedImports);
+		const { modules } = await collectModules(program.body, loader);
+		const mod = TStoWasm(program, modules);
 		console.log(mod.toWAT({expandTypes: true, hexFloats: false}));
 		return instantiate(mod.toBytes());
 	} finally {

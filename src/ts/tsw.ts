@@ -199,8 +199,8 @@ async function compile(filein: string, fileout: string, wat = false) {
 	// real cross-file call (`NS.foo(...)` or a plain `foo(...)` imported via `import { foo } from '...'`)
 	// resolves to the declaring file's own AST, not just its checked type. A cross-module *class* still
 	// isn't supported, and throws a clear, specific error from `TStoWasm`.
-	const { modules, namedImports } = await collectModules(program.body, loader);
-	const mod		= TStoWasm(program, modules, namedImports);
+	const { modules } = await collectModules(program.body, loader);
+	const mod		= TStoWasm(program, modules);
 	if (wat)
 		console.log(mod.toWAT({expandTypes: true, hexFloats: false}));
 

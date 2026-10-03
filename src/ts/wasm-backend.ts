@@ -1047,17 +1047,8 @@ function containsDefineProperty(body: Stmt[]): boolean {
 	return walkerB(undefined, (e, process) => isDefinePropertyCall(e) || process(e)).statements(body);
 }
 
-// The plain local names (see `FunctionContext.definePropertyTargets`'s own comment on why this is
-// name-based, not full scope-aware identity) ever used as
-// `Object.defineProperty`'s own target argument anywhere in this function body, together with the
-// literal keys ever defineProperty'd onto each -- `'dynamic'` once any one of them isn't a compile-
-// time-literal string, since a non-enumerable key set can't be given real, individually-named fields
-
-// `modules`/`namedImports` come from the caller via the same `ModuleLoader` the checking pass used --
-// `TStoWasm` has no loader and no async boundary to make one. `namedImports` maps a local name to
-// `{module, name}` (the target's declared name, possibly not the alias); `import * as X` needs no entry,
-// since the checker binds `X` to the target module's `Scope` (both the declarations and their home module).
-// Only top-level functions cross modules so far -- a cross-module class or scalar global still throws.
+// `modules` come from the caller's `ModuleLoader` (`TStoWasm` has no async boundary to make one); a name reaches another
+// module's declaration through the checker's scopes, imports and re-exports included.
 // `onTopLevelError` reports and skips a failing top-level statement rather than failing the whole module
 // (they share one start function): one unrepresentable module-level `const` otherwise takes every other
 // declaration in the file down with it. Omitted, it rethrows. `checkedModules` is module-level, not per
@@ -2248,7 +2239,7 @@ function wasmTypeOf(t: Type, global: Scope): W.Type | undefined {
 	return undefined;
 }
 
-export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImports?: Map<string, Map<string, { module: string; name: string }>>, onTopLevelError?: (e: unknown) => void): wasm.WasmModule {
+export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelError?: (e: unknown) => void): wasm.WasmModule {
 	const global = ast.scope as Scope;
 	if (!global)
 		throw new W.Error('ast must be checked (TStypeCheck/TStypeCheckAsync) before TStoWasm');
@@ -2290,7 +2281,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	function moduleFilename(homeModule: string): string | undefined {
 		return moduleBodies.get(homeModule)?.filename;
 	}
-	const namedImportsByModule = namedImports ?? new Map<string, Map<string, { module: string; name: string }>>();
 	// `Scope.decl(name)` gives back the declaration object but not the file it came from, and a plain top-level
 	// `var_decl` (unlike a function/class) has no module-scoped registration -- so the home module is recorded here.
 	const stmtHomeModule		= new Map<object, string>();
