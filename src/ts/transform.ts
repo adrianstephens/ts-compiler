@@ -421,47 +421,11 @@ export function StateMachineToAST(machine: StateMachine) {
 }
 
 
-// Desugars a destructuring BindingTarget into flat var_decls reading off valueExpr (must be side-effect-free).
-// A default value (`el.default`/`prop.default`) just becomes a real `??` (`rawExpr ?? dflt`) -- reuses
-// `??`'s own codegen wholesale, including its single-evaluation-of-the-left materialization, rather than
-// hand-rolling a second copy of that logic here. `??`'s codegen also needs to tolerate a non-nullable
-// left for this to work (see its own comment) -- a default on an already-non-nullable value (an ordinary
-// array element, or a non-optional object field) is provably dead code, same as real TS itself would
-// prove, not a reason to reject it.
-export function patternBindings(kind: JS.DeclarationKind, target: BindingTarget, valueExpr: Expr): JS.Stmt<Type>[] {
-	if (typeof target === 'string')
-		return [JS.VarDecl(kind, JS.Var(target, valueExpr))];
-
-	if (target.type === 'array_pattern') {
-		const stmts = target.elements.flatMap((el, i) => {
-			if (!el)
-				return [];
-			const elemExpr: Expr = JS.Index(valueExpr, Literal(i));
-			// A default applies where the element is `undefined` -- past the end OR present as `undefined` -- and never
-			// for `null`, so neither a length test nor `??` alone is JS. The length guard stays: reading past the end traps in wasm.
-			return patternBindings(kind, el.target, el.default
-				? Conditional<Expr>(Binary<Expr, '<'>('<', Literal(i), JS.Member(valueExpr, 'length')),
-					Conditional<Expr>(Binary<Expr, '==='>('===', elemExpr, Identifier('undefined')), el.default, elemExpr), el.default)
-				: elemExpr);
-		});
-		if (target.rest) {
-			// Real JS semantics: the rest collects the remaining elements into a genuinely new array, not
-			// a view -- `.slice(n)` (already a real `Array<T>` method) gives exactly that.
-			stmts.push(JS.VarDecl(kind, JS.Var(target.rest, JS.Call(JS.Member(valueExpr, 'slice'), [Literal(target.elements.length)]))));
-		}
-		return stmts;
-	}
-
-	if (target.rest)
-		throw "a rest property ('...') in an object destructuring pattern is not supported -- unlike array rest (a plain '.slice()'), this needs a genuinely new object type holding an arbitrary 'all fields except these' shape, which isn't modeled yet";
-	
-	return target.properties.flatMap(prop => {
-		const key = JS.keyName(prop.key);
-		if (key === undefined)
-			throw "a computed key ('[expr]') in an object destructuring pattern is not supported";
-		const propExpr: Expr = JS.Member(valueExpr, key);
-		return patternBindings(kind, prop.value, prop.default ? Binary('??', propExpr, prop.default) : propExpr);
-	});
+// A destructuring as plain declarations, for VSDG (before the check: the value's path is re-read and indexed) -- `lowerPattern`'s.
+export function patternBindings(kind: JS.DeclarationKind, target: BindingTarget, valueExpr: TS.Expr): Stmt[] {
+	const out: Stmt[] = [];
+	lowerPattern(kind, target, valueExpr, undefined, {}, s => out.push(s));
+	return out;
 }
 
 //-----------------------------------------------------------------------------
@@ -473,6 +437,74 @@ type ForOf = Extract<Stmt, { type: 'for'; right: unknown }>;
 // `iterator.next()`: JS sends `undefined` to a `next` that takes a value (a generator's).
 export function nextCall(iterator: TS.Expr, it: T.IterationTypes, scope: Scope): TS.Expr {
 	return JS.Call(JS.Member(iterator, 'next'), T.isNullish(it.next, scope) ? [] : [Identifier('undefined')]);
+}
+
+// How a destructuring is lowered for its consumer. Codegen names each level (`temp`), so each value is read once, and asks the
+// checked types how a level iterates (`iterates`: by the protocol, else by position) and whether a position may hold `undefined`.
+export interface PatternLowering {
+	temp?:		(role: string) => string;
+	iterates?:	(value: TS.Expr) => T.IterationTypes | undefined;
+	absent?:	(element: TS.Expr) => boolean;
+	scope?:		Scope;
+}
+
+// A destructuring as plain declarations, each handed to `emit` in order: a later level's questions are about what an earlier one
+// declared. A default replaces `undefined` only, never `null`; a position past the end is `undefined` (a length test: wasm traps there).
+export function lowerPattern(kind: JS.DeclarationKind, target: BindingTarget, value: TS.Expr, annotation: Type | undefined, how: PatternLowering, emit: (s: Stmt) => void): void {
+	if (typeof target === 'string')
+		return emit(JS.VarDecl(kind, JS.Var(target, value, annotation)));
+	const hold = (init: TS.Expr, role: string, t?: Type): TS.Expr => {
+		if (!how.temp)
+			return init;
+		const id = Identifier(how.temp(role));
+		emit(JS.VarDecl('const', JS.Var(id.name, init, t)));
+		return id;
+	};
+	const sub	= (t: BindingTarget, e: TS.Expr, ann?: Type) => lowerPattern(kind, t, e, ann, how, emit);
+	const v		= hold(value, 'destructure', annotation);
+	if (target.type === 'array_pattern') {
+		const it = how.iterates?.(v);
+		if (it && how.temp && how.scope) {
+			const iter = hold(JS.Call(JS.Member(v, '[Symbol.iterator]'), []), 'iterator');
+			for (const el of target.elements) {
+				const r = hold(nextCall(iter, it, how.scope), 'result');	// a hole still advances
+				const got = JS.Member(r, 'value');
+				if (el)
+					sub(el.target, el.default ? Conditional<TS.Expr>(JS.Member(r, 'done'), el.default, Binary('??', got, el.default)) : got, el.default ? undefined : it.yield);
+			}
+			if (target.rest)
+				sub(target.rest, drainIterator(iter, it, how.scope, how.temp, emit));
+			return;
+		}
+		// A fresh node per read: each is typed where it stands (narrowed in the default's test), and a node holds one type.
+		target.elements.forEach((el, i) => {
+			const elem = () => JS.Index(v, Literal(i));
+			if (el)
+				sub(el.target, !el.default ? elem() : Conditional<TS.Expr>(Binary<TS.Expr, '<'>('<', Literal(i), JS.Member(v, 'length')),
+					how.absent?.(elem()) === false ? elem() : Conditional<TS.Expr>(Binary<TS.Expr, '==='>('===', elem(), Identifier('undefined')), el.default, elem()), el.default));
+		});
+		if (target.rest)
+			sub(target.rest, JS.Call(JS.Member(v, 'slice'), [Literal(target.elements.length)]));
+		return;
+	}
+	if (target.rest)
+		throw "a rest property ('...') in an object destructuring pattern is not supported -- it needs a new object type holding 'all fields but these'";
+	for (const prop of target.properties) {
+		const key = JS.keyName(prop.key);
+		if (key === undefined)
+			throw "a computed key ('[expr]') in an object destructuring pattern is not supported";
+		const propExpr = JS.Member(v, key);
+		sub(prop.value, prop.default ? Binary('??', propExpr, prop.default) : propExpr);
+	}
+}
+
+// Every remaining value of an iterator, into a new array: what `...` does with an iterable, and a rest element.
+export function drainIterator(iterator: TS.Expr, it: T.IterationTypes, scope: Scope, temp: (role: string) => string, emit: (s: Stmt) => void): TS.Expr {
+	const arr = Identifier(temp('drained')), r = Identifier(temp('result'));
+	emit(JS.VarDecl('const', JS.Var(arr.name, JS.ArrayLit([]), TS.ArrayType(it.yield))));
+	emit(JS.For(JS.VarDecl('let', JS.Var(r.name, nextCall(iterator, it, scope))), JS.JSUnary('!', JS.Member(r, 'done')), Assign<TS.Expr, never>(r, nextCall(iterator, it, scope)),
+		ExprStmt(JS.Call(JS.Member(arr, 'push'), [JS.Member(r, 'value')]))));
+	return arr;
 }
 
 // `for (v of xs) body` as plain loops: by the iteration protocol where codegen iterates by it (`it`: what iterating yields), else by

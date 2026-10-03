@@ -3246,12 +3246,9 @@ export function checkHoisted(stmts: Stmt[], scope: Scope, err?: Err) {
 export const MUTED: Err = () => () => {};
 export const checkImported = (stmts: Stmt[], scope: Scope) => checkHoisted(stmts, scope, MUTED);
 
-// What a lowering builds out of checked code (`transform.ts`): its NEW statements and expressions checked and stamped in a child of
-// `scope`, each over its parts' stamps. A statement already checked (it carries a scope stamp: the user's own code) is not walked again.
+// What a lowering builds out of checked code (`transform.ts`): its NEW statements and expressions checked and stamped into `scope`
+// (the caller's child of the original's), each over its parts' stamps. A statement already checked (stamped: user code) is not walked again.
 export function checkSynthesized(stmts: Stmt[], scope: Scope): void {
-	synthesized(stmts, new T.Scope(scope));
-}
-function synthesized(stmts: Stmt[], scope: Scope): void {
 	const type = (e: Expr, scope: Scope) => typeOf(e, scope, true, undefined, undefined, MUTED, true, true);
 	for (const s of stmts.filter(s => !(s as { scope?: Scope }).scope)) {
 		(s as { scope?: Scope }).scope = scope;
@@ -3267,16 +3264,16 @@ function synthesized(stmts: Stmt[], scope: Scope): void {
 				type(s.expression, scope);
 				break;
 			case 'block':
-				synthesized(s.body, new T.Scope(scope));
+				checkSynthesized(s.body, new T.Scope(scope));
 				break;
 			case 'for': {
 				if (s.kind !== 'normal')
 					throw `internal: a synthesized 'for...${s.kind}' is not checked`;
 				const loop = new T.Scope(scope);
 				if (s.init)
-					synthesized([s.init.type === 'var_decl' ? s.init : JS.ExprStmt(s.init)], loop);
+					checkSynthesized([s.init.type === 'var_decl' ? s.init : JS.ExprStmt(s.init)], loop);
 				[s.test, s.update].forEach(e => e && type(e, loop));
-				synthesized([s.body], new T.Scope(loop));
+				checkSynthesized([s.body], new T.Scope(loop));
 				break;
 			}
 			default:

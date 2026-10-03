@@ -8,7 +8,7 @@ import { Literal, Identifier, Binary, Assign, Conditional, Member, hasMod, Modul
 import { checkHoisted, checkImported, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, checkedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized } from './checker';
 import { Walker, walker, walkerB } from './walker';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
-import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, nextCall } from './transform';
+import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator } from './transform';
 import * as wasm from '@isopodlabs/binary_libs/wasm';
 import * as WAT from '../wasm/wat-parser';
 
@@ -3022,18 +3022,16 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 
 
 
-	// Every remaining value of an iterator, into a new array: what JS's `...` does with an iterable, and a rest pattern.
-	function drainIterator(iterator: Expr, it: T.IterationTypes, ctx: FunctionContext): Expr {
-		const arrName = `#iter$${ctx.tempCounter++}`, rName = `#iter$${ctx.tempCounter++}`;
-		const arr: Expr = Identifier(arrName), r: Expr = Identifier(rName);
-		emitStmt(JS.VarDecl('const', JS.Var(arrName, { type: 'array', elements: [] } as Expr, TS.ArrayType(it.yield))), ctx);
-		emitStmt(JS.For(
-			JS.VarDecl('let', JS.Var(rName, nextCall(iterator, it, ctx.scope))),
-			JS.JSUnary('!', JS.Member(r, 'done')),
-			Assign<Expr, never>(r, nextCall(iterator, it, ctx.scope)),
-			{ type: 'expression' as const, expression: JS.Call(JS.Member(arr, 'push'), [JS.Member(r, 'value')]) },
-		), ctx);
-		return arr;
+	// A lowering's statements (`transform.ts`), each checked in one child of `scope` and then compiled, in order.
+	function lowering(ctx: FunctionContext, scope: Scope) {
+		const synth = new Scope(scope);
+		return {
+			temp:	(role: string) => `#${role}$${ctx.tempCounter++}`,
+			emit:	(st: Stmt) => {
+				checkSynthesized([st], synth);
+				emitStmt(st, ctx);
+			},
+		};
 	}
 
 	// A spread operand as an array: a non-array iterable's iterator drained into one, anything else as it is.
@@ -3041,70 +3039,17 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		const it = iteratesByProtocol(operand, ctx);
 		if (!it)
 			return operand;
-		const itName = `#iter$${ctx.tempCounter++}`;
-		emitStmt(JS.VarDecl('const', JS.Var(itName, JS.Call(JS.Member(operand, '[Symbol.iterator]'), []))), ctx);
-		return drainIterator(Identifier(itName), it, ctx);
+		const { temp, emit } = lowering(ctx, ctx.scope);
+		const iter = Identifier(temp('iterator'));
+		emit(JS.VarDecl('const', JS.Var(iter.name, JS.Call(JS.Member(operand, '[Symbol.iterator]'), []))));
+		return drainIterator(iter, it, ctx.scope, temp, emit);
 	}
 
-	// A destructuring pattern bound from `value` one level at a time: each level is materialized into a typed temp first, so
-	// an array pattern indexes an array/tuple and iterates anything else, decided from that level's own type.
-	function emitPatternBinding(kind: JS.DeclarationKind, target: BindingTarget, value: Expr, typeAnnotation: Type | undefined, ctx: FunctionContext): void {
-		if (typeof target === 'string') {
-			emitStmt(JS.VarDecl(kind, JS.Var(target, value, typeAnnotation)), ctx);
-			return;
-		}
-		const temp = (): Expr => Identifier(`#destructure$${ctx.tempCounter++}`);
-		const declare = (id: Expr, init: Expr, type?: Type) => emitStmt(JS.VarDecl('const', JS.Var((id as { name: string }).name, init, type)), ctx);
-		const tmp = temp();
-		declare(tmp, value, typeAnnotation);
-
-		if (target.type === 'array_pattern') {
-			const it = iteratesByProtocol(tmp, ctx);
-			if (!it) {
-				// A default applies where the element is `undefined`: past the end (the length guard -- reading past an array's end traps in
-				// wasm), or present as `undefined` where the element type admits it. Never for `null`, which is a value JS keeps.
-				target.elements.forEach((el, i) => {
-					if (!el)
-						return;
-					const elem = JS.Index(tmp, Literal(i));
-					emitPatternBinding(kind, el.target, el.default
-						? Conditional<Expr>(
-							Binary<Expr, '<'>('<', Literal(i), JS.Member(tmp, 'length')),
-							readsPastEnd(elem, ctx)
-								? Conditional<Expr>(Binary<Expr, '==='>('===', elem, Identifier('undefined')), el.default, elem)
-								: elem,
-							el.default)
-						: elem, undefined, ctx);
-				});
-				if (target.rest)
-					emitPatternBinding(kind, target.rest, JS.Call(JS.Member(tmp, 'slice'), [Literal(target.elements.length)]), undefined, ctx);
-				return;
-			}
-			const iterator = temp();
-			declare(iterator, JS.Call(JS.Member(tmp, '[Symbol.iterator]'), []));
-			for (const el of target.elements) {
-				const r = temp();
-				declare(r, nextCall(iterator, it, ctx.scope));	// a hole still advances
-				if (!el)
-					continue;
-				const got = JS.Member(r, 'value');
-				emitPatternBinding(kind, el.target, el.default
-					? Conditional<Expr>(JS.Member(r, 'done'), el.default, Binary('??', got, el.default))
-					: got, el.default ? undefined : it.yield, ctx);
-			}
-			if (target.rest)
-				emitPatternBinding(kind, target.rest, drainIterator(iterator, it, ctx), undefined, ctx);
-			return;
-		}
-
-		if (target.rest)
-			throw "a rest property ('...') in an object destructuring pattern is not supported";
-		for (const prop of target.properties) {
-			if (typeof prop.key === 'object')
-				throw "a computed key ('[expr]') in an object destructuring pattern is not supported";
-			const propExpr = JS.Member(tmp, String(prop.key));
-			emitPatternBinding(kind, prop.value, prop.default ? Binary('??', propExpr, prop.default) : propExpr, undefined, ctx);
-		}
+	// A destructuring bound one level at a time, each held in a temp: an array pattern indexes an array or tuple and iterates
+	// anything else, by that level's own type.
+	function emitPatternBinding(kind: JS.DeclarationKind, target: BindingTarget, value: Expr, typeAnnotation: Type | undefined, ctx: FunctionContext, scope: Scope): void {
+		const { temp, emit } = lowering(ctx, scope);
+		lowerPattern(kind, target, value, typeAnnotation, { temp, scope: ctx.scope, iterates: e => iteratesByProtocol(e, ctx), absent: e => readsPastEnd(e, ctx) }, emit);
 	}
 
 	// Type arguments for a `new C(...)` that spells none out. Nothing is inferred: the checker solves them from the constructor's
@@ -7101,7 +7046,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					if (typeof d.name !== 'string') {
 						// Desugars into plain `var_decl`s reading their own piece off a hidden scratch local (`#destructure$<n>`), emitted directly rather than
 						// wrapped in a `block`: these bindings share the original `var_decl`'s scope, not a nested one.
-						emitPatternBinding(s.kind, d.name, d.init, d.typeAnnotation, ctx);
+						emitPatternBinding(s.kind, d.name, d.init, d.typeAnnotation, ctx, (s as { scope?: Scope }).scope ?? ctx.scope);
 						continue;
 					}
 					// Built straight into the local's representation: its annotation, else its flow's hull (`flowType`, every assignment), else a
@@ -7265,7 +7210,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 						// An array is read by position; anything else with `[Symbol.iterator]()` by the protocol, as JS iterates every iterable.
 						const n			= ctx.tempCounter++;
 						const lowered	= lowerForOf(s, iteratesByProtocol(s.right, ctx), ctx.scope, role => `#for${n}$${role}`);
-						checkSynthesized([lowered], (s as { scope?: Scope }).scope ?? ctx.scope);
+						checkSynthesized([lowered], new Scope((s as { scope?: Scope }).scope ?? ctx.scope));
 						emitStmt(lowered, ctx);
 						return;
 					}
