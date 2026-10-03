@@ -3022,14 +3022,18 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 
 
 
-	// A lowering's statements (`transform.ts`), each checked in one child of `scope` and then compiled, in order.
-	function lowering(ctx: FunctionContext, scope: Scope) {
+	// A lowering's statements, each checked in one child of `scope` and then compiled, in order; `check` an expression it builds.
+	function lowering(ctx: FunctionContext, scope = ctx.scope) {
 		const synth = new Scope(scope);
 		return {
 			temp:	(role: string) => `#${role}$${ctx.tempCounter++}`,
 			emit:	(st: Stmt) => {
 				checkSynthesized([st], synth);
 				emitStmt(st, ctx);
+			},
+			check:	<E extends Expr>(e: E): E => {
+				checkSynthesizedExpr(e, synth);
+				return e;
 			},
 		};
 	}
@@ -5688,7 +5692,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				fnCtx.ownBody = body;
 				hoistVars(body, params, fnCtx);
 			}
-			pending.forEach(st => emitStmt(st, fnCtx));
+			pending.forEach(lowering(fnCtx).emit);
 			if (Array.isArray(body)) {
 				emitStmts(body, fnCtx);
 				fnCtx.emitTrailingUnreachable(result);
@@ -6524,7 +6528,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					// A union of structs boxed as one `anyref` counts; a value typed `any` may be a dynamic object, where that is no delete.
 					if (!(cls && cls.typeIndex !== -1 && cls.fields.length) && !(physicallyAny(object, ctx) && !T.isAny(ctx.narrowedTypeOf(object))))
 						throw "'delete' is only supported on a struct's field or a dynamic object's key";
-					emitExpr(Assign<Expr, never>(e.operand, Identifier('undefined')), ctx, 'void');
+					emitExpr(lowering(ctx).check(Assign<Expr, never>(e.operand, Identifier('undefined'))), ctx, 'void');
 					ctx.emit(I.i32.const(1));
 					return 'i32';
 				}
@@ -6999,7 +7003,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				for (const d of s.declarations) {
 					if (s.kind === 'var' && typeof d.name === 'string' && ctx.vars.has(d.name)) {
 						if (d.init)
-							emitExpr(Assign<Expr, never>(Identifier(d.name), d.init), ctx, 'void');
+							emitExpr(lowering(ctx).check(Assign<Expr, never>(Identifier(d.name), d.init)), ctx, 'void');
 						continue;
 					}
 					if (!d.init) {
@@ -7275,9 +7279,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				// One shared scope for the whole switch -- real JS gives every case a common lexical scope unless a case wraps its body in `{}`,
 				// which nests its own block via `case 'block'` as usual.
 				ctx.inScope(() => {
-					const discName = `#switch$${ctx.tempCounter++}`;
-					emitStmt(JS.VarDecl('const', JS.Var(discName, s.discriminant)), ctx);
-					const discId: Expr = Identifier(discName);
+					const { temp, emit, check } = lowering(ctx, (s as { scope?: Scope }).scope);
+					const disc = temp('switch');
+					emit(JS.VarDecl('const', JS.Var(disc, s.discriminant)));
 
 					const old = ctx.swapOut();
 
@@ -7287,7 +7291,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 					for (let i = 0; i < n; i++) {
 						const c = s.cases[i];
 						if (c.test) {
-							emitAs(JS.JSBinary('===', discId, c.test), ctx, 'i32');
+							emitAs(check(JS.JSBinary('===', Identifier(disc), c.test)), ctx, 'i32');
 							ctx.emit(I.br_if(i));
 						}
 					}
@@ -7634,7 +7638,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 	// Binds the params (running their defaults) and hoists the body's `var`s.
 	function beginBody(ctx: FunctionContext, body: Stmt[], params: ResolvedParam[]) {
 		ctx.ownBody = body;
-		ctx.declareParams(params).forEach(st => emitStmt(st, ctx));
+		ctx.declareParams(params).forEach(lowering(ctx).emit);
 		hoistVars(body, params, ctx);
 	}
 
@@ -7919,7 +7923,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		funcs.set(homeKey(homeModule, name), info);
 		worklist.push(W.withCatch(() => {
 			const ctx = new FunctionContext(name, new Scope(moduleScopeOf(homeModule) ?? libGlobal), plainReturn(result), undefined, homeModule);
-			ctx.declareParams(params).forEach(st => emitStmt(st, ctx));
+			ctx.declareParams(params).forEach(lowering(ctx).emit);
 			build(ctx);
 			info.body = ctx.toFuncBody(params.length, toValType);
 		}, name, homeModule));
@@ -8885,11 +8889,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 				// Binds the base ctor's param names to this call's arguments as ordinary `var_decl`s (reusing the local-declaration path, destructuring desugaring included).
 				// The nested scope closes once the base body has run, matching real TS: those params aren't visible to the rest of *this* ctor.
 				ctx.inScope(() => {
+					const bind = lowering(ctx).emit;
 					superCtor.params.forEach((p, i) => {
 						const argExpr = call.arguments[i] ?? p.default;
 						if (!argExpr)
 							throw `'super(...)': missing argument parameter '${describeBinding(p.key)}'`;
-						emitStmt(JS.VarDecl('const', JS.Var(p.key, argExpr, p.typeAnnotation)), ctx);
+						bind(JS.VarDecl('const', JS.Var(p.key, argExpr, p.typeAnnotation)));
 					});
 					emitCtorStatements(superCtor, superClass, ctx, setField);
 				});
