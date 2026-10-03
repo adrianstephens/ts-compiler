@@ -3188,37 +3188,45 @@ function checkFunctionBody(fn: TS.CallSig, body: JS.Stmt<any>[] | Expr | undefin
 }
 function checkClass(c: TS.Class, scope: Scope, err?: Err, stamp = false) {
 	const { instance, value, superType } = classShapes(c, scope);
-	const { inst: instScope, stat: statScope } = classBodyScopes(c, scope, instance, value, superType);
-
-	for (const m of c.body) {
-		switch (m.type) {
-			case 'field':
-				if (m.value) {
-					const inner = hasMod(m, 'static') ? statScope : instScope;
-					const t		= typeOf(m.value, inner, false, m.typeAnnotation, undefined, err, stamp);
-					if (m.typeAnnotation && err) {
-						if (!checkFlow(m.value, t, m.typeAnnotation, inner, (m as any).pos, inner, err))
-							err(SEVERITY.ERROR, (m as any).pos)`Type '${show().type(t)}' is not assignable to type '${show().type(m.typeAnnotation)}'`;
-						else
-							checkExcessProps(m.value, m.typeAnnotation, (m as any).pos, inner, err);
-					}
-				}
-				break;
-			case 'method':
-				checkFunctionBody(m, m.body, hasMod(m, 'static') ? statScope : instScope, hasMod(m, 'async'), m.key === 'constructor' || hasMod(m, 'generator'), hasMod(m, 'generator'), err, undefined, stamp);
-				break;
-			case 'get':
-				checkFunctionBody(m, m.body, hasMod(m, 'static') ? statScope : instScope, false, false, false, err, undefined, stamp);
-				break;
-			case 'set':
-				checkFunctionBody(m, m.body, hasMod(m, 'static') ? statScope : instScope, false, true, false, err, undefined, stamp);
-				break;
-			case 'static_block':
-				checkBlock(m.body, new Scope(statScope), typeOf1(err), checkStmt1(err));
-		}
-	}
+	const scopes = classBodyScopes(c, scope, instance, value, superType);
+	for (const m of c.body)
+		checkMember(m, scopes, err, stamp);
 	return value;
-	//return instScope;
+}
+
+// A generic method's instance (its own type parameters substituted, its body a fresh unstamped copy): checked and stamped as its
+// class checks the template, in the class's body scope.
+export function checkMethodInstance(c: TS.Class, m: TS.ClassMember, scope: Scope): void {
+	const { instance, value, superType } = classShapes(c, scope);
+	checkMember(m, classBodyScopes(c, scope, instance, value, superType), MUTED, true);
+}
+
+function checkMember(m: TS.ClassMember, { inst: instScope, stat: statScope }: { inst: Scope; stat: Scope }, err?: Err, stamp = false) {
+	switch (m.type) {
+		case 'field':
+			if (m.value) {
+				const inner = hasMod(m, 'static') ? statScope : instScope;
+				const t		= typeOf(m.value, inner, false, m.typeAnnotation, undefined, err, stamp);
+				if (m.typeAnnotation && err) {
+					if (!checkFlow(m.value, t, m.typeAnnotation, inner, (m as any).pos, inner, err))
+						err(SEVERITY.ERROR, (m as any).pos)`Type '${show().type(t)}' is not assignable to type '${show().type(m.typeAnnotation)}'`;
+					else
+						checkExcessProps(m.value, m.typeAnnotation, (m as any).pos, inner, err);
+				}
+			}
+			break;
+		case 'method':
+			checkFunctionBody(m, m.body, hasMod(m, 'static') ? statScope : instScope, hasMod(m, 'async'), m.key === 'constructor' || hasMod(m, 'generator'), hasMod(m, 'generator'), err, undefined, stamp);
+			break;
+		case 'get':
+			checkFunctionBody(m, m.body, hasMod(m, 'static') ? statScope : instScope, false, false, false, err, undefined, stamp);
+			break;
+		case 'set':
+			checkFunctionBody(m, m.body, hasMod(m, 'static') ? statScope : instScope, false, true, false, err, undefined, stamp);
+			break;
+		case 'static_block':
+			checkBlock(m.body, new Scope(statScope), typeOf1(err), checkStmt1(err));
+	}
 }
 
 // `check`: the walk to use, defaulting to the plain scope-stamping one. The only caller that wants

@@ -5,7 +5,7 @@ import * as JS from './js-parser';
 import * as T from './type-utils';
 import * as W from '../wasm/codegen';
 import { Literal, Identifier, Binary, Assign, hasMod, Module as CModule } from '@isopodlabs/tison/ast';
-import { checkHoisted, checkImported, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, checkedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr } from './checker';
+import { checkHoisted, checkImported, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, checkedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr, checkMethodInstance } from './checker';
 import { Walker, walker, walkerB } from './walker';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
 import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
@@ -9051,9 +9051,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		// composite-key/substitution shape `ensureGenericFunc` uses for a top-level generic function. `decl` is `owner.methodDecls`' copy, with the class's `T` already
 		// substituted (from `ensureClass`), so only `U` remains; a `MethodMember` isn't a `walk` root node, so signature pieces go through `T.substituteType` individually
 		// (as checker.ts's `instantiate` does) and the body through `substituteTypeParams` (a plain `Statement[]`, which `walk` does accept directly).
-		if (decl.typeParams?.length) {
+		const instance = decl.typeParams;
+		if (instance?.length) {
 			const map = callTypeArgs(decl, resolvedCall(owner, name, call, callerCtx), callerCtx, !!typeArgsOf(call), Array.isArray(call) ? call : call.arguments, callerCtx.callContext);
-			key		= genericKey(key, decl.typeParams, map, global);
+			key		= genericKey(key, instance, map, global);
 			decl	= {
 				...decl,
 				typeParams: undefined,
@@ -9078,6 +9079,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, namedImport
 		};
 		if (!decl.body)
 			throw `'${fullName}' needs a body (overload signatures are not supported)`;
+		// Its body re-checked, as `instantiateDecl` re-checks a generic function's: the template's stamps do not hold for these type arguments.
+		if (instance?.length)
+			checkMethodInstance(owner.decl, decl, moduleScopeOf(owner.homeModule) ?? owner.declScope ?? libGlobal);
 
 		const result = decl.returnType ? typeOf(decl.returnType) : 'void';
 		if (!result)
