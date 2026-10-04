@@ -1070,9 +1070,11 @@ export function narrow(test: Expr, scope: Scope, sense: boolean): Scope {
 					const key = T.pathKey(test.left);
 					if (key) {
 						const cur = scope.value(key) ?? typeOf(test.left, scope, false);
-						const shadow = test.right.type === 'identifier' && scope.value(test.right.name);
-						return test.right.type === 'identifier' && scope.type(test.right.name) && !(shadow && T.isAny(shadow))
-							? narrowTo(scope, key, TS.RefType(test.right.name), sense, cur)
+						const shadow	= test.right.type === 'identifier' && scope.value(test.right.name);
+						const entry		= test.right.type === 'identifier' ? scope.type(test.right.name) : undefined;
+						// The class's prototype type, as TS takes it: a generic one's arguments are all `any` (`Promise<any>`).
+						return test.right.type === 'identifier' && entry && !(shadow && T.isAny(shadow))
+							? narrowTo(scope, key, TS.RefType(test.right.name, entry.typeParams?.map(() => T.ANY)), sense, cur)
 							// An unknown class: trust the guard, stop tracking the binding.
 							: sense ? narrowTo(scope, key, T.ANY, sense, cur) : scope;
 					}
