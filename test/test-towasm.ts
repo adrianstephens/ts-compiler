@@ -4408,6 +4408,17 @@ async function main() {
 	}
 
 	{
+		// A method of an interface no value in the program implements (type-core.ts's `Semantics`, implemented in type-utils.ts) is never called.
+		const { unimplemented } = await compile(`
+			interface Sem { boxed(p: string): string | undefined }
+			class Sc { constructor(readonly sem: Sem) {} }
+			function look(s: Sc | undefined, n: string): number { return s ? (s.sem.boxed(n)?.length ?? 0) : 7; }
+			export function unimplemented(): number { return look(undefined, 'x'); }
+		`);
+		check('a call no value can receive compiles to a trap', unimplemented(), 7);
+	}
+
+	{
 		// `Number(v)` of any value is JS's ToNumber (walker.ts's `foldable1` on a `Value`): an object goes by its string form.
 		const { toNumber, regexText } = await compile(`
 			type Value = number | bigint | string | boolean | null | RegExp | string[];

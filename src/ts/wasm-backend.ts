@@ -8833,6 +8833,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const sig	= closureSigOf(wt);
 				return (sig.hasRest || sig.params.length >= argTs.length) && (want === 'void' || fits(sig.result, want)) ? [{ cls, idx: idx!, wt, sig }] : [];
 			});
+			// No value in the program has a `name` at all (an interface only code outside it implements): the call can never run.
+			if (!methods.length && !held.length && ![...classes.values()].some(c => c.methodDecls.has(name) || c.inlineMethods?.has(name) || c.fieldIndex.has(name)))
+				return dctx.emit(I.unreachable);
 			if (!methods.length && !held.length)
 				throw `no reachable class (or 'number'/'boolean'/'string'/array) declares a '${name}' callable with ${argTs.length} such argument(s) -- a dynamic dispatch on 'any' needs at least one real candidate`;
 			emitTypeCascade(dctx, recv, [
