@@ -244,6 +244,12 @@ class WeakSet<T> {
 	delete(value: T): boolean		{ return this.set_.delete(value); }
 }
 
+// Strong, as `WeakMap` is: `deref()` may return its target for as long as it is reachable, and here it always is.
+class WeakRef<T extends object> {
+	constructor(private target: T) {}
+	deref(): T | undefined			{ return this.target; }
+}
+
 // `at(i)` while `i < size()`, both read on every step: how `Map`/`Set` iterate their own backing arrays live.
 export function* __towasm_indexed<T>(size: () => number, at: (i: number) => T): Generator<T, void, unknown> {
 	for (let i = 0; i < size(); i++)

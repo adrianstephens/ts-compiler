@@ -4395,6 +4395,19 @@ async function main() {
 	}
 
 	{
+		// `WeakRef` holds strongly: `deref()` may return its target while it is reachable (type-core.ts's `resolveCacheById`).
+		const { weakRef } = await compile(`
+			class Ty { constructor(public n: number) {} }
+			const cache = new Map<string, [WeakRef<Ty> | undefined, WeakRef<Ty> | undefined]>();
+			export function weakRef(): number {
+				cache.set('k', [new WeakRef(new Ty(7)), undefined]);
+				return (cache.get('k')?.[0]?.deref()?.n ?? 0) * 10 + (cache.get('k')?.[1]?.deref() === undefined ? 1 : 0);
+			}
+		`);
+		check('WeakRef: deref() returns its target; a missing ref is undefined', weakRef(), 71);
+	}
+
+	{
 		// An empty statement (a stray `;`) had no `case` in `emitStmt` at all, so it reached the `default:`
 		// throw -- js-parser.ts's own source is full of them.
 		const { strays, emptyLoopBody } = await compile(`
