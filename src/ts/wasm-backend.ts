@@ -3244,8 +3244,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// parameter boxes `want` to `any`). So is an empty literal whose context names no layout (`any`, `{}`, `object`, none).
 	function contextualDynamicOwner(e: JS.ObjectExpr<Type>, ctx: FunctionContext): ClassInfo | undefined {
 		const context	= contextOf(e);
-		const target	= context && T.resolve(global, T.nonNullable(context, ctx.scope));
-		const value		= target && indexSignatureValueType(target) || (!e.properties.length && (!target || namesNoLayout(target)) ? T.ANY : undefined);
+		// Each member of a union context (`spec.rules ?? {}`: `Record<string, R> | {}`) a string-keyed record, or for an empty literal one with no layout.
+		const parts		= context ? T.unionMembers(T.nonNullable(context, ctx.scope), ctx.scope).map(m => T.resolve(global, m)) : [];
+		const values	= parts.flatMap(m => indexSignatureValueType(m) ?? []);
+		const value		= values.length && parts.every(m => indexSignatureValueType(m) || (!e.properties.length && namesNoLayout(m))) ? T.combineTypes(values)
+			: !e.properties.length && parts.every(namesNoLayout) ? T.ANY : undefined;
 		return value ? ensureClass('DynamicObject', [value]) : undefined;
 	}
 	const namesNoLayout = (t: Type) => T.isAny(t) || t.type === 'ref' && t.name === 'object' || t.type === 'object' && !t.members.length;

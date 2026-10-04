@@ -4408,6 +4408,16 @@ async function main() {
 	}
 
 	{
+		// `{}` against `Record<string, V> | {}` (tison's `spec.rules ?? {}`) is the record's dynamic object.
+		const { recordOrEmpty } = await compile(`
+			interface Spec { rules?: Record<string, number> }
+			function count(spec: Spec): number { return Object.keys(spec.rules ?? {}).length; }
+			export function recordOrEmpty(): number { return count({ rules: { a: 1, b: 2 } }) * 10 + count({}); }
+		`);
+		check('an empty literal in a record-or-empty context', recordOrEmpty(), 20);
+	}
+
+	{
 		// A generic's `t !== null` where an instantiation's `T` can't be null (tison's `stampPos`) is decided statically.
 		const { neverNull } = await compile(`
 			function stamp<T>(t: T): number { return typeof t === 'object' && t !== null ? 1 : t === undefined ? 2 : 3; }
