@@ -14,7 +14,7 @@
 import * as C from './c-parser';
 import * as CPP from './cpp-parser';
 import * as Common from '@isopodlabs/tison/ast';
-import { walkerB, isExpr, isPackParameter, calcBinary, calcUnary, Scalar, scalarFor, spellScalar } from './walker';
+import { walkerB, isExpr, isPackParameter, constantFolder } from './walker';
 import { printer as cppPrinterFactory } from './printer';
 import {
 	Dialect, VSDGBuilder, Emitter, Recurse, ParamSlot, SwitchSyntax,
@@ -56,20 +56,8 @@ export function isDefinition(s: TopLevel): s is Definition {
 let printerInstance: ReturnType<typeof cppPrinterFactory> | undefined;
 const cppPrinter = () => (printerInstance ??= cppPrinterFactory());
 
-function MaybeLiteral(value: unknown) {
-	if (value === undefined)
-		return undefined;
-	// A folded scalar spells itself from its type; the core's own values reach here too (a rotated loop's `literal(true)`, buildExpr's `null`).
-	if (typeof value === 'boolean')
-		return Common.Literal(value);
-	const s = value as Scalar | null;
-	return s && typeof s === 'object' && 'kind' in s
-		? (s.kind === 'bool' ? Common.Literal(s.value !== 0) : Common.Literal(s.value, spellScalar(s)))
-		: Common.Literal(value as number | string);
-}
-
-
 export const cppDialect: Dialect<Expr, TopLevel, Spec> =  {
+	...constantFolder,
 	identifierName(e) {
 		return e.type === 'identifier' ? e.name : undefined;
 	},
@@ -89,32 +77,6 @@ export const cppDialect: Dialect<Expr, TopLevel, Spec> =  {
 		// reaches here: CSE skips 'member'.
 		return node.type === 'floating'
 			&& (['index', 'this', 'qualified'] as Expr['type'][]).includes(node.expr.type);
-	},
-	foldable(e) {
-		// Shape only: which OPERATORS actually fold is `foldValue`'s own answer (see foldBinary).
-		return	e.type === 'binary' ? 2
-			:	e.type === 'unary' ? 1
-			:	0;
-	},
-	fold(e, ops) {
-		// Every operand reached here through `literalValue`, so each one is a `Scalar`.
-		return	e.type === 'binary'	? MaybeLiteral(calcBinary(e.operator, ops[0] as Scalar, ops[1] as Scalar))
-			:	e.type === 'unary'	? MaybeLiteral(calcUnary(e.operator, ops[0] as Scalar))
-			: undefined;
-	},
-	// A constant: a literal (its spelling is its type; `true`/`false` are `bool`), and `'a'`, an `int` after promotion. A string literal is a
-	// pointer, `nullptr` has no value, and `sizeof(T)` needs declarations this AST never resolves.
-	literalValue(e) {
-		if (e.type === 'char_literal')
-			return e.value.length === 1 ? { kind: 'int', value: e.value.charCodeAt(0) & 0xFF } : undefined;
-		return	e.type !== 'literal'			? undefined
-			:	typeof e.value === 'boolean'	? { kind: 'bool', value: e.value ? 1 : 0 }
-			:	typeof e.value === 'number'		? scalarFor(e.value, e.raw)
-			:	undefined;
-	},
-	// C++'s zero is falsy for every scalar kind -- including the `0.0` a float carries, and the 0 a folded `false` does.
-	truthy(value) {
-		return value !== undefined && (value as Scalar).value !== 0;
 	},
 	isCalleeEdge(consumer, port) {
 		const v = consumer.type === 'effect' && consumer.expr;

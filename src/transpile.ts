@@ -5,7 +5,15 @@ import * as TS from './ts/ts-parser';
 import * as JS from './ts/js-parser';
 import * as PY from './py/py-parser';
 import * as C from './cpp/c-parser';
+// LOAD ORDER MATTERS: glsl-parser extends c-parser and builds its tables from the LIVE rule arrays at
+// module load, while cpp/hlsl/slang/msl mutate those same arrays in place. Importing cpp-parser first
+// therefore makes glsl-parser compile the MUTATED base grammar, which mis-parses constructors (`vec4(...)`
+// comes back as a 2-element array instead of one `functional_cast`). glsl depends on `c` alone, so it must
+// be imported before `cpp` -- see cpp/glsl-parser.ts's own load-order note.
+import * as GLSL from './shaders/glsl-parser';
 import * as CPP from './cpp/cpp-parser';
+import { glslToWgsl } from './shaders/wgsl';
+import { preprocess } from './cpp/preprocessor';
 import { printer as PYprinter, Options as PYOptions } from './py/printer';
 import { printer as TSprinter, Options as TSOptions } from './ts/printer';
 import { printer as CPPprinter, Options as CPPOptions } from './cpp/printer';
@@ -1726,4 +1734,20 @@ function PY2CPP(py: Module<PY.Stmt>) {
 
 export function py2cpp(source: string, opts?: CPPOptions): string {
 	return CPPprinter(opts).module({ type: 'module', body: PY2CPP(PY.parse(source)) });
+}
+
+// ===================================================================
+//  GLSL ES -> WGSL
+// ===================================================================
+// WGSL is an output-only target (see cpp/wgsl.ts's header): the GLSL front end composes straight into the WGSL
+// emitter, with no VSDG in between. `stage` decides the entry point's stage attribute and whether the shader's
+// `out` colour becomes the entry point's return value.
+
+export async function glsl2wgsl(source: string, stage: 'vertex' | 'fragment', options?: GLSL.Options): Promise<string> {
+	// Direct `parser.parse` bypasses the preprocessor, which is what strips `#version`/`precision` and resolves
+	// includes -- so preprocess first, exactly as `glsl-parser`'s own (unexported) `parse` wrapper would.
+	const unit = await GLSL.parser.parse(await preprocess(source, options), {
+		typedefNames: new Set<string>([...GLSL.GLSL_BUILTIN_TYPES, ...(options?.knownTypes ?? [])]),
+	});
+	return glslToWgsl(unit.body, stage);
 }

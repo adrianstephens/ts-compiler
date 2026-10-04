@@ -1,6 +1,6 @@
 import * as C from './c-parser';
 import * as CPP from './cpp-parser';
-import { Module } from '@isopodlabs/tison/ast';
+import { Module, ConstantFolder, Literal } from '@isopodlabs/tison/ast';
 import * as W from '@isopodlabs/tison/walker';
 import { mapObject, mapArray, mapArrayA, mapDefined, makeProcess, makeProcessB } from '@isopodlabs/tison/walker';
 
@@ -70,7 +70,7 @@ type IntKind	= keyof typeof INT_KINDS;
 type FloatKind	= 'float' | 'double';
 type ScalarKind	= IntKind | FloatKind;
 
-export interface Scalar	{ kind: ScalarKind, value: number };
+interface Scalar	{ kind: ScalarKind, value: number };
 
 const isFloat	= (s: ScalarKind): s is FloatKind => s === 'float' || s === 'double';
 const asBool	= (t: boolean) => ({ kind: 'bool', value: t ? 1 : 0 } as const);
@@ -115,7 +115,7 @@ function commonIntKind(a: IntKind, b: IntKind): IntKind {
 
 /** Folds one binary operator over two literal operands, or undefined where C++ gives it no defined
  *  value at all -- which is a real answer here, not a failure: UB has no constant to fold to. */
-export function calcBinary(op: C.binaryOps, a: Scalar, b: Scalar): Scalar | undefined {
+function calcBinary(op: C.binaryOps, a: Scalar, b: Scalar): Scalar | undefined {
 	// `&&`/`||` convert both sides to `bool` and answer one -- unlike js, an operand is never the
 	// result (`1 && 2` is `true`, not `2`).
 	if (op === '&&')
@@ -177,7 +177,7 @@ export function calcBinary(op: C.binaryOps, a: Scalar, b: Scalar): Scalar | unde
 	}
 }
 
-export function calcUnary(op: C.unaryOps, a: Scalar): Scalar | undefined {
+function calcUnary(op: C.unaryOps, a: Scalar): Scalar | undefined {
 	switch (op) {
 		case '!':	return asBool(a.value === 0);
 		case '+':	return a;			// the promotion IS the whole operation
@@ -191,7 +191,7 @@ export function calcUnary(op: C.unaryOps, a: Scalar): Scalar | undefined {
 }
 
 // The scalar a literal's value and its own spelling describe -- the only type information there is
-export function scalarFor(value: number, raw?: string): Scalar | undefined {
+function scalarFor(value: number, raw?: string): Scalar | undefined {
 	// The lexer produces decimal literals only, so a `.` or an exponent can only mean a floating one.
 	if (raw !== undefined && /[.eE]/.test(raw)) {
 		const suffix = raw.slice(-1);
@@ -213,7 +213,7 @@ export function scalarFor(value: number, raw?: string): Scalar | undefined {
 }
 
 // A folded scalar's own spelling. The type has to survive the round trip -- and to survive a FURTHER fold, since this spelling is the type the next one reads -- so it carries a suffix
-export function spellScalar(s: Scalar): string {
+function spellScalar(s: Scalar): string {
 	if (s.kind === 'bool')
 		return s.value ? 'true' : 'false';
 	// A floating result has to keep a `.` or an exponent, or it would print as an INTEGER literal
@@ -225,6 +225,46 @@ export function spellScalar(s: Scalar): string {
 	return String(s.value) + INT_KINDS[s.kind as IntKind].suffix;
 }
 
+function MaybeLiteral(value: unknown) {
+	if (value === undefined)
+		return undefined;
+	// A folded scalar spells itself from its type; the core's own values reach here too (a rotated loop's `literal(true)`, buildExpr's `null`).
+	if (typeof value === 'boolean')
+		return Literal(value);
+	const s = value as Scalar | null;
+	return s && typeof s === 'object' && 'kind' in s
+		? (s.kind === 'bool' ? Literal(s.value !== 0) : Literal(s.value, spellScalar(s)))
+		: Literal(value as number | string);
+}
+
+export const constantFolder: ConstantFolder<Expr> = {
+	// A constant: a literal (its spelling is its type; `true`/`false` are `bool`), and `'a'`, an `int` after promotion. A string literal is a
+	// pointer, `nullptr` has no value, and `sizeof(T)` needs declarations this AST never resolves.
+	literalValue(e) {
+		if (e.type === 'char_literal')
+			return e.value.length === 1 ? { kind: 'int', value: e.value.charCodeAt(0) & 0xFF } : undefined;
+		return	e.type !== 'literal'			? undefined
+			:	typeof e.value === 'boolean'	? { kind: 'bool', value: e.value ? 1 : 0 }
+			:	typeof e.value === 'number'		? scalarFor(e.value, e.raw)
+			:	undefined;
+	},
+	// C++'s zero is falsy for every scalar kind -- including the `0.0` a float carries, and the 0 a folded `false` does.
+	truthy(value) {
+		return value !== undefined && (value as Scalar).value !== 0;
+	},
+	foldable(e) {
+		// Shape only: which OPERATORS actually fold is `foldValue`'s own answer (see foldBinary).
+		return	e.type === 'binary' ? 2
+			:	e.type === 'unary' ? 1
+			:	0;
+	},
+	fold(e, ops) {
+		// Every operand reached here through `literalValue`, so each one is a `Scalar`.
+		return	e.type === 'binary'	? MaybeLiteral(calcBinary(e.operator, ops[0] as Scalar, ops[1] as Scalar))
+			:	e.type === 'unary'	? MaybeLiteral(calcUnary(e.operator, ops[0] as Scalar))
+			:	undefined;
+	},
+};
 //-----------------------------------------------------------------------------
 // walk
 //-----------------------------------------------------------------------------

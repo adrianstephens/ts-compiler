@@ -1,6 +1,6 @@
 import * as TS from './ts-parser';
 import * as JS from './js-parser';
-import { Literal, Module } from '@isopodlabs/tison/ast';
+import { Literal, Module, ConstantFolder } from '@isopodlabs/tison/ast';
 import * as W from '@isopodlabs/tison/walker';
 import {mapObject, mapArray, mapArrayA, mapDefined, makeProcess, makeProcessB} from '@isopodlabs/tison/walker';
 
@@ -20,6 +20,7 @@ export const isTsDeclaration	= guard<TS.Declaration>(['type_alias_decl', 'interf
 // statement IS one, and asserting the narrow type is what used to force casts at the call sites.
 export const isJsStatement		= guard<TS.Stmt>(stmts);
 
+type Value	= JS.Value;
 type Type	= TS.Type;
 type Expr	= TS.Expr;
 type Stmt	= TS.Stmt;
@@ -29,7 +30,7 @@ export interface Kinds { statement: Stmt; expression: Expr; type: Type; typeMemb
 // Constant folding
 //-----------------------------------------------------------------------------
 
-export function calcUnary(op: JS.unaryOps, x: any) {
+function calcUnary(op: JS.unaryOps, x: any) {
 	switch (op) {
 		case '!':	return !x;
 		case '+':	return +x;
@@ -38,7 +39,7 @@ export function calcUnary(op: JS.unaryOps, x: any) {
 	}
 }
 
-export function calcBinary(op: JS.binaryOps, a: any, b: any) {
+function calcBinary(op: JS.binaryOps, a: any, b: any) {
 	switch (op) {
 		case '&&':	return a && b;
 		case '||':	return a || b;
@@ -85,6 +86,109 @@ export function calcBinary(op: JS.binaryOps, a: any, b: any) {
 		return a + b;
 	}
 }
+
+const typeMasks = {
+	number:		1,
+	bigint:		2,
+	string:		4,
+	boolean:	8,
+	undefined:	16,
+	symbol:		32,
+	unknown:	0,
+	object:		0,
+	function:	0,
+} as const;
+
+function isSimple(t: Value): t is number | bigint | string | boolean {
+	return !!(typeMasks[typeof t] & 15);
+}
+
+const foldable1: Record<string, (op: Value)=>Value | undefined> = {
+	Number:		op => Number(op),
+	BigInt:		op => isSimple(op) ? BigInt(op) : undefined,
+	String:		op => isSimple(op) ? op.toString() : undefined,
+	Boolean:	op => Boolean(op),
+	parseInt:	op => typeof op === 'string' ? parseInt(op) : undefined,
+	parseFloat:	op => typeof op === 'string' ? parseFloat(op) : undefined,
+};
+
+const foldableMaths: Record<string, (...op: number[])=>number> = {
+	abs:		op => Math.abs(op),
+	floor:		op => Math.floor(op),
+	ceil:		op => Math.ceil(op),
+	round:		op => Math.round(op),
+	fround:		op => Math.fround(op),
+	max:		(...ops) => Math.max(...ops),
+	min:		(...ops) => Math.min(...ops),
+	pow:		(a, b) => Math.pow(a, b),
+	sqrt:		op => Math.sqrt(op),
+	sin:		op => Math.sin(op),
+	cos:		op => Math.cos(op),
+	tan:		op => Math.tan(op),
+	asin:		op => Math.asin(op),
+	acos:		op => Math.acos(op),
+	atan:		op => Math.atan(op),
+	atan2:		(a, b) => Math.atan2(a, b),
+	exp:		op => Math.exp(op),
+	log:		op => Math.log(op),
+	log10:		op => Math.log10(op),
+	log2:		op => Math.log2(op),
+	trunc:		op => Math.trunc(op),
+	sign:		op => Math.sign(op),
+	sinh:		op => Math.sinh(op),
+	cosh:		op => Math.cosh(op),
+	tanh:		op => Math.tanh(op),
+	asinh:		op => Math.asinh(op),
+	acosh:		op => Math.acosh(op),
+	atanh:		op => Math.atanh(op),
+	log1p:		op => Math.log1p(op),
+	cbrt:		op => Math.cbrt(op),
+	hypot:		(...ops) => Math.hypot(...ops),
+	imul:		(a, b) => Math.imul(a, b),
+	clz32:		op => Math.clz32(op),
+};
+
+function MaybeLiteral(v: any): Expr | undefined {
+	return v === undefined ? undefined : Literal(v);
+}
+
+export const constantFolder: ConstantFolder<Expr> = {
+	foldable(e) {
+		if (e.type === 'call') {
+			if (e.callee.type === 'identifier')
+				return e.callee.name in foldable1 ? 1 : 0;
+			
+			if (e.callee.type === 'member' && e.callee.object.type === 'identifier') {
+				if (e.callee.object.name === 'Math' && e.callee.property in foldableMaths)
+					return e.arguments.length;
+			}
+		}
+		return e.type === 'binary' ? 2 : e.type === 'unary' ? 1 : 0;
+	},
+	fold(e, ops: Value[]) {
+		switch (e.type) {
+			case 'call':
+				if (e.callee.type === 'identifier')
+					return MaybeLiteral(foldable1[e.callee.name]?.(ops[0] as Value));
+				
+				if (e.callee.type === 'member' && e.callee.object.type === 'identifier') {
+					if (e.callee.object.name === 'Math' && ops.every(op => typeof op === 'number'))
+						return MaybeLiteral(foldableMaths?.[e.callee.property](...ops));
+				}
+				return undefined;
+			case 'binary':
+				return MaybeLiteral(calcBinary(e.operator, ops[0], ops[1]));
+			case 'unary':
+				return MaybeLiteral(calcUnary(e.operator, ops[0]));
+		}
+	},
+	literalValue(e) {
+		return e.type === 'literal' ? e.value : undefined;
+	},
+	truthy(value) {
+		return !!value;
+	},
+};
 
 //-----------------------------------------------------------------------------
 // walk

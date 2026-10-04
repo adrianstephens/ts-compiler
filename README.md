@@ -9,7 +9,7 @@ src/
   wasm/                    codegen.ts (language-neutral wasm emission), wat-parser.ts
   ts/                      TypeScript/JavaScript/JSX: parsers, checker, printer, VSDG dialect,
                            wasm-backend.ts, tsw.ts (the `tsw` CLI), lib/ (the runtime it compiles)
-  cpp/                     C and C++: preprocessor, parsers, printer, VSDG dialect, wasm-backend.ts
+  cpp/                     C, C++, GLSL, HLSL, MSL and Slang: preprocessor, parsers, printer, VSDG dialect, wasm-backend.ts
   py/                      Python: parser, printer, VSDG dialect, wasm-backend.ts
   cg/                      the Cg grammar
 ```

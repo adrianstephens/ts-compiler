@@ -112,8 +112,10 @@ export function  Index<T>(object: Expr<T>, index: Expr<T>, optional?: boolean): 
 export interface Attribute<T>	{ name?: string; value?: Expr<T> }
 export interface Element<T>		{ type: 'jsx'; name: string; attributes: Attribute<T>[]; children: Expr<T>[] }
 
+export type Value = number | bigint | string | boolean | null | RegExp | TemplatePart<Expr>[];
+
 export type Expr<T = any> =
-	| Literal<number | bigint | string | boolean | null | RegExp | TemplatePart<Expr>[]>
+	| Literal<Value>
 	| ArrayLit<T>
 	| FunctionExpr<T>
 	| Arrow<T>

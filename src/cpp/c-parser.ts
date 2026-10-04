@@ -410,9 +410,16 @@ type_specifier = Rules<TypeSpecifier>(
 ),
 
 specifier_qualifier_list = Rules<DeclSpec>(self => [
+	// A qualifier may LEAD the list (`const float x;`, `const char *s;`), and in real code that is the common
+	// spelling. This must be RIGHT-recursive, reaching `self` at the end: a leading `[type_qualifier, self]`
+	// edge into the same nonterminal collides head-on with `[self, type_specifier]` (whose `type_specifier`
+	// itself starts `self` through `[self, type_qualifier]`), which registers as hundreds of LR(0)-core
+	// conflicts -- measured at 816, against 0 for this shape. Right recursion also preserves the
+	// `self`-first ordering, so a qualifier can still both lead and trail.
+	Rule([type_qualifier, self], 								$ => ({ ...$[1], [$[0]]: true })),
 	Rule([type_specifier], 										$ => ({ type: $[0] })),
-	Rule([self, type_specifier], 								$ => ({ ...$[0], type: combineTypeSpecifier($[0].type, $[1]) })),
 	Rule([self, type_qualifier], 								$ => ({ ...$[0], [$[1]]: true })),
+	Rule([self, type_specifier], 								$ => ({ ...$[0], type: combineTypeSpecifier($[0].type, $[1]) })),
 ]),
 
 // --- Declarators / declarations ---

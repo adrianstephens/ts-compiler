@@ -10,7 +10,7 @@
 import * as PY from './py-parser';
 import { printer as PYPrinter } from './printer';
 import { Identifier, Literal, Assign, If, Throw } from '@isopodlabs/tison/ast';
-import { walkerB, calcUnary, calcBinary, calcCompare } from './walker';
+import { walkerB, constantFolder } from './walker';
 import {
 	Dialect, VSDGBuilder, Emitter, Recurse, ParamSlot,
 	Node, NodeOf, NodeType, NodeId, ClassInfo, Scope, VSDG, BlockTree,
@@ -30,10 +30,8 @@ type NOf<K extends NodeType> = NodeOf<Expr, Stmt, Expr, K>;
 let printerInstance: ReturnType<typeof PYPrinter> | undefined;
 const pyPrinter = () => (printerInstance ??= PYPrinter());
 
-function MaybeLiteral(v: any): Expr | undefined {
-	return v === undefined ? undefined : Literal(v);
-}
 const pyDialect: Dialect<Expr, Stmt, Expr> = {
+	...constantFolder,
 	identifierName(e: Expr) {
 		return e.type === 'identifier' ? e.name : undefined;
 	},
@@ -49,28 +47,6 @@ const pyDialect: Dialect<Expr, Stmt, Expr> = {
 	isCSEUnsafe(node: N): boolean {
 		// A `list`/`set`/`dict`/comprehension is a fresh identity per evaluation, a `tuple` at least for `is`; an `index`/`member` read may see a mutation.
 		return node.type === 'floating' && ['list', 'set', 'dict', 'tuple', 'index', 'listcomp', 'setcomp', 'dictcomp', 'genexp'].includes(node.expr.type);
-	},
-	foldable(e) {
-		return	e.type === 'binary' ? 2
-			:	e.type === 'unary'	? 1
-			:	e.type === 'compare' && e.ops.length === 1 ? 2	// A NON-CHAINED comparison (`a == b`) folds like a binary; `a < b < c` doesn't (it can't be spelled as one pair of operands).
-			:	0;
-	},
-	fold(e, ops) {
-		return	e.type === 'binary' ? MaybeLiteral(calcBinary(e.operator, ops[0], ops[1]))
-			:	e.type === 'unary'	? MaybeLiteral(calcUnary(e.operator, ops[0]))
-			:	e.type === 'compare' && e.ops.length === 1 ? MaybeLiteral(calcCompare(e.ops[0], ops[0], ops[1]))
-			:	undefined;
-	},
-	// A plain literal's value is its `value`; an f-string has interpolation holes and is NOT a constant.
-	literalValue(e) {
-		return	e.type === 'imaginary' ? e.value
-			:	e.type === 'literal' && !Array.isArray(e.value) ? e.value
-			:	undefined;
-	},
-	// Python falsiness of a constant: `0`/`''`/`False` coincide with js's, and the kinds that differ are never constants.
-	truthy(value) {
-		return !!value;
 	},
 	isCalleeEdge(consumer: N, port: number) {
 		const v = consumer.type === 'effect' && consumer.expr;

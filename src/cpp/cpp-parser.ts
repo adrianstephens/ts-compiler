@@ -124,11 +124,14 @@ export interface CppCtx extends C.Ctx { templateDepth: number; }
 export interface CatchClause			{ type?: TypeName; param?: string; byRef?: boolean; body: C.Block<Declarator, TypeSpecifierExt, Expr, Stmt>; }
 export interface UsingDirective			{ type: 'using_namespace'; name: string; }
 export interface UsingAlias				{ type: 'using_alias'; name: string; target: TypeName; }
-export interface NamespaceDecl			{ type: 'namespace'; name?: string; inline?: boolean; body: Definition[]; }
-export interface LinkageSpec			{ type: 'linkage'; language: string; body: Definition[]; }
+// `S`: the statement seam, threaded so a further extension (an HLSL-family language with its own statement
+// shape) can widen `Definition` without re-listing every cpp-only top-level form. Defaults to this file's own
+// `Stmt`, so cpp itself is unchanged. The three additions that reach back into a top-level body carry it too.
+export interface NamespaceDecl<S = Stmt>	{ type: 'namespace'; name?: string; inline?: boolean; body: Definition<S>[]; }
+export interface LinkageSpec<S = Stmt>		{ type: 'linkage'; language: string; body: Definition<S>[]; }
 export interface StaticAssert			{ type: 'static_assert'; condition: Expr; message: string; }
 export interface TemplateParam			{ name: string; pack?: boolean; nonType?: DeclSpec; default?: TypeName | Expr; }
-export interface TemplateDecl			{ type: 'template'; params: TemplateParam[]; declaration: Definition | ClassSpecifier | UsingAlias; }
+export interface TemplateDecl<S = Stmt>	{ type: 'template'; params: TemplateParam[]; declaration: Definition<S> | ClassSpecifier | UsingAlias; }
 
 // A type argument at a generic *use* site (`Box<int>`) -- `pack` marks a pack-expansion argument (`Tuple<Args...>`),
 // `value` is a TypeName for type arguments or an Expr for non-type ones (`array<int, 5>`).
@@ -155,13 +158,13 @@ type StmtAdditions =
 	| UsingAlias
 	| UsingDeclMember;
 
-export type Definition = C.Definition<Declarator, TypeSpecifierExt, Expr, Stmt>
-	| NamespaceDecl
-	| LinkageSpec
+export type Definition<S = Stmt> = C.Definition<Declarator, TypeSpecifierExt, Expr, S>
+	| NamespaceDecl<S>
+	| LinkageSpec<S>
 	| UsingDirective
 	| UsingDeclMember
 	| UsingAlias
-	| TemplateDecl
+	| TemplateDecl<S>
 	| StaticAssert
 	| OutOfClassMethod
 	| OutOfClassCtor
@@ -225,8 +228,9 @@ C.IDENT.callback = (lex, ctx: CppCtx) => {
 const Rule = makeRule<CppCtx>(stampPos);
 
 // `A::B::` -- one or more TYPE_SCOPE'd names, each consuming its own `::`. The building block of every
-// qualified construct (types, expressions, out-of-class definitions, using-declarations).
-const scope_prefix = Rules<string[]>(self => [
+// qualified construct (types, expressions, out-of-class definitions, using-declarations). Exported so an
+// extension (MSL's `access::read`, `mem_flags::mem_threadgroup`) reuses it rather than copying the rule.
+export const scope_prefix = Rules<string[]>(self => [
 	Rule([TYPE_SCOPE, '::'],			$ => [$[0]]),
 	Rule([self, TYPE_SCOPE, '::'],		$ => [...$[0], $[1]]),
 ]);
@@ -1210,8 +1214,15 @@ C.init_declarator.push(
 // ===================================================================
 // `>>`/`>>=` need a context-sensitive lexer hook: when templateDepth > 0, reject the multi-char match so `>` closes
 // one generic level at a time. Named exactly `>>`/`>>=` so c-parser.ts's bare-string rule references resolve to these objects.
-const RIGHT_SHIFT			= terminal('>>',  />>/,		(_, ctx: CppCtx) => ctx.templateDepth > 0 ? undefined : RIGHT_SHIFT);
-const RIGHT_SHIFT_ASSIGN	= terminal('>>=', />>=/,	(_, ctx: CppCtx) => ctx.templateDepth > 0 ? undefined : RIGHT_SHIFT_ASSIGN);
+// Exported so an extension's grammar can keep the `>>`/`>>=` template-close patch (naming them exactly as
+// c-parser.ts's bare-string references is what makes them replace the originals rather than add terminals).
+export const RIGHT_SHIFT			= terminal('>>',  />>/,		(_, ctx: CppCtx) => ctx.templateDepth > 0 ? undefined : RIGHT_SHIFT);
+export const RIGHT_SHIFT_ASSIGN	= terminal('>>=', />>=/,	(_, ctx: CppCtx) => ctx.templateDepth > 0 ? undefined : RIGHT_SHIFT_ASSIGN);
+
+// On top of C's skips: attributes (`[[nodiscard]]`), `alignas(...)`, and MS calling-convention attributes are
+// recognized and discarded at the lexer level -- valid input parses but they leave no trace in the AST.
+// Exported so an extension (HLSL/MSL) reuses the same lexical surface.
+export const skip = [/\s+/, /\/\/[^\n]*/, /\/\*[^]*?\*\//, /\[\[[^]*?\]\]/, /alignas\s*\([^()]*\)/, /__(?:stdcall|cdecl|fastcall|thiscall|forceinline)(?!\w)/, /__declspec\s*\([^()]*\)/];
 
 // Relabeled the same way `external_definition`/`statement`/etc. are above: the exact same Rules object
 // c-parser.ts built (cpp's own productions are `.push()`ed onto `external_definition`, which this
@@ -1220,9 +1231,7 @@ const RIGHT_SHIFT_ASSIGN	= terminal('>>=', />>=/,	(_, ctx: CppCtx) => ctx.templa
 const translation_unit = C.translation_unit as unknown as Rules<Module<Definition>>;
 
 export const parser = makeCachedParser({
-	// On top of C's skips: attributes (`[[nodiscard]]`), `alignas(...)`, and MS calling-convention attributes are
-	// recognized and discarded at the lexer level -- valid input parses but they leave no trace in the AST.
-	skip: [/\s+/, /\/\/[^\n]*/, /\/\*[^]*?\*\//, /\[\[[^]*?\]\]/, /alignas\s*\([^()]*\)/, /__(?:stdcall|cdecl|fastcall|thiscall|forceinline)(?!\w)/, /__declspec\s*\([^()]*\)/],
+	skip,
 	// IDENT must be lexed even where only TYPE_NAME/TYPE_SCOPE are valid (see c-parser.ts's `terminals: [IDENT]`) --
 	// it's the only terminal whose pattern matches the text, and its callback reclassifies registered names.
 	terminals: [C.IDENT, TYPE_SCOPE, TEMPLATE_FN, RIGHT_SHIFT, RIGHT_SHIFT_ASSIGN],

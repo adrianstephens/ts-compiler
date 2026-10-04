@@ -7,7 +7,7 @@
 import * as JS from './js-parser';
 import * as TS from './ts-parser';
 import { Identifier, Literal, Binary, Assign, If, ExprStmt, Block } from '@isopodlabs/tison/ast';
-import { walkerB, calcUnary, calcBinary, isJsStatement, isTsDeclaration } from './walker';
+import { walkerB, isJsStatement, isTsDeclaration, constantFolder } from './walker';
 import { patternBindings as buildPatternBindings } from './transform';
 import { tocode } from './type-utils';
 import {
@@ -28,6 +28,7 @@ type NOf<K extends NodeType> = NodeOf<Expr, Stmt, Type, K>;
 // ===================================================================
 
 const tsDialect: Dialect<Expr, Stmt, Type> = {
+	...constantFolder,
 	identifierName(e) {
 		return e.type === 'identifier' ? e.name : undefined;
 	},
@@ -50,22 +51,6 @@ const tsDialect: Dialect<Expr, Stmt, Type> = {
 		// 'this'/'super' key alike in every method but are bound per call; 'array'/'object' are a fresh identity per evaluation; 'member'/'index'
 		// reads may observe a mutation between two identical-looking occurrences.
 		return node.type === 'floating' && ['array', 'object', 'index', 'this', 'super'].includes(node.expr.type);
-	},
-	foldable(e) {
-		return e.type === 'binary' ? 2 : e.type === 'unary' ? 1 : 0;
-	},
-	fold(e, ops) {
-		return	e.type === 'binary'	? Literal(calcBinary(e.operator, ops[0], ops[1]))
-			:	e.type === 'unary'	? Literal(calcUnary(e.operator, ops[0]))
-			:	undefined;
-	},
-	// A literal's value is its own `value` field; nothing else in this AST is a constant.
-	literalValue(e) {
-		return e.type === 'literal' ? e.value : undefined;
-	},
-	// js/ts falsiness of a constant -- the value here IS the runtime value, so `!!` is exactly it.
-	truthy(value) {
-		return !!value;
 	},
 	isCalleeEdge(consumer, port) {
 		const v = consumer.type === 'effect' && consumer.expr;

@@ -2,7 +2,7 @@ import * as TS from './ts-parser';
 import * as JS from './js-parser';
 import * as T from './type-utils';
 import { Module, Location, Identifier, Literal, Binary, Conditional, Assign, Await, Member, ExprStmt, hasMod, dropMod, If, While } from '@isopodlabs/tison/ast';
-import { walker, walkerB, calcUnary, calcBinary } from './walker';
+import { walker, walkerB, constantFolder } from './walker';
 import { SEVERITY, Err, isPurePath, checkBlock, checkStmt1, exportScope, markAbsenceTests, literalSpecifier, unknownTypeNames, typeOf, typeOf1, inferReturn } from './checker';
 import { LoadedModule, ModuleLoader } from './module-loader';
 
@@ -16,18 +16,6 @@ const Scope			= T.Scope;
 //-----------------------------------------------------------------------------
 // Constant folding
 //-----------------------------------------------------------------------------
-
-const typeMasks = {
-	number:		1,
-	bigint:		2,
-	string:		4,
-	boolean:	8,
-	undefined:	16,
-	symbol:		32,
-	unknown:	0,
-	object:		0,
-	function:	0,
-} as const;
 
 export function foldConstants<T extends Expr>(e: T) {
 	return walker(
@@ -57,73 +45,25 @@ export function foldConstants<T extends Expr>(e: T) {
 				}
 				case 'binary': {
 					if (expr.left.type === 'literal' && expr.right.type === 'literal' && expr) {
-						const r = calcBinary(expr.operator, expr.left.value, expr.right.value);
-						if (r !== undefined)
-							return Literal(r);
+						const r = constantFolder.fold(expr, [expr.left.value, expr.right.value]);
+						if (r)
+							return r;
 					}
 					break;
 				}
 				case 'unary':
 					if (expr.operand.type === 'literal') {
-						const r = calcUnary(expr.operator, expr.operand.value);
+						const r = constantFolder.fold(expr, [expr.operand.value]);
 						if (r !== undefined)
-							return Literal(r);
+							return r;
 					}
 					break;
 
 				case 'call':
 					if (expr.arguments.every(a => a.type === 'literal')) {
-						const args = expr.arguments.map(a => (a as Literal<any>).value);
-						const arg0 = args[0];
-						const mask = typeMasks[typeof arg0];
-						if (expr.callee.type === 'identifier') {
-							switch (expr.callee.name) {
-								case 'Number':		return Literal(Number(arg0));
-								case 'BigInt':		return mask & 15 ? Literal(BigInt(arg0)) : undefined;
-								case 'String':		return mask & 15 ? Literal(arg0.toString()) : undefined;
-								case 'Boolean':		return Literal(Boolean(arg0));
-								case 'parseInt':	return mask === 4 ? Literal(parseInt(arg0)) : undefined;
-								case 'parseFloat':	return mask === 4? Literal(parseFloat(arg0)) : undefined;
-							}
-						} else if (expr.callee.type === 'member' && expr.callee.object.type === 'identifier') {
-							if (expr.callee.object.name === 'Math') {
-								switch (expr.callee.property) {
-									case 'abs':		return Literal(Math.abs(arg0));
-									case 'floor':	return Literal(Math.floor(arg0));
-									case 'ceil':	return Literal(Math.ceil(arg0));
-									case 'round':	return Literal(Math.round(arg0));
-									case 'fround':	return Literal(Math.fround(arg0));
-									case 'max':		return Literal(Math.max(...args));
-									case 'min':		return Literal(Math.min(...args));
-									case 'pow':		return Literal(Math.pow(args[0], args[1]));
-									case 'sqrt':	return Literal(Math.sqrt(arg0));
-									case 'sin':		return Literal(Math.sin(arg0));
-									case 'cos':		return Literal(Math.cos(arg0));
-									case 'tan':		return Literal(Math.tan(arg0));
-									case 'asin':	return Literal(Math.asin(arg0));
-									case 'acos':	return Literal(Math.acos(arg0));
-									case 'atan':	return Literal(Math.atan(arg0));
-									case 'atan2':	return Literal(Math.atan2(args[0], args[1]));
-									case 'exp':		return Literal(Math.exp(arg0));
-									case 'log':		return Literal(Math.log(arg0));
-									case 'log10':	return Literal(Math.log10(arg0));
-									case 'log2':	return Literal(Math.log2(arg0));
-									case 'trunc':	return Literal(Math.trunc(arg0));
-									case 'sign':	return Literal(Math.sign(arg0));
-									case 'sinh':	return Literal(Math.sinh(arg0));
-									case 'cosh':	return Literal(Math.cosh(arg0));
-									case 'tanh':	return Literal(Math.tanh(arg0));
-									case 'asinh':	return Literal(Math.asinh(arg0));
-									case 'acosh':	return Literal(Math.acosh(arg0));
-									case 'atanh':	return Literal(Math.atanh(arg0));
-									case 'log1p':	return Literal(Math.log1p(arg0));
-									case 'cbrt':	return Literal(Math.cbrt(arg0));
-									case 'hypot':	return Literal(Math.hypot(...args));
-									case 'imul':	return Literal(Math.imul(args[0], args[1]));
-									case 'clz32':	return Literal(Math.clz32(arg0));
-								}
-							}
-						}
+						const r = constantFolder.fold(expr, expr.arguments.map(a => (a as Literal<any>).value));
+						if (r !== undefined)
+							return r;
 					}
 					break;
 					

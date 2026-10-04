@@ -1,9 +1,9 @@
 import * as path from 'path';
 import { makeRule, Rules, List, termOneOf, removeRules } from '@isopodlabs/tison';
 import { makeCachedParser, siblingSource } from '@isopodlabs/tison/tableCache';
-import { preprocess, PreprocessOptions } from './preprocessor';
+import { preprocess, PreprocessOptions } from '../cpp/preprocessor';
 import { Module, Identifier, stampPos } from '@isopodlabs/tison/ast';
-import * as C from './c-parser';
+import * as C from '../cpp/c-parser';
 
 // ===================================================================
 //  GLSL Parser -- an extension of c-parser

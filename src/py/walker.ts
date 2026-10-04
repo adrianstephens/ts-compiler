@@ -1,5 +1,5 @@
 import * as PY from './py-parser';
-import { Module } from '@isopodlabs/tison/ast';
+import { Module, ConstantFolder, Literal } from '@isopodlabs/tison/ast';
 import * as W from '@isopodlabs/tison/walker';
 import {mapObject, mapArrayA, mapDefined, makeProcess, makeProcessB} from '@isopodlabs/tison/walker';
 
@@ -16,8 +16,7 @@ export interface Kinds { statement: Stmt; expression: Expr }
 // Best-effort: returns `undefined` for anything it can't fold to a Python-faithful value (mixed
 // types, division by zero, non-integer bit ops, matrix multiply, ...). Bitwise / shift use BigInt
 // so they don't silently wrap at 32 bits the way raw JS operators would.
-
-export function calcUnary(op: PY.unaryOps, x: unknown) {
+function calcUnary(op: PY.unaryOps, x: unknown) {
 	switch (op) {
 		case '!':	return !x;
 		case '+':	return typeof x === 'number' || typeof x === 'bigint' ? x : undefined;
@@ -31,7 +30,7 @@ function asBig(x: unknown): bigint | undefined {
 }
 const backToNum = (n: bigint) => n >= BigInt(Number.MIN_SAFE_INTEGER) && n <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(n) : n;
 
-export function calcBinary(op: PY.binaryOps, a: unknown, b: unknown): unknown {
+function calcBinary(op: PY.binaryOps, a: unknown, b: unknown): unknown {
 	// `and`/`or` yield an operand (not a bool) in Python -- JS `&&`/`||` do the same.
 	if (op === '&&')
 		return a && b;
@@ -76,7 +75,7 @@ export function calcBinary(op: PY.binaryOps, a: unknown, b: unknown): unknown {
 // produce exactly what CPython would, and Python orders mixed types differently from JS (`1 == 'a'`
 // is False, but `1 < 'a'` RAISES), so mixed-kind operands are left alone. `in`/`not in`/`is` aren't
 // value comparisons at all and never fold.
-export function calcCompare(op: PY.compareOps, a: unknown, b: unknown): unknown | undefined {
+function calcCompare(op: PY.compareOps, a: unknown, b: unknown): unknown | undefined {
 	const kind = (v: unknown) => v === null ? 'none' : typeof v === 'boolean' ? 'bool' : typeof v;
 	if (kind(a) !== kind(b))
 		return undefined;
@@ -93,6 +92,34 @@ export function calcCompare(op: PY.compareOps, a: unknown, b: unknown): unknown 
 	return undefined;
 }
 
+function MaybeLiteral(v: any): Expr | undefined {
+	return v === undefined ? undefined : Literal(v);
+}
+
+export const constantFolder: ConstantFolder<Expr> = {
+	foldable(e) {
+		return	e.type === 'binary' ? 2
+			:	e.type === 'unary'	? 1
+			:	e.type === 'compare' && e.ops.length === 1 ? 2	// A NON-CHAINED comparison (`a == b`) folds like a binary; `a < b < c` doesn't (it can't be spelled as one pair of operands).
+			:	0;
+	},
+	fold(e, ops) {
+		return	e.type === 'binary' ? MaybeLiteral(calcBinary(e.operator, ops[0], ops[1]))
+			:	e.type === 'unary'	? MaybeLiteral(calcUnary(e.operator, ops[0]))
+			:	e.type === 'compare' && e.ops.length === 1 ? MaybeLiteral(calcCompare(e.ops[0], ops[0], ops[1]))
+			:	undefined;
+	},
+	// A plain literal's value is its `value`; an f-string has interpolation holes and is NOT a constant.
+	literalValue(e) {
+		return	e.type === 'imaginary' ? e.value
+			:	e.type === 'literal' && !Array.isArray(e.value) ? e.value
+			:	undefined;
+	},
+	// Python falsiness of a constant: `0`/`''`/`False` coincide with js's, and the kinds that differ are never constants.
+	truthy(value) {
+		return !!value;
+	},
+};
 
 // ===================================================================
 //  walk -- immutable transform
