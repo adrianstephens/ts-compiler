@@ -140,7 +140,8 @@ const constContext = (inner?: Type): TS.RefType => TS.RefType('const', inner ? [
 export const isConstContext = (t: Type | undefined): t is TS.RefType => t?.type === 'ref' && t.name === 'const' && (t.typeArgs?.length ?? 0) <= 1;
 // The context a const context gives an element or property value: its own part of `inner` where TS's isConstContext reaches the
 // value (a literal, array or object literal), none past anything else -- a conditional's branches, a call's result are ordinary.
-const constContextOf = (e: Expr, inner: Type | undefined): Type | undefined => e.type === 'literal' || e.type === 'array' || e.type === 'object' ? constContext(inner) : undefined;
+// Inside a const context a literal part stays one; anything else is contextually typed as usual (`Forward(...)` among a `const R`'s elements).
+const constContextOf = (e: Expr, inner: Type | undefined): Type | undefined => e.type === 'literal' || e.type === 'array' || e.type === 'object' ? constContext(inner) : inner;
 const hasMutableArrayLike = (t: Type, scope: Scope) => T.unionMembers(t, scope).some(m => {
 	const r = T.resolveOwn(m, scope);
 	return (r.type === 'array' || r.type === 'tuple') && !r.readonly || T.isRef(r, 'Array');

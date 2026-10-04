@@ -2873,6 +2873,11 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 			}
 			return;
 		}
+		// As TS's inferFromTypes: an `any` argument is an `any` candidate for every type parameter its target mentions (`new Map(anyValue)`).
+		if (isRef(argT, 'any')) {
+			tparams.forEach((_, name) => mentionsTypeParam(paramT, name) && found(name, ANY));
+			return;
+		}
 		// TS's getApparentType: a type-parameter argument infers through its constraint (`A extends readonly T[]` gives `readonly E[]`
 		// its `E = T`), but a union, intersection or conditional target pairs its parts with the parameter itself first.
 		const bound = paramT.type !== 'union' && paramT.type !== 'intersection' && paramT.type !== 'conditional' ? typeParamConstraint(argT, scope) : undefined;
@@ -3006,6 +3011,9 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 					else
 						recurse(paramT.returnType, fn.returnType, depth - 1);
 				}
+			} else if (a.type === 'union') {
+				// As TS's inferFromTypes, a union infers from each member: `(() => R<any>) | string` gives the callable one's.
+				a.types.forEach(m => recurse(paramT, m, depth - 1));
 			}
 		} else if (paramT.type === 'object') {
 			for (const m of paramT.members) {
