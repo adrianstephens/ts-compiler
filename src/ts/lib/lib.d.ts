@@ -445,6 +445,20 @@ interface ReadonlyArray<T> {
 	[Symbol.iterator](): Generator<T, void, unknown>;
 }
 
+// As TS's `MapConstructor`: a bare `new Map()` is `Map<any, any>`; the backend still builds it at its contextual instantiation (`newTypeArgs`),
+// since `Map` lays out by `K`/`V`. The implementations are the class's constructors in `lib/map.ts`.
+interface Map<K, V> extends ReadonlyMap<K, V> {
+	set(key: K, value: V): this;
+	delete(key: K): boolean;
+	clear(): void;
+}
+interface MapConstructor {
+	new (): Map<any, any>;
+	new <K, V>(entries?: readonly (readonly [K, V])[] | null): Map<K, V>;
+	new <K, V>(iterable?: Iterable<readonly [K, V]> | null): Map<K, V>;
+}
+declare var Map: MapConstructor;
+
 // Likewise the non-mutating part of `Map`/`Set` (lib/map.ts): physically each IS one (`READONLY_ALIAS`).
 interface ReadonlyMap<K, V> {
 	readonly size: number;

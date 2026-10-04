@@ -4408,6 +4408,15 @@ async function main() {
 	}
 
 	{
+		// A bare `new Map()` is TS's `Map<any, any>`, built at its contextual instantiation (type-core.ts's `this.aliases ??= new Map()`).
+		const { bareMap } = await compile(`
+			class S { private aliases?: Map<string, number>; add(k: string, v: number) { (this.aliases ??= new Map()).set(k, v); return this.aliases.get(k) ?? 0; } }
+			export function bareMap(): number { const m: Map<string, number> = new Map(); m.set('a', 4); return new S().add('x', 3) * 10 + (m.get('a') ?? 0); }
+		`);
+		check('a bare new Map() takes its context', bareMap(), 34);
+	}
+
+	{
 		// `operator?: O` instantiated at `O = never` (transform.ts's `Assign<TS.Expr, never>(...)`) only ever holds `undefined`.
 		const { neverParam } = await compile(`
 			interface A<O> { op?: O; v: number }
