@@ -1529,6 +1529,8 @@ function collectExpandoFields(
 					assigns.push({ target: site(e.target), value: site(e.value) });
 				} else if (e.type === 'assign' && e.target.type === 'member') {
 					writes.push({ s: site(e.target.object), key: e.target.property });
+				} else if (e.type === 'assign' && e.target.type === 'index' && T.typeofName(checkerTypeOf(e.target.index, scope), scope) === 'symbol') {
+					writes.push({ s: site(e.target.object) });
 				} else if (e.type === 'object') {
 					// A literal's own accessor: the shape it is built as -- where it flows, else its own type -- gets the key's companions.
 					for (const q of e.properties)
@@ -1814,8 +1816,9 @@ function setterSig(): TS.FunctionType { return { type: 'function', params: [{ ke
 
 // The TS type of a HIDDEN field (`#ext`, an accessor's `#get:`/`#set:` companion) -- named in one place, so a derived shape
 // repeating its base's hidden fields repeats them exactly and stays that base's wasm subtype. Plain expandos are `any`.
+const EXT_MAP = TS.RefType('Map', [TS.RefType('PropertyKey'), T.ANY]);
 function hiddenFieldType(name: string): Type {
-	return name === '#ext' ? TS.RefType('Map', [T.STRING, T.ANY])
+	return name === '#ext' ? EXT_MAP
 		: name.startsWith('#get:') ? getterSig()
 		: name.startsWith('#set:') ? setterSig()
 		: T.ANY;
@@ -4456,11 +4459,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (args.length !== 3)
 			throw "'Object.defineProperty' takes exactly 3 arguments";
 		const [targetExpr, keyExpr, descExpr] = args;
-		if (targetExpr.type !== 'identifier')
-			throw "'Object.defineProperty': the target must be a plain local variable";
-		if (keyExpr.type !== 'literal' || typeof keyExpr.value !== 'string')
-			throw "'Object.defineProperty' needs a compile-time literal string key";
-		const key = keyExpr.value;
 		if (descExpr.type !== 'object')
 			throw "'Object.defineProperty': the descriptor must be a literal object";
 		// Data (`value`) or an accessor (`get`/`set`). An accessor's halves land in the key's `#get:`/`#set:` companions, which every
@@ -4472,6 +4470,22 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			throw "'Object.defineProperty': a descriptor's `value` must be a plain property";
 		if (!valueExpr && !getProp && !setProp)
 			throw "'Object.defineProperty': the descriptor needs a `value`, a `get` or a `set`";
+		// A key known only at run time (`typeId`'s symbol memo) has no slot of its own: it lands in the run-time struct's `#ext`.
+		if (keyExpr.type !== 'literal' || typeof keyExpr.value !== 'string') {
+			if (!valueExpr)
+				throw "'Object.defineProperty': an accessor needs a compile-time literal string key";
+			const tw	= emitExpr(targetExpr, ctx);
+			const held	= ctx.temp(`$defined$${ctx.tempCounter++}`, tw);
+			ctx.emit(I.local.tee(held));
+			coerceTop(tw, ctx, W.REF_ANY);
+			emitAs(keyExpr, ctx, W.REF_ANY_NULLABLE);
+			emitAs(valueExpr, ctx, W.REF_ANY_NULLABLE);
+			ctx.emit(I.call(ensureExtKey('set').funcIndex), I.local.get(held));
+			return tw;
+		}
+		if (targetExpr.type !== 'identifier')
+			throw "'Object.defineProperty': the target must be a plain local variable";
+		const key = keyExpr.value;
 		if ([getProp, setProp].some(p => p?.type === 'method' && closureFree(p).has('this')))
 			throw "'Object.defineProperty': an accessor method that uses `this` is not supported -- its `this` is the target, which a closure cannot bind";
 		const emitHalf = (p: NonNullable<typeof getProp>, want: W.Type) => {
@@ -4541,9 +4555,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const extIdx = owner.fieldIndex.get('#ext');
 			if (extIdx === undefined)
 				throw `'Object.defineProperty': '${owner.name}' has no extension slot for '${key}' -- an internal inconsistency (every real defineProperty target should already have one)`;
-			const mapCls = ensureClass('Map', [TS.RefType('string'), T.ANY]);
-			if (!mapCls)
-				throw `internal: 'Map' isn't available for '${owner.name}''s own dynamic extension`;
+			const mapCls = extMapClass();
 			ctx.emit(I.local.get(scratch.index), I.struct.get(owner.typeIndex, extIdx), I.ref.is_null);
 			const _cond = ctx.swapOut();
 			ctx.emit(I.local.get(scratch.index));
@@ -4731,7 +4743,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				if (physCls && physIdx !== undefined)
 					return { wtype: physCls.fields[physIdx].wtype, operands: [], load: () => { ctx.emit(I.local.get(local!.index)); emitFieldRead(physCls, physIdx, ctx); } };
 				const extIdx = physCls?.fieldIndex.get('#ext');
-				const mapCls = extIdx !== undefined && ensureClass('Map', [TS.RefType('string'), T.ANY]);
+				const mapCls = extIdx !== undefined && extMapClass();
 				if (physCls && extIdx !== undefined && mapCls) {
 					// The catch-all map may never have been allocated (null): the key is then absent, `undefined`, as `Map.get` gives on an allocated one.
 					return { wtype: W.REF_ANY, operands: [], load: () => {
@@ -4802,6 +4814,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					return { wtype: info.result, operands: [expr(target.object, W.REF_ANY), expr(target.index, 'i32')], load: () => ctx.emit(I.call(info.funcIndex)) };
 				}
 			}
+
+			// A symbol key names no field: it reads and writes the run-time struct's `#ext` (`typeId`'s memo).
+			if (T.typeofName(ctx.narrowedTypeOf(target.index), ctx.scope) === 'symbol')
+				return { wtype: W.REF_ANY_NULLABLE, operands: [expr(target.object, W.REF_ANY), expr(target.index, W.REF_ANY_NULLABLE)],
+					load:	() => ctx.emit(I.call(ensureExtKey('get').funcIndex)),
+					store:	() => ctx.emit(I.call(ensureExtKey('set').funcIndex)) };
 
 			const stringKey = T.isAssignable(ctx.narrowedTypeOf(target.index), T.STRING, ctx.scope);
 			const keyWtype	= typeOf(T.STRING)!;
@@ -7392,9 +7410,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (spec === 'dynamic') {
 			if (info.fieldIndex.has('#ext'))
 				return;
-			const map = ensureClass('Map', [TS.RefType('string'), T.ANY]);
-			if (!map)
-				throw `internal: 'Map' isn't available for '${name}''s own dynamic expando`;
+			const map = extMapClass();
 			info.fieldIndex.set('#ext', info.fields.length);
 			info.fields.push({ name: '#ext', wtype: { ...(map.thisWtype! as { ref: string }), nullable: true }, optional: true });
 		} else {
@@ -8602,6 +8618,51 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				dctx.emit(I.local.get(value));
 				emitBoxedFieldWrite(cls, cls.fieldIndex.get(name)!, dctx);
 			} }))], trap(dctx));
+		});
+	}
+
+	// The class of a struct's catch-all `#ext` slot.
+	const extMapClass = () => {
+		const cls = ensureClass(EXT_MAP.name, EXT_MAP.typeArgs);
+		if (!cls)
+			throw "internal: 'Map' isn't available for an '#ext' slot";
+		return cls;
+	};
+
+	// A key known only at run time (a symbol) on a struct: its `#ext` map, the catch-all slot of the shapes such a key is written onto
+	// (`collectExpandoFields`). A struct without one has no such key: a read is `undefined`, a write traps, since dropping it is worse.
+	function ensureExtKey(kind: 'get' | 'set'): FuncInfo {
+		return synthesize(`<ext key ${kind}>`, () => ({
+			params: [param('recv'), param('key', W.REF_ANY_NULLABLE), ...(kind === 'set' ? [param('value', W.REF_ANY_NULLABLE)] : [])],
+			result: kind === 'get' ? W.REF_ANY_NULLABLE : 'void' as W.Type,
+		}), (dctx, [recv, key, value], { result }) => {
+			const mapCls = extMapClass();
+			const owners = distinctHeaps(dynamicReceivers(false).filter(r => r.cls.typeIndex !== -1 && r.cls.fieldIndex.has('#ext')));
+			emitTypeCascade(dctx, recv, owners.map(({ heap, cls }) => ({ heap, emit: () => {
+				const obj = dctx.temp(`$extobj$${heap}`, cls.thisWtype!), ext = cls.fieldIndex.get('#ext')!;
+				const map = () => dctx.emit(I.local.get(obj), I.struct.get(cls.typeIndex, ext));
+				dctx.emit(I.local.set(obj));
+				map();
+				dctx.emit(I.ref.is_null);
+				if (kind === 'get') {
+					dctx.emitIf(toValType(result), () => dctx.emitDefaultValue(result, types, toValType), () => {
+						map();
+						dctx.emit(I.ref.as_non_null);
+						coerceTop(emitCallOn(mapCls, 'get', [localArg(dctx, key, W.REF_ANY_NULLABLE)], dctx), dctx, result);
+					});
+				} else {
+					dctx.emitIf(undefined, () => {
+						dctx.emit(I.local.get(obj));
+						const ctor = ensureCtor(mapCls, [], dctx);
+						emitCallArgs(`${mapCls.name}'s constructor`, ctor.params, ctor.defaults, !!ctor.hasRest, [], dctx, ctor.resolvedParams);
+						dctx.emit(I.call(ctor.funcIndex), I.struct.set(cls.typeIndex, ext));
+					});
+					map();
+					dctx.emit(I.ref.as_non_null);
+					emitCallOn(mapCls, 'set', [localArg(dctx, key, W.REF_ANY_NULLABLE), localArg(dctx, value, W.REF_ANY_NULLABLE)], dctx);
+					dctx.emit(I.drop);
+				}
+			} })), kind === 'get' ? () => dctx.emitDefaultValue(result, types, toValType) : trap(dctx), kind === 'get' ? result : undefined);
 		});
 	}
 

@@ -4408,6 +4408,33 @@ async function main() {
 	}
 
 	{
+		// A symbol key names no field: `defineProperty` and `x[sym]` reach the run-time struct's `#ext` (type-core.ts's `typeId` memo),
+		// a slot only the shapes such a key is written onto get.
+		const { symbolMemo } = await compile(`
+			type Node = { type: 'a'; n: number } | { type: 'b'; s: string };
+			const MEMO = [Symbol('m0'), Symbol('m1')];
+			function memoId(t: Node, scoped = false): string {
+				const memo = MEMO[+scoped];
+				const known = (t as Record<symbol, string | undefined>)[memo];
+				if (known !== undefined)
+					return known;
+				const id = t.type + (scoped ? '!' : '');
+				Object.defineProperty(t, memo, { value: id });
+				return id;
+			}
+			const SYM = Symbol('k');
+			export function symbolMemo(): number {
+				const a: Node = { type: 'a', n: 1 }, b: Node = { type: 'b', s: 'x' };
+				const r = memoId(a) + memoId(a, true) + memoId(b) + memoId(a);
+				const o: { v: number } = { v: 2 };
+				(o as Record<symbol, number>)[SYM] = 40;
+				return r.length * 100 + (o as Record<symbol, number>)[SYM] + ((b as Record<symbol, string | undefined>)[MEMO[1]] === undefined ? 1 : 0);
+			}
+		`);
+		check('a symbol key reads and writes a struct\'s #ext (defineProperty, x[sym])', symbolMemo(), 541);
+	}
+
+	{
 		// An empty statement (a stray `;`) had no `case` in `emitStmt` at all, so it reached the `default:`
 		// throw -- js-parser.ts's own source is full of them.
 		const { strays, emptyLoopBody } = await compile(`
