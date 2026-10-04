@@ -2743,7 +2743,7 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 					// What the operand is BUILT as, though not typed against: `{ type: 'array', ... } as Expr` names the union member.
 					stampContext(e.expression, anno, scope);
 				}
-				return T.freeze(anno);
+				return T.freeze(T.expandLocalQueries(anno, scope));
 			}
 			case 'satisfies': {
 				const anno = e.typeAnnotation;
@@ -2791,6 +2791,15 @@ function checkFunctionBody(fn: TS.CallSig, body: JS.Stmt<any>[] | Expr | undefin
 	if (expected && !err && fn.scope && (!Array.isArray(body) || !body.length || (body[0] as any).scope || scope.isGenericTemplate()))
 		return;
 
+	// A function expression's parameter annotations name the scope it is written in, stamped before the body runs: a parameter's type flows from
+	// there into callees' instantiations, whose own stamps would claim it. Not a class member's, which each instance's scope must resolve, nor in a
+	// generic class's template or a speculative walk, which never stamp (`noStamp`).
+	if ('type' in fn && (fn.type === 'arrow' || fn.type === 'function') && !trying && !scope.isGenericTemplate()) {
+		const ownTypeParams = fn.typeParams?.length ? new Set(fn.typeParams.map(p => p.name)) : undefined;
+		for (const p of [...fn.params, ...fn.rest ? [fn.rest] : []])
+			if (p.typeAnnotation)
+				T.stampScope(p.typeAnnotation, scope, ownTypeParams);
+	}
 	const inner = new Scope(scope);
 	inner.functionKind = { async, yield: generatorTypes?.yield, next: generatorTypes?.next };
 	// Every non-arrow function has its own `arguments`; an arrow reads its enclosing one's.

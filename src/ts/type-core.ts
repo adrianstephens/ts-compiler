@@ -91,15 +91,14 @@ export function typeId(t: Type, scoped = false): string {
 		: `{${fields(v).join(',')}}`;
 	const fields = (o: object) => Object.keys(o).filter(k => !(scoped && k === 'declScope' ? false : UNPRINTED.has(k)) && typeof (o as Record<string, unknown>)[k] !== 'function').sort()
 		.map(k => `${k}:${part((o as Record<string, unknown>)[k])}`);
+	// A node reached again while its own id is computed (`f` returning `f`) reads as a provisional id unique to it, which ends the cycle.
+	Object.defineProperty(t, memo, { value: `~${++cyclicIds}`, configurable: true });
 	const sig	= fields(t).join(';');
 	const id	= `${hash53(sig, 0).toString(36)}.${hash53(sig, 0x9e3779b9).toString(36)}`;
-	// A node reached again while its own id was computed (a type containing itself) was given one first.
-	const set = (t as Record<symbol, string | undefined>)[memo];
-	if (set !== undefined)
-		return set;
 	Object.defineProperty(t, memo, { value: id });
 	return id;
 }
+let cyclicIds = 0;
 // cyrb53: a well-mixed 53-bit string hash.
 function hash53(str: string, seed: number): number {
 	let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
@@ -571,7 +570,7 @@ export function optional(type:Type, optional?: boolean) {
 export function intersectTypes(types: Type[]): Type {
 	if (types.length === 1)
 		return types[0];
-	const unique = dedupe(flatParts(types, 'intersection'), typeKey);
+	const unique = dedupe(flatParts(types, 'intersection'), t => typeId(t));
 	// TS's intersection reduction: `any` absorbs every member.
 	return unique.some(t => isRef(t, 'any')) ? ANY : unique.length === 1 ? unique[0] : TS.IntersectionType(unique);
 }
@@ -725,6 +724,20 @@ function rewriteOnce<X extends object, P, R>(on: (x: X, process: P, recurse: R) 
 	};
 }
 
+// `t` (a written cast's type) with each `typeof` naming a function's local replaced by that local's type: an inferred return built from it
+// outlives the names (`group`'s `as (keyof typeof inv)[]`), and a query would hide from substitution the type parameters it mentions.
+export function expandLocalQueries(t: Type, scope: Scope): Type {
+	const local = (s: Scope | undefined): boolean => !!s && (!!s.functionKind || local(s.parent));
+	return walker(undefined, undefined, rewriteOnce((x: Type, process: <T extends Type>(x: T) => T) => {
+		if (!refNames(x).has(QUERY))
+			return x;
+		if (x.type !== 'typeof')
+			return process(x);
+		const sc = declScopeOf(x, scope);
+		return local(sc.declaring(x.name.split('.')[0])) ? resolve(sc, x) : process(x);
+	})).type(t) ?? t;
+}
+
 // A synthetic type-parameter name: the apostrophe can never appear in a real identifier, so it collides with nothing in scope.
 let freshTypeParamId = 0;
 export function freshTypeParamName(base: string) { return `${base}'${freshTypeParamId++}`; }
@@ -799,6 +812,28 @@ function methodSignature(m: TS.CallSig): TS.CallSig {
 }
 
 // Replaces type-parameter references with their instantiating arguments (`Foo<string>` is Foo's body with `T := string`).
+// Every name a ref anywhere in `t` spells (bound ones included), plus `QUERY`/`INDEXED` if it holds a `typeof`/`T[K]`, memoized on each node:
+// a rewrite skips a subtree holding nothing it rewrites.
+const refNamesCache = new WeakMap<Type, ReadonlySet<string>>();
+const QUERY = '\0typeof', INDEXED = '\0indexed';
+function refNames(t: Type): ReadonlySet<string> {
+	let names = refNamesCache.get(t);
+	if (!names) {
+		// Cached before the walk: a type reaching itself (`f` returning `f`) shares the set still being filled.
+		const out = new Set<string>();
+		refNamesCache.set(t, out);
+		if (t.type === 'ref')
+			out.add(t.name);
+		else if (t.type === 'typeof')
+			out.add(QUERY);
+		else if (t.type === 'indexed_access')
+			out.add(INDEXED);
+		walkerB(undefined, undefined, (x: Type, process: (x: Type) => boolean) => x === t ? process(x) : (refNames(x).forEach(n => out.add(n)), false)).type(t);
+		names = out;
+	}
+	return names;
+}
+
 export function substituteType(t: Type, map: Map<string, Type>): Type {
 	if (map.size === 1) {
 		const [[name, arg]] = map;
@@ -820,6 +855,9 @@ export function substituteType(t: Type, map: Map<string, Type>): Type {
 	function uncached(): Type {
 		return walker(undefined, undefined,
 			rewriteOnce((x: Type, process: <T extends Type>(x: T) => T) => {
+				const names = refNames(x);
+				if (![...map.keys()].some(k => names.has(k)))
+					return x;
 				if (x.type === 'ref' && !x.typeArgs && map.has(x.name))
 					return map.get(x.name);
 				if (x.type === 'function' || x.type === 'constructor') {
@@ -1040,8 +1078,8 @@ function deferred(t: Extract<Type, { type: 'conditional' }>, scope: Scope): Type
 // per member, which nested grew past any string a key can hold.
 function valueAtKey(t: Extract<Type, { type: 'mapped' }>, key: Type, scope: Scope): Type {
 	const sub = substituteType(t.valueType, new Map([[t.keyName, key]]));
-	return walker(undefined, undefined, (x: Type, process: <T extends Type>(x: T) => T) =>
-		x.type === 'indexed_access' && !mentionsAbstract(x, scope) ? resolve(scope, x, undefined, true) : process(x)).type(sub) ?? sub;
+	return walker(undefined, undefined, rewriteOnce((x: Type, process: <T extends Type>(x: T) => T) =>
+		!refNames(x).has(INDEXED) ? x : x.type === 'indexed_access' && !mentionsAbstract(x, scope) ? resolve(scope, x, undefined, true) : process(x))).type(sub) ?? sub;
 }
 
 // TS's permissive instantiation: every unbound type parameter in `t` read as `any`.
@@ -1051,7 +1089,18 @@ function permissive(t: Type, scope: Scope): Type {
 
 // Does `t` mention an unbound type parameter anywhere (an object member, a type argument), not just as a bare ref (`isAbstract`)? `instantiate`
 // uses it to tell a real inference result from one carrying an OUTER call's unsolved parameters.
+// Memoized per scope and node, by the names bound around it: a chained builder's type (`TreeBuilder<T & X>` per step) is a DAG whose tree is exponential.
+const abstractCache = new WeakMap<Scope, WeakMap<Type, Map<string, boolean>>>();
 export function mentionsAbstract(t: Type, scope: Scope, bound: ReadonlySet<string> = new Set()): boolean {
+	const byType	= abstractCache.get(scope) ?? abstractCache.set(scope, new WeakMap()).get(scope)!;
+	const byBound	= byType.get(t) ?? byType.set(t, new Map()).get(t)!;
+	const key		= bound.size ? [...bound].sort().join(',') : '';
+	let r = byBound.get(key);
+	if (r === undefined)
+		byBound.set(key, r = mentionsAbstractUncached(t, scope, bound));
+	return r;
+}
+function mentionsAbstractUncached(t: Type, scope: Scope, bound: ReadonlySet<string>): boolean {
 	const within	= (x: Type, names: readonly string[]) => mentionsAbstract(x, scope, names.length ? new Set([...bound, ...names]) : bound);
 	const any		= (xs: (Type | undefined)[], names: readonly string[] = []) => xs.some(x => !!x && within(x, names));
 	const sig		= (s: TS.CallSig) => any([...s.params.map(p => p.typeAnnotation), s.rest?.typeAnnotation, s.returnType], s.typeParams?.map(p => p.name) ?? []);
@@ -1127,6 +1176,26 @@ function expandTemplate(parts: JS.TemplatePart<Type>[], scope: Scope): Type | un
 		acc = acc.flatMap(a => texts.map(x => a + p.str + x));
 	}
 	return combineTypes(acc.map(x => Literal(x)));
+}
+
+// The text each placeholder of a template literal type takes in `src`, as TS's inferFromLiteralPartsToTemplateLiteral: up to the next part's
+// text (one character before another placeholder), the last the rest. Each part is text then a placeholder; a final text part may be absent.
+function templateSlices(written: readonly JS.TemplatePart<Type>[], src: string): string[] | undefined {
+	const parts	= written[written.length - 1].exp ? [...written, { str: '' }] : written;
+	const n		= parts.length - 1, end = src.length - parts[n].str.length;
+	let pos = parts[0].str.length;
+	if (!src.startsWith(parts[0].str) || !src.endsWith(parts[n].str) || end < pos)
+		return undefined;
+	const slices: string[] = [];
+	for (let i = 0; i < n; i++) {
+		const delim	= parts[i + 1].str;
+		const stop	= i === n - 1 ? end : delim ? src.indexOf(delim, pos) : pos + 1;
+		if (stop < pos || stop > end)
+			return undefined;
+		slices.push(src.slice(pos, stop));
+		pos = stop + delim.length;
+	}
+	return slices;
 }
 
 // A regex matching every string an unexpanded template literal type denotes; an interpolation it can't pin down matches anything.
@@ -1334,6 +1403,11 @@ export function resolve(scope: Scope, t: Type, depth = 10, stopAtRef = false): T
 			case 'literal':
 				return Array.isArray(t.value) ? expandTemplate(t.value, scope) ?? t : t;
 
+			// A spread of a tuple contributes its elements (`[...Split<'add'>]` is `['add']`), as TS normalizes a tuple it instantiates.
+			case 'tuple': {
+				const elements = t.elements.some(e => e.type === 'spread') ? flatTupleElements(t, scope) : t.elements;
+				return elements.length === t.elements.length && elements.every((e, i) => e === t.elements[i]) ? t : { ...t, elements };
+			}
 			// An array's element resolves too: a `Record<string, number>['string']` element otherwise stayed opaque inside a `V[]`.
 			case 'array': {
 				// A machine-type element (`i8[]`) stays unresolved: resolved it is plain `number`, and the element kind it forces is lost.
@@ -1347,18 +1421,20 @@ export function resolve(scope: Scope, t: Type, depth = 10, stopAtRef = false): T
 			case 'mapped': {
 				// Members are knowable only once the key constraint resolves to literals; of `keyof T & U`, the part that does is the key set (other parts
 				// are not checked to exclude more). Each key resolved as it descends: a union member may be an alias to a further union.
+				// A numeric key (`{69: 'i32.eqz'}`'s) stays a number, as TS's `K` does; its property is named by its string form.
 				const literalKeys = (x: Type) => {
-					const parts = unionMembers(x, scope).map(m => resolve(scope, m)).map(m => isLiteral(m, 'string') && !Array.isArray(m.value) ? m.value : undefined);
-					return parts.every((p): p is string => p !== undefined) ? parts : undefined;
+					const parts = unionMembers(x, scope).map(m => resolve(scope, m)).map(m => isLiteral(m, 'string') && !Array.isArray(m.value) ? m.value
+						: isLiteral(m, 'number') ? m.value : m.type === 'range' && m.base === 'number' && m.min !== undefined && m.min === m.max ? m.min : undefined);
+					return parts.every((p): p is string | number => p !== undefined) ? parts : undefined;
 				};
 				// Homomorphic (`[P in keyof T]`): each property starts from that key's own modifiers on `T`.
 				const constraintParts	= t.constraint.type === 'intersection' ? t.constraint.types : [t.constraint];
 				const keyofArg			= constraintParts.find(m => m.type === 'keyof')?.argument;
-				const modifiersFor		= (key: string) => {
+				const modifiersFor		= (key: string | number) => {
 					const source = keyofArg && resolveObjectType(keyofArg, scope);
-					return source ? mapMemberModifiers(findTypeMember(source.members, key)?.modifiers, t.modifiers) : t.modifiers;
+					return source ? mapMemberModifiers(findTypeMember(source.members, String(key))?.modifiers, t.modifiers) : t.modifiers;
 				};
-				const property = (key: string) => TS.TypeProperty(key, valueAtKey(t, Literal(key), scope), modifiersFor(key));
+				const property = (key: string | number) => TS.TypeProperty(String(key), valueAtKey(t, Literal(key), scope), modifiersFor(key));
 				// A HOMOMORPHIC mapped type over an ARRAY or TUPLE maps its ELEMENTS and stays an array/tuple, as TS does: `{[K in keyof T]: F<T[K]>}` with
 				// `T = string[]` is `F<string>[]`, never an object keyed by indices.
 				if (!t.nameType && t.constraint.type === 'keyof') {
@@ -1484,6 +1560,20 @@ export function resolve(scope: Scope, t: Type, depth = 10, stopAtRef = false): T
 						return undefined;
 					const peeled	= peelAliases(raw, scope, depth);
 					const t			= peeled.type === 'mapped' || peeled.type === 'union' || peeled.type === 'intersection' ? peeled : resolve(scope, peeled, depth - 1);
+					// A remapped key (`as N`) is `N` at each key, as TS: over `keyof T` each of `T`'s own member keys and index key types (`'str'` beside a
+					// string index), else each member of the constraint; a `never` drops it. Over an unbound constraint TS defers it, a key relating as the
+					// constraint's do. A symbol-valued key is kept as itself: without `unique symbol` types `N`'s `Record<typeof sym, X>` misreads.
+					if (t.type === 'mapped' && t.nameType) {
+						const at		= (k: Type) => resolve(scope, substituteType(t.nameType!, new Map([[t.keyName, k]])), depth - 1);
+						const arg		= t.constraint.type === 'keyof' ? resolve(scope, t.constraint.argument, depth - 1) : undefined;
+						const keySet	= arg ?? resolve(scope, t.constraint, depth - 1);
+						if (mentionsAbstract(keySet, scope))
+							return t.constraint;
+						const source	= arg && resolveObjectType(arg, scope);
+						const keys		= source ? source.members.flatMap(m => m.type === 'property' || m.type === 'method' ? isPublicMember(m) && keyType(m.key) || []
+							: m.type === 'index' ? [m.paramType] : []) : unionMembers(arg ? resolve(scope, t.constraint, depth - 1) : keySet, scope);
+						return combineTypes(keys.map(k => k.type === 'typeof' ? k : at(k)));
+					}
 					if (t.type === 'mapped')
 						return t.constraint;
 					if (t.type === 'object')
@@ -1519,10 +1609,11 @@ export function resolve(scope: Scope, t: Type, depth = 10, stopAtRef = false): T
 						// call infers; the pattern, instantiated (uninferred at its constraint, else `unknown`), is what the check type must extend.
 						const params	= new Map<string, TS.TypeParam>();
 						const pattern	= walker(undefined, undefined, rewriteOnce((x: Type, process: <T extends Type>(x: T) => T) => x.type === 'infer'
-							? (params.set(x.name, TS.TypeParam(x.name, x.constraint)), TS.RefType(x.name)) : process(x))).type(t.extendsType) ?? t.extendsType;
-						const bindings	= new Map<string, Type>();
-						inferTypeArgs(pattern, checkType, params, bindings, scope);
-						params.forEach((p, name) => bindings.has(name) || bindings.set(name, p.constraint ?? UNKNOWN));
+							? (params.set(x.name, { ...TS.TypeParam(x.name, x.constraint), const: true }), TS.RefType(x.name)) : process(x))).type(t.extendsType) ?? t.extendsType;
+						// As TS's getTypeFromInference: covariant candidates union, contravariant ones intersect (`UnionToIntersection`).
+						const inference	= new Inference([...params.values()], scope, scope);
+						inferTypeArgs(pattern, checkType, params, inference, scope);
+						const bindings	= new Map([...params].map(([name, p]) => [name, inference.union(name) ?? p.constraint ?? UNKNOWN] as const));
 						const fits		= [...params].every(([name, p]) => !p.constraint || isAssignable(bindings.get(name)!, p.constraint, scope))
 							&& isAssignable(checkType, substituteType(pattern, bindings), scope);
 						// A taken branch IS the result, spending no depth: a long `A ? X : B ? Y : ...` chain bailed to `any`, leaving every enclosing resolution uncached.
@@ -2335,7 +2426,9 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 		const s = flatTupleElements(src, scope), d = flatTupleElements(dst, dstScope);
 		const isRest	= (e: TS.TupleElement) => e.type === 'spread';
 		const required	= (e: TS.TupleElement) => !(e.type === 'optional' || e.type === 'spread' || (e.type === 'labeled' && e.optional));
-		const typeAt	= (e: TS.TupleElement, sc: Scope) => e.type === 'spread' ? arrayLikeElement(resolve(sc, e.argument)) ?? ANY : tupleElementType(e)!;
+		// An optional element also holds `undefined` (TS without `exactOptionalPropertyTypes`).
+		const typeAt	= (e: TS.TupleElement, sc: Scope) => e.type === 'spread' ? arrayLikeElement(resolve(sc, e.argument)) ?? ANY
+			: required(e) ? tupleElementType(e)! : TS.UnionType([tupleElementType(e)!, UNDEFINED]);
 		const sRest = s.findIndex(isRest), dRest = d.findIndex(isRest);
 		if (dRest < 0)
 			return sRest < 0 && s.length <= d.length && s.length >= d.filter(required).length && s.every((e, i) => recurse(typeAt(e, scope), typeAt(d[i], dstScope), depth - 1));
@@ -2370,7 +2463,7 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 		const asType = (s: TS.CallSig, sc: Scope) => withScope({ ...TS.FunctionType(JS.Params(s.params, s.rest), s.returnType ?? ANY, s.typeParams), type: m.type === 'call' ? 'function' as const : 'constructor' as const }, sc);
 		const want = asType(m, dstScope);
 		return signaturesOf(src, m.type, scope).some(s => {
-			const got = asType(s, declScopeOf(s, scope)), key = `${typeKey(got)} -> ${typeKey(want)}`;
+			const got = asType(s, declScopeOf(s, scope)), key = `sig ${typeId(got, true)} -> ${typeId(want, true)}`;
 			if (inProgress.has(key))
 				return true;
 			inProgress.add(key);
@@ -2912,6 +3005,13 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 		if (bound)
 			return recurse(paramT, bound, depth - 1);
 		const a = resolveOwn(argT, scope);
+		// A string literal against a template literal type binds each placeholder to its stretch of the text (`${infer Head}.${infer Rest}`).
+		if (paramT.type === 'literal' && Array.isArray(paramT.value)) {
+			const parts: readonly JS.TemplatePart<Type>[] = paramT.value;
+			const slices = isLiteral(a, 'string') && !Array.isArray(a.value) ? templateSlices(parts, a.value) : undefined;
+			slices?.forEach((text, i) => recurse(parts[i].exp!, Literal(text), depth - 1));
+			return;
+		}
 		if (paramT.type === 'array') {
 			if (a.type === 'array') {
 				recurse(paramT.element, a.element, depth - 1);

@@ -238,6 +238,33 @@ export function walker(
 	});
 	const mapTypeParamU = (p: JS.TypeParam<any>) => mapTypeParam(p as TS.TypeParam) as JS.TypeParam<any>;
 
+	// A TYPE is rebuilt only where a part changed: a rewrite (`substituteType`) keeps unchanged subtrees shared, so identity caches (`resolve`,
+	// `lookupMember`, `typeId`'s memo) still hit them. An emptied array still drops its field, as `mapArray` does.
+	const keep = <N extends Record<string, any>>(node: N, fields: W.NodeMap<N>): N => {
+		const r = mapObject(node, fields);
+		return Object.keys(fields).every(k => r[k] === node[k]) ? node : r;
+	};
+	const keepArrayA = <T,>(map: (x: T) => T | undefined) => (x: readonly T[]): T[] => {
+		const r = mapArrayA(map)(x);
+		return r.length === x.length && r.every((e, i) => e === x[i]) ? x as T[] : r;
+	};
+	const keepArray = <T,>(map: (x: T) => T | undefined) => (x: readonly T[]): T[] | undefined => {
+		const r = keepArrayA(map)(x);
+		return r.length ? r : undefined;
+	};
+	const keepTypeParam = (p: TS.TypeParam) => keep(p, { constraint: mapType, default: mapType });
+	const keepSig = {
+		params:			keepArrayA((p: TS.Param) => keep(p, {
+			key:			mapBindingTarget,
+			default:		mapExpression,
+			typeAnnotation:	mapType
+		})),
+		rest:			(rest: JS.Rest<Type>): JS.Rest<Type> => (t => t === rest.typeAnnotation ? rest : {key: rest.key, typeAnnotation: t})(mapType(rest.typeAnnotation)),
+		typeParams:		keepArrayA(keepTypeParam),
+		thisType:		(t: Type) => mapType(t),
+		returnType:		(t: Type) => mapType(t),
+	};
+
 	const mapSig = {
 		params:			mapArrayA((p: TS.Param) => mapObject(p, {
 			key:			mapBindingTarget,
@@ -306,16 +333,16 @@ export function walker(
 	const typeMember = (m: TS.TypeMember): TS.TypeMember => {
 		switch (m.type) {
 			case 'property':
-				return mapObject(m, {key: mapKey, typeAnnotation: mapTypeA});
+				return keep(m, {key: mapKey, typeAnnotation: mapTypeA});
 			case 'method':
-				return mapObject(m, {...mapSig,
+				return keep(m, {...keepSig,
 					key: mapKey,
 				});
 			case 'call':
 			case 'construct':
-				return mapObject(m, mapSig);
+				return keep(m, keepSig);
 			case 'index':
-				return mapObject(m, {paramType: mapTypeA, typeAnnotation: mapTypeA});
+				return keep(m, {paramType: mapTypeA, typeAnnotation: mapTypeA});
 			default:
 				return m;
 		}
@@ -323,39 +350,39 @@ export function walker(
 
 	const type = (type: Type): Type => {
 		switch (type.type) {
-			case 'ref':					return mapObject(type, {typeArgs: mapArray(mapType)});
+			case 'ref':					return keep(type, {typeArgs: keepArray(mapType)});
 			case 'typeof':
-			case 'import':				return mapObject(type, {typeArgs: mapArray(mapType)});
+			case 'import':				return keep(type, {typeArgs: keepArray(mapType)});
 			case 'literal':
 				return Array.isArray(type.value)
-					? mapObject(type as Literal<JS.TemplatePart<Type>[]>, { value: mapArray(p => p.exp ? mapObject(p, {exp: mapType}) : p)})
+					? keep(type as Literal<JS.TemplatePart<Type>[]>, { value: keepArray(p => p.exp ? keep(p, {exp: mapType}) : p)})
 					: type;
-			case 'array':				return mapObject(type, {element: mapTypeA});
-			case 'tuple':				return mapObject(type, {elements: mapArrayA(e =>
-					e.type === 'spread'		? mapObject(e, {argument: mapTypeA})
-					: e.type === 'optional'	? mapObject(e, {element: mapTypeA})
-					: e.type === 'labeled'	? mapObject(e, {element: mapTypeA})
+			case 'array':				return keep(type, {element: mapTypeA});
+			case 'tuple':				return keep(type, {elements: keepArrayA(e =>
+					e.type === 'spread'		? keep(e, {argument: mapTypeA})
+					: e.type === 'optional'	? keep(e, {element: mapTypeA})
+					: e.type === 'labeled'	? keep(e, {element: mapTypeA})
 					: mapTypeA(e))});
 			case 'union':
-			case 'intersection':		return mapObject(type, {types: mapArrayA(mapTypeA)});
+			case 'intersection':		return keep(type, {types: keepArrayA(mapTypeA)});
 			case 'function':
-			case 'constructor':			return mapObject(type, mapSig);
-			case 'object':				return mapObject(type, {members: mapArrayA(mapTypeMember)});
-			case 'keyof':				return mapObject(type, {argument: mapTypeA});
-			case 'indexed_access':		return mapObject(type, {object: mapTypeA, index: mapTypeA});
-			case 'conditional':			return mapObject(type, {
+			case 'constructor':			return keep(type, keepSig);
+			case 'object':				return keep(type, {members: keepArrayA(mapTypeMember)});
+			case 'keyof':				return keep(type, {argument: mapTypeA});
+			case 'indexed_access':		return keep(type, {object: mapTypeA, index: mapTypeA});
+			case 'conditional':			return keep(type, {
 					checkType:		mapTypeA,
 					extendsType:	mapTypeA,
 					trueType:		mapTypeA,
 					falseType:		mapTypeA
 				});
-			case 'infer':				return mapObject(type, {constraint: mapType});
-			case 'mapped':				return mapObject(type, {
+			case 'infer':				return keep(type, {constraint: mapType});
+			case 'mapped':				return keep(type, {
 					constraint: 	mapTypeA,
 					nameType:		mapType,
 					valueType:		mapTypeA
 				});
-			case 'predicate':			return mapObject(type, {assertedType: mapTypeA});
+			case 'predicate':			return keep(type, {assertedType: mapTypeA});
 
 			case 'this':				return type;
 			// no nested `Type` position
