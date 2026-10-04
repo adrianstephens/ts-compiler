@@ -4479,6 +4479,31 @@ async function main() {
 	}
 
 	{
+		// A literal's union member is chosen by a discriminant a spread supplies too, and reads a required field off a nullable union operand
+		// (checker.ts's `withLifted`); an argument that may be `undefined` applies its parameter's default (checker.ts's `stampParts`).
+		const { spreadDiscriminant, maybeUndefinedArg } = await compile(`
+			type FnT = { type: 'function'; params: number[]; typeParams?: string[] };
+			type RefT = { type: 'ref'; name: string; typeArgs?: number[] };
+			type Ty = FnT | RefT;
+			function withTp(t: Ty | undefined, tp: string[]): Ty | undefined {
+				const f = tp.length && t ? t : undefined;
+				return tp.length ? { ...f as FnT, typeParams: tp } : t;
+			}
+			export function spreadDiscriminant(): number {
+				const r = withTp({ type: 'function', params: [1, 2] }, ['T']);
+				return r && r.type === 'function' ? r.params.length * 10 + (r.typeParams?.length ?? 0) : -1;
+			}
+			export function maybeUndefinedArg(): number {
+				const xs = [1, 2, 3, 4];
+				const at = (n: number) => xs.slice(0, n < 0 ? undefined : n).length;
+				return at(-1) * 10 + at(2) + xs.slice(1, undefined).length * 100;
+			}
+		`);
+		check('a spread-supplied discriminant picks the union member; a required field reads off a nullable union operand', spreadDiscriminant(), 21);
+		check('an argument that may be undefined applies the default', maybeUndefinedArg(), 342);
+	}
+
+	{
 		// An empty statement (a stray `;`) had no `case` in `emitStmt` at all, so it reached the `default:`
 		// throw -- js-parser.ts's own source is full of them.
 		const { strays, emptyLoopBody } = await compile(`

@@ -3272,12 +3272,17 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const shapes = T.objectShapes(context, ctx.scope);
 		if (!props.size && !supplied && shapes.length !== 1)
 			return undefined;
+		// What the checker made of the literal, spreads included: a discriminant a spread supplies (`{ ...f as FunctionType, typeParams }`).
+		const own = checkedTypeOf(e);
+		const ownAdmits = (m: TS.TypeMember) => m.type !== 'property' || m.typeAnnotation.type !== 'literal' || props.has(T.memberKey(m.key) ?? '')
+			|| (t => !t || T.isAssignable(t, m.typeAnnotation, ctx.scope))(own && T.lookupMember(own, T.memberKey(m.key) ?? '', ctx.scope));
 		const matches = shapes.filter(({ objT }) => {
 			const fieldNames = new Set(objT.members.flatMap(m => m.type === 'property' || m.type === 'method' ? JS.keyName(m.key) ?? [] : []));
 			// Excess-property style: the literal names no field this member doesn't declare, and a declared discriminant admits its value.
 			const required = objT.members.flatMap(m => m.type === 'property' && !hasMod(m, 'optional') ? [T.memberKey(m.key)] : []);
 			return [...props.keys()].every(k => fieldNames.has(k)) && (!supplied || required.every(k => supplied.has(k)))
-				&& [...props].every(([key, value]) => admitsLiterals(objT.members.find((m): m is TS.TypeMember & { type: 'property' } => m.type === 'property' && m.key === key)?.typeAnnotation, value && writtenLiteral(value)));
+				&& [...props].every(([key, value]) => admitsLiterals(objT.members.find((m): m is TS.TypeMember & { type: 'property' } => m.type === 'property' && m.key === key)?.typeAnnotation, value && writtenLiteral(value)))
+				&& objT.members.every(ownAdmits);
 		});
 		const owners = matches.map(m => ownerFor(m.raw) ?? matchObjectShapeByType(m.objT) ?? ensureAnonObjectShape(m.objT));
 		if (owners.length === 1)
@@ -4009,7 +4014,21 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		};
 		// An explicit `undefined` argument applies the parameter's DEFAULT, as omitting it does (`null` does not).
 		const argOrDefault = (i: number, a: Expr): Expr => T.nullLiteralKind(a) === 'undefined' && defaults?.[i] ? defaults[i]! : a;
-		const emitArg = (i: number, a: Expr) => (arg => emitAs(arg, ctx, wantForArg(i, arg)))(argOrDefault(i, a));
+		// So does one that may BE `undefined` (`slice(0, n < 0 ? undefined : n)`), at run time, into a slot that cannot hold it.
+		const mayBeUndefined = (a: Expr) => T.unionMembers(ctx.narrowedTypeOf(a), ctx.scope).some(m => T.isRef(T.resolve(ctx.scope, m), 'undefined'));
+		const emitArg = (i: number, a: Expr) => {
+			const arg = argOrDefault(i, a), want = wantForArg(i, arg), d = defaults?.[i];
+			if (arg !== a || !d || W.isNullable(want) || W.isAny(want) || !isReemittableDefault(d) || !mayBeUndefined(a))
+				return emitAs(arg, ctx, want);
+			const slot = types.nullable(want), held = ctx.temp(`$maybeUndef$${ctx.tempCounter++}`, slot);
+			emitAs(a, ctx, slot);
+			ctx.emit(I.local.tee(held), I.ref.is_null);
+			ctx.emitIf(toValType(want), () => emitAs(d, ctx, want), () => {
+				ctx.emit(I.local.get(held));
+				coerceTop(slot, ctx, want);
+			});
+			return want;
+		};
 		if (!hasRest) {
 			if (args.some(a => a.type === 'spread'))
 				args = expandTupleSpreads(args, ctx);
@@ -5772,15 +5791,20 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					const recv	= src.spreadLocal!.index;
 					const read	= () => emitTypeCascade(ctx, recv, src.unionCls!.map(m => ({ heap: m.typeIndex, emit: () => {
 						const idx = m.fieldIndex.get(name);
+						// A member lacking the key supplies its zero, or, for a slot with none, cannot be what the value is: the checker found the key supplied.
 						if (idx === undefined) {
 							ctx.emit(I.drop);
-							ctx.emitDefaultValue(want, types, toValType);
+							if (ctx.hasDefaultValue(want, toValType))
+								ctx.emitDefaultValue(want, types, toValType);
+							else
+								ctx.emit(I.unreachable);
 						} else {
 							emitFieldRead(m, idx, ctx);
 							coerceTop(m.fields[idx].wtype, ctx, want);
 						}
 					} })), trap(ctx), want);
-					if (!src.nullable)
+					// As for a dynamic operand: a slot with no zero is the key's only source, which the type promised, so a null operand traps.
+					if (!src.nullable || !ctx.hasDefaultValue(want, toValType))
 						return read();
 					ctx.emit(I.local.get(recv), I.ref.is_null);
 					ctx.emitIf(toValType(want), () => ctx.emitDefaultValue(want, types, toValType), read);
