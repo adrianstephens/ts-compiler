@@ -109,7 +109,7 @@ Fixed since, all committed and probed: `boxed`/`refinedMember` dispatch with no 
 type-core.ts); `Number(any)` ToNumber + `RegExp.toString` (5, walker.ts); unary `-`/`~` on `number | bigint` + boxed bigint
 `===` (25, ts-parser.ts); `x === null` on a never-null representation (13, js-parser.ts); `{}` in a `Record | {}` context
 (tison core.ts:312); `never`-typed param (6, transform.ts); call/construct members in structural assignability (ReadType ->
-codegen.ts 13 -> 1 checker errors, wasm.ts 7 -> 1). **User decisions (2026-10-04), status:** (1) binary-libs' instruction builder `I`: "evaluate the types" -- CHECKER DONE (`9b…` "evaluate
+codegen.ts 13 -> 1 checker errors, wasm.ts 7 -> 1). **User decisions (2026-10-04), status:** (1) binary-libs' instruction builder `I`: "evaluate the types" -- CHECKER DONE (`ff5ab4c` "evaluate
 binary-libs' instruction-builder types": template-literal infer, conditional infer union/intersection, tuple-spread normalization, remapped
 `keyof`, numeric mapped keys, identity-sharing type walker; codegen.ts self-checks with 0 errors in 12 s). BACKEND OPEN: `I` is built by
 dynamic writes into `{}` (`insertFactory`, `Object.assign(fn, existing)` = closures carrying properties), so no struct layout is known where
