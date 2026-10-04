@@ -1561,14 +1561,14 @@ export function resolve(scope: Scope, t: Type, depth = 10, stopAtRef = false): T
 					const peeled	= peelAliases(raw, scope, depth);
 					const t			= peeled.type === 'mapped' || peeled.type === 'union' || peeled.type === 'intersection' ? peeled : resolve(scope, peeled, depth - 1);
 					// A remapped key (`as N`) is `N` at each key, as TS: over `keyof T` each of `T`'s own member keys and index key types (`'str'` beside a
-					// string index), else each member of the constraint; a `never` drops it. Over an unbound constraint TS defers it, a key relating as the
-					// constraint's do. A symbol-valued key is kept as itself: without `unique symbol` types `N`'s `Record<typeof sym, X>` misreads.
+					// string index), else each member of the constraint; a `never` drops it. Over an unbound constraint it stays deferred (`isAssignable`
+					// relates a key as the constraint's). A symbol-valued key is kept as itself: without `unique symbol` `Record<typeof sym, X>` misreads.
 					if (t.type === 'mapped' && t.nameType) {
 						const at		= (k: Type) => resolve(scope, substituteType(t.nameType!, new Map([[t.keyName, k]])), depth - 1);
 						const arg		= t.constraint.type === 'keyof' ? resolve(scope, t.constraint.argument, depth - 1) : undefined;
 						const keySet	= arg ?? resolve(scope, t.constraint, depth - 1);
 						if (mentionsAbstract(keySet, scope))
-							return t.constraint;
+							return undefined;
 						const source	= arg && resolveObjectType(arg, scope);
 						const keys		= source ? source.members.flatMap(m => m.type === 'property' || m.type === 'method' ? isPublicMember(m) && keyType(m.key) || []
 							: m.type === 'index' ? [m.paramType] : []) : unionMembers(arg ? resolve(scope, t.constraint, depth - 1) : keySet, scope);
@@ -2528,6 +2528,10 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 		// `unknown` is a top type only as a target: as a source it fits nothing but a top type.
 		if (src === dst || isAny(dst))
 			return true;
+		// `keyof` a remapped mapped type over an unbound constraint stays deferred (`resolve`'s `keyof`): a key relates as its constraint's, as TS's.
+		const remapped = dst.type === 'keyof' ? resolve(dstScope, dst.argument) : undefined;
+		if (remapped?.type === 'mapped' && remapped.nameType)
+			return recurse(src, remapped.constraint, depth - 1);
 		if (isRef(src, 'unknown'))
 			return false;
 		// Under the subtype relation (`precise`) `any` is below nothing but itself: structurally it would fit every object target.

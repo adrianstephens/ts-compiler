@@ -668,7 +668,7 @@ export function walkerB(
 			case 'literal':				return Array.isArray(t.value) && t.value.some(p => walkType(p.exp));
 			case 'array':				return walkType(t.element);
 			case 'tuple':				return t.elements.some(e =>
-				e.type === 'spread' ? false : walkType(e.type === 'optional' || e.type === 'labeled' ? e.element : e)
+				walkType(e.type === 'spread' ? e.argument : e.type === 'optional' || e.type === 'labeled' ? e.element : e)
 			);
 			case 'union':
 			case 'intersection':		return t.types.some(walkType);
