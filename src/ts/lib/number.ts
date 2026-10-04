@@ -304,13 +304,18 @@ export class Number {
 	constructor(value: boolean) { return (value ? 1 : 0) as unknown as Number; }
 	// @ts-expect-error - tison extension: multiple constructor implementations
 	constructor(value: bigint) { return bigToNumber(value) as unknown as Number; }
-	// One argument of several primitives, told apart at run time (`Number(v)` with `v: number | bigint`).
+	// Any other value, told apart at run time, as JS's ToNumber: an object is its string form, since no lib object overrides `valueOf`.
 	// @ts-expect-error - tison extension: multiple constructor implementations
-	constructor(value: number | bigint | string | boolean) {
+	constructor(value: unknown) {
+		if (typeof value === 'symbol')
+			throw new TypeError('Cannot convert a Symbol value to a number');
 		return (typeof value === 'number' ? value
 			: typeof value === 'bigint' ? bigToNumber(value)
 			: typeof value === 'string' ? numberFromString(value)
-			: value ? 1 : 0) as unknown as Number;
+			: typeof value === 'boolean' ? (value ? 1 : 0)
+			: value === null ? 0
+			: value === undefined ? NaN
+			: numberFromString(String(value))) as unknown as Number;
 	}
 
 	static readonly EPSILON = 2.2204460492503130808472633361816e-16;

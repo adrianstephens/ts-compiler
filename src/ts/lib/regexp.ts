@@ -636,6 +636,9 @@ export class RegExp {
 		if (this.sticky) f = f.concat('y');
 		return f;
 	}
+	toString(): string {
+		return '/'.concat(this.source, '/', this.flags);
+	}
 
 	private charEq(a: number, b: number): boolean {
 		return a === b || this.ignoreCase && swapCase(a) === b;

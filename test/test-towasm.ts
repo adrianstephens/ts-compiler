@@ -4408,6 +4408,26 @@ async function main() {
 	}
 
 	{
+		// `Number(v)` of any value is JS's ToNumber (walker.ts's `foldable1` on a `Value`): an object goes by its string form.
+		const { toNumber, regexText } = await compile(`
+			type Value = number | bigint | string | boolean | null | RegExp | string[];
+			const fold: (op: Value) => number = op => Number(op);
+			export function toNumber(): number {
+				const vs: Value[] = [3, 4n, '5', true, null, ['6'], [], /x/];
+				let s = 0;
+				for (const v of vs) {
+					const n = fold(v);
+					s = s * 10 + (n === n ? n : 9);
+				}
+				return s;
+			}
+			export function regexText(): number { return String(/a/g) === '/a/g' ? 1 : 0; }
+		`);
+		check('Number() of any value', toNumber(), 34510609);
+		check('a RegExp prints as /source/flags', regexText(), 1);
+	}
+
+	{
 		// An instantiation whose `?.` receiver is only ever `undefined` (type-core.ts's `mapSigTypes` on a `typeParams: undefined` sig) calls nothing.
 		const { nullishRecv } = await compile(`
 			interface Sig { params: number[]; typeParams?: { name: string; c?: number }[] }
