@@ -119,6 +119,8 @@ export function pathKey(e: Expr): string | undefined {
 	switch (e.type) {
 		case 'identifier':	return e.name;
 		case 'this':		return 'this';
+		// `x!` names `x`'s storage, as TS's reference matching skips a non-null assertion.
+		case 'unary_post':	return e.operator === '!' ? pathKey(e.operand) : undefined;
 		case 'member': {
 			const k = pathKey(e.object);
 			return k && k + '.' + e.property;
