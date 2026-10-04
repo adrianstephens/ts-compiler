@@ -263,6 +263,25 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 	['instanceof a generic class narrows to its prototype type', 'declare const x: unknown; if (x instanceof Map) { const q: string = x; }', [NOT_ASSIGNABLE('Map<any, any>', 'string')]],
 	// `unknown` is a top type only as a target.
 	['unknown is assignable only to a top type', 'class C { x = 1; } declare const u: unknown; const p: C = u; const r: unknown = u; const s: any = u;', [NOT_ASSIGNABLE('unknown', 'C')]],
+	// An async function's returned value, and an `await` operand, are typed against the value or a promise of it (TS's contextual type).
+	['an async return or await operand is contextually a value or a promise of it', "async function f(): Promise<number> { return new Promise(r => r(1)); } async function g(): Promise<number> { const n: number = await new Promise(r => r(2)); return new Promise(r => r('a')); }",
+		["Argument of type '\"a\"' is not assignable"]],
+	// TS's getMinArgumentCount: a trailing parameter accepting `void` may be omitted.
+	['a trailing void parameter may be omitted', 'declare function f(x: void | PromiseLike<void>): void; f(); const p = new Promise<void>(r => r()); declare function h(x: number): void; h();', ['Expected 1 arguments, but got 0']],
+	// A type parameter's value narrowed by a guard it does not relate to directly is both (`T & C`), as TS narrows it.
+	['instanceof narrows a type-parameter value to an intersection', "class C { prop = ''; } function f<T>(x: T) { if (x instanceof C) { const v1: T = x; const v2: C = x; const n: number = x.prop; } }", [NOT_ASSIGNABLE('string', 'number')]],
+	// `yield*`'s operand is contextually a generator of the function's Y and N, returning what the `yield*` is expected to evaluate to.
+	['yield* gives its operand a generator context', 'declare const g: <T, U, V>() => Generator<T, U, V>; function* f(): Generator<string, void, unknown> { const x1 = yield* g(); const x2: number = yield* g(); }', []],
+	// `NoInfer<T>` is `T`, except that inference skips it.
+	['NoInfer is its argument, skipped by inference', "declare function f<T>(a: T, b: NoInfer<T>): T; f(1, 'x'); function g<A>(x: NoInfer<A>): A { return x; } declare const n: NoInfer<number>; const s: string = n;",
+		["Argument of type '\"x\"' is not assignable", NOT_ASSIGNABLE('number', 'string')]],
+	// The result's context infers through an array-like spelled by name, and through a declaration however its name is spelled.
+	['a result context infers through ReadonlyArray', 'declare function from<T>(): T[]; const c: ReadonlyArray<number> = from(); const s: string = c[0];', [NOT_ASSIGNABLE('number', 'string')]],
+	// As TS's isObjectTypeWithInferableIndex: a type written as an object infers an index signature from its properties.
+	['an object type infers an index signature from its properties', 'declare function ents<T>(o: { [s: string]: T }): T[]; declare const b: { p: string; q?: string }; const r: number = ents(b)[0];', [NOT_ASSIGNABLE('string', 'number')]],
+	// The result's context is heard before the arguments: a generic call argument infers from it (`compose(filter(x => ...))`).
+	['a nested generic call infers from the outer result context', 'declare class SetOf<A> { _a: A; transform<B>(t: (a: SetOf<A>) => SetOf<B>): SetOf<B>; } declare function compose<A, B, C>(f: (x: A) => B, g: (y: B) => C): (x: A) => C; declare function map<A, B>(fn: (a: A) => B): (s: SetOf<A>) => SetOf<B>; declare function filter<A>(p: (a: A) => boolean): (s: SetOf<A>) => SetOf<A>; declare const s: SetOf<number>; s.transform(compose(filter(x => x % 1 === 0), map(x => x + x))); const r: string = s.transform(map(x => x));',
+		[NOT_ASSIGNABLE('SetOf<number>', 'string')]],
 	['a destructuring default adds its own type', "let [x = 'a' in {}] = []; x = !x; const { y = 1 } = {} as { y?: string }; const q: boolean = y;", [NOT_ASSIGNABLE('string | number', 'boolean')]],
 	// Stripping `undefined` keeps an aliased union by name, as TS does: expanded, it no longer matched the alias itself.
 	['?? and ! keep an aliased union by name', "type U = { a: 1 } | { b: 2 }; declare const p: { c?: U }; declare function d(): U; const q: string = p.c ?? d(); declare const n: U | undefined; const r: string = n!;", [NOT_ASSIGNABLE('U', 'string'), NOT_ASSIGNABLE('U', 'string')]],

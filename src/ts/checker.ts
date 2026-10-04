@@ -164,6 +164,13 @@ const positionContext = (t: Type, i: number, scope: Scope): Type | undefined => 
 };
 
 
+// An async function's context from a contextual return type: what its PROMISE members promise (TS's `getAwaitedTypeOfPromise`; a
+// `StateMachine<T>` beside `Promise<T>` contributes nothing), or a promise of that.
+function promisedContext(t: Type, scope: Scope): Type | undefined {
+	const promised = T.unionMembers(t, scope).flatMap(m => (p => p ? [p.typeArgs![0]] : [])(T.asPromiseRef(m, scope)));
+	return promised.length ? T.awaitContext(T.combineTypes(promised)) : undefined;
+}
+
 // A contextual return type is worth handing to a body only when it carries STRUCTURE (an array literal against a tuple becomes a tuple).
 // A bare `ref` carries none: an unsolved type parameter of the call being inferred, or a name the body resolves on its own.
 function shapedHint(t: Type | undefined, scope: Scope): Type | undefined {
@@ -227,7 +234,10 @@ function argContext(a: Expr, declared: Type | undefined, sig: TS.CallSig, scope:
 	// hints, so `[[k, v]]` and `xs.map(x => [a, b])` become tuples), and itself to an `as const` argument, which reads only mutability.
 	const generic	= !!sig.typeParams?.some(p => T.mentionsTypeParam(declared, p.name));
 	const constArg	= a.type === 'as' && isConstContext(a.typeAnnotation);
-	return !generic || constArg || ((a.type === 'array' || a.type === 'call') && tupleShaped(declared, scope)) ? declared : undefined;
+	if (!generic || constArg || ((a.type === 'array' || a.type === 'call') && tupleShaped(declared, scope)))
+		return declared;
+	// A generic call's result is inferred from the rest, as TS's non-fixing mapper instantiates it: the parameters still unsolved stand for nothing yet.
+	return a.type === 'call' ? T.substituteType(declared, new Map(sig.typeParams!.map(p => [p.name, T.UNKNOWN]))) : undefined;
 }
 
 // Whether `args` fit candidate `c` as TS's overload resolution asks (checkExpressionWithContextualType): each argument typed
@@ -780,15 +790,17 @@ export function narrow(test: Expr, scope: Scope, sense: boolean): Scope {
 		const narrower = (m: Type) => !T.isAny(target) && !T.isNullish(m, scope) && T.isAssignable(m, target, scope) && !T.isAssignable(target, m, scope, scope, false, 10, true);
 		// A matching member narrows to `target` itself, which says more than its declared type (`Literal<TypeOfMap[K]>` pinning `.value`);
 		// a member WIDER than the target (`Lit<string | number>` under `Lit<string>`) narrows to it too, as in TS.
+		const direct = (m: Type) => narrower(m) ? m : T.isAssignable(m, target, scope) || T.isAssignable(target, m, scope) ? target : false;
+		// Where no member relates to the target directly, a type parameter's value is both, as TS narrows it (`T & C`): it keeps `T`'s identity.
+		const generic = (m: Type) => !T.isAny(target) && !!T.typeParamConstraint(m, scope) && TS.IntersectionType([m, target]);
 		if (r.type === 'union' && !T.isAny(target))
 			// Excluding a member (the false branch) takes the EXACT relation: the lenient widened-source rule would count a `string` as a `"never"`.
-			return narrowValue(scope, name, sense
-				? m => narrower(m) ? m : T.isAssignable(m, target, scope) || T.isAssignable(target, m, scope) ? target : false
-				: m => !T.isAssignable(m, target, scope, scope, false, 10, true), t);
+			return narrowValue(scope, name, !sense ? m => !T.isAssignable(m, target, scope, scope, false, 10, true)
+				: T.unionMembers(r, scope).some(m => direct(m) !== false) ? direct : generic, t);
 		if (!sense || narrower(r))
 			return scope;
 		const s = new Scope(scope);
-		s.addNarrowing(name, target);
+		s.addNarrowing(name, direct(r) === false && generic(t) || target);
 		return s;
 	}
 
@@ -1802,8 +1814,9 @@ export function inferTypeArgMap(sig: TS.CallSig, argTs: (Type | undefined)[], ty
 		}
 		const assumed = t ?? p.default ?? p.constraint ?? T.UNKNOWN;
 		map.set(p.name, assumed);
-		// A default is a silent fallback, as in TS; flagged only when a supplied argument mentions `p.name` and still could not pin it.
-		if (err && pos && !p.default && sig.params.some((prm, i) => argTs[i] && prm.typeAnnotation && T.mentionsTypeParam(prm.typeAnnotation, p.name)))
+		// A default is a silent fallback, as in TS; flagged only when a supplied argument mentions `p.name` and still could not pin it. Not one fixed with
+		// nothing inferred to type a callback's parameters (`new Promise(resolve => ...)`): TS has no candidate there either.
+		if (err && pos && !p.default && !inference!.wasDefaulted(p.name) && sig.params.some((prm, i) => argTs[i] && prm.typeAnnotation && T.mentionsTypeParam(prm.typeAnnotation, p.name)))
 			err(SEVERITY.GAP, pos)`Type parameter '${p.name}' could not be inferred from the arguments; assumed '${show().type(assumed)}'`;
 	});
 	return map;
@@ -2270,9 +2283,13 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 					if (inference && sig.thisType && calleeObjT)
 						inference.infer(sig.thisType, T.nonNullable(calleeObjT, scope, calleeOptional));
 					// In order, as TS does: each argument's context is its parameter under what the arguments before it inferred
-					// (`mapObject(q, { ps: mapArray(p => ...) })` knows `N` from `q`, so the inner call can infer its `T`).
-					const soFar = (declared: Type | undefined) => declared && (explicit ? T.substituteType(declared, explicit)
-						: inference ? T.substituteType(declared, new Map(sig!.typeParams!.flatMap(p => { const t = inference.inferred(p.name); return t ? [[p.name, t] as const] : []; })))
+					// (`mapObject(q, { ps: mapArray(p => ...) })` knows `N` from `q`, so the inner call can infer its `T`). What the result's context
+					// inferred reaches only a generic call's (`compose(filter(x => ...))`): a `const T` argument keeps its bare `T`.
+					const soFar = (declared: Type | undefined, viaResult = false) => declared && (explicit ? T.substituteType(declared, explicit)
+						: inference ? T.substituteType(declared, new Map(sig!.typeParams!.flatMap(p => {
+							const t = viaResult ? inference.inferred(p.name) : inference.fromCandidates(p.name);
+							return t ? [[p.name, t] as const] : [];
+						})))
 						: declared);
 					const returned	= sig.returnType && T.resolveOwn(sig.returnType, declScope);
 					const lifting	= !explicit && !!sig.typeParams?.length && returned?.type === 'function' && !returned.typeParams?.length;
@@ -2285,15 +2302,23 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 						const want		= declared && T.findFunctionType(soFar(declared)!, declScope);
 						if (f.type !== 'function' || !f.typeParams?.length)
 							return t;
-						const open = !declSig || !want || declSig.params.some(p => p.typeAnnotation && sig!.typeParams!.some(q => T.mentionsTypeParam(p.typeAnnotation!, q.name) && !inference?.inferred(q.name)));
+						const open = !declSig || !want || declSig.params.some(p => p.typeAnnotation && sig!.typeParams!.some(q => T.mentionsTypeParam(p.typeAnnotation!, q.name) && !inference?.fromCandidates(q.name)));
 						return open ? liftGeneric(f, scope, lifted, liftScope) : TS.FunctionType(T.instantiateInContextOf(f, f.typeParams, want, scope, declScope));
 					};
 					const liftScope = new Scope(scope);
+					// A param no argument pins down may come from where the call's result is going (`new Promise<T>((resolve) => ...)`). Heard first, as TS
+					// does, at the lowest priority: an argument's own context then sees it (`compose(filter(x => ...))`). A GENERIC context is heard after
+					// the arguments, as its lifted parameters must meet those the generic function arguments lift (`compose(unbox, unlist)`).
+					const resultFirst	= !lifting || !isGenericFunction(expected ?? T.ANY, scope);
+					const inferFromResult = () => inference && expected && sig!.returnType
+						&& inference.inferReturn(sig!.returnType, lifting ? liftGeneric(expected, scope, lifted, liftScope) : expected);
+					if (resultFirst)
+						inferFromResult();
 					const preArgTs = e.arguments.map((a, i) => {
 						if (a.type === 'function' || a.type === 'arrow' || a.type === 'spread')
 							return undefined;
 						// The inner call of `new Map(xs.map(x => [a, b]))` reverse-matches its own `U` from the tuple shape (`instantiate`'s `fromExpected`).
-						const t = arg(a, argContext(a, soFar(declaredArg(i)), sig!, scope));
+						const t = arg(a, argContext(a, soFar(declaredArg(i), a.type === 'call'), sig!, scope));
 						// A generic function argument waits until every other argument (and the result's context) has spoken, as TS's does.
 						if (lifting && t && isGenericFunction(t, scope))
 							return t;
@@ -2302,11 +2327,8 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 							(a.type === 'object' || a.type === 'array' ? inference.inferFromLiteral : inference.infer).call(inference, p.typeAnnotation, t);
 						return t;
 					});
-					if (inference) {
-						// A param no argument pins down may come from where the call's result is going (`new Promise<T>((resolve) => ...)`).
-						if (expected && sig.returnType)
-							inference.inferReturn(sig.returnType, lifting ? liftGeneric(expected, scope, lifted, liftScope) : expected);
-					}
+					if (!resultFirst)
+						inferFromResult();
 					if (lifting)
 						preArgTs.forEach((t, i) => {
 							const p = sig!.params[i];
@@ -2396,9 +2418,9 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 					// TBD: check if callee if pure
 
 					if (err && firstSpread < 0) {
-						// TS's minimum argument count runs through the last required parameter; in an IIFE an unannotated parameter no argument reaches is optional.
+						// In an IIFE an unannotated parameter no argument reaches is optional.
 						const iife		= e.type === 'call' && (e.callee.type === 'function' || e.callee.type === 'arrow') ? e.callee : undefined;
-						const required	= params.reduce((n, p, i) => hasMod(p, 'optional') || (iife && i >= argTs.length && !iife.params[i]?.typeAnnotation) ? n : i + 1, 0);
+						const required	= T.minArgumentCount({ params }, scope, i => !!iife && i >= argTs.length && !iife.params[i]?.typeAnnotation);
 						const max		= sig.rest ? Infinity : params.length;
 						if (argTs.length < required || argTs.length > max)
 							err(SEVERITY.ERROR, pos)`Expected ${required === max ? required : required + '-' + (max === Infinity ? 'more' : max)} arguments, but got ${argTs.length} in '${show().expression(e)}'`;
@@ -2461,7 +2483,7 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 				return T.ANY;
 			}
 
-			case 'await':	return T.awaitType(recurse(e.operand), scope);
+			case 'await':	return T.awaitType(recurse(e.operand, expected && T.awaitContext(expected)), scope);
 
 			case 'unary': {
 				const argT = recurse(e.operand);
@@ -2670,7 +2692,9 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 				// A declared generator's Y is a plain `yield`'s context, and what is yielded must fit it.
 				const fnKind	= scope.enclosingFunction();
 				const async		= !!fnKind?.async;
-				const argT		= e.operand ? recurse(e.operand, e.delegate ? undefined : fnKind?.yield) : T.UNDEFINED;
+				// `yield* x`'s `x` is a generator of Y and N, returning what the `yield*` is expected to evaluate to.
+				const delegateContext = fnKind?.yield && TS.RefType(async ? 'AsyncGenerator' : 'Generator', [fnKind.yield, expected ?? T.UNKNOWN, fnKind.next ?? T.UNKNOWN]);
+				const argT		= e.operand ? recurse(e.operand, e.delegate ? delegateContext : fnKind?.yield) : T.UNDEFINED;
 				// `yield* x` yields what `x` iterates to and evaluates to what its iterator returns.
 				const delegated	= e.delegate ? iterationOrReport(argT, scope, pos, err, async) : undefined;
 				const yielded	= delegated ? delegated.yield : T.unwrapIfAsync(argT, scope, async);
@@ -2736,6 +2760,8 @@ function checkFunctionBody(fn: TS.CallSig, body: JS.Stmt<any>[] | Expr | undefin
 	const isPredicate = expected?.type === 'predicate';
 	if ((skipReturn && !generator) || (expected && T.isAny(expected)) || isPredicate)
 		expected = undefined;
+	// What a returned value is typed against: in an async function, the value or a promise of it.
+	const returnContext = expected && async ? T.awaitContext(expected) : expected;
 
 	// A muted re-walk of a function with a declared return type is skipped once its BODY carries a stamp: `narrow`'s speculative re-walks reach a node
 	// only after the real pass. A lib method's one muted check still walks it, so its callbacks get contextual params.
@@ -2748,7 +2774,7 @@ function checkFunctionBody(fn: TS.CallSig, body: JS.Stmt<any>[] | Expr | undefin
 	if (!('type' in fn && fn.type === 'arrow'))
 		inner.addValue('arguments', TS.RefType('IArguments'));
 	// Only where nothing is declared: a declared return type is the better answer, and `expected` keeps driving the diagnostics.
-	const inferHint = expected ? undefined : contextualReturn;
+	const inferHint = expected || !contextualReturn ? undefined : async && !generator ? promisedContext(contextualReturn, scope) : contextualReturn;
 	// A speculative walk, or a generic class's method template shared by every instantiation, must not stamp: `??=` would freeze an
 	// answer the real walk or the instance needs. Consumers fall back to an instantiation-correct scope when unset.
 	const noStamp = trying > 0 || (!!expected && !err && scope.isGenericTemplate());
@@ -2829,7 +2855,7 @@ function checkFunctionBody(fn: TS.CallSig, body: JS.Stmt<any>[] | Expr | undefin
 				const out = checkStmt(s, scope, typeOf1, checkStmt1, err);
 				if (s.type === 'return' && s.argument) {
 					const argument = s.argument;
-					const t = typeOf(argument, scope, false, expected, undefined, quiet ? undefined : err, stampTypes && !quiet);
+					const t = typeOf(argument, scope, false, returnContext, undefined, quiet ? undefined : err, stampTypes && !quiet);
 					if (err && !quiet) {
 						if (!checkFlow(argument, T.unwrapIfAsync(t, scope, async), expected, scope, (argument as any).pos, scope, err))
 							err(SEVERITY.ERROR, (argument as any).pos)`Type '${show().type(t)}' is not assignable to declared return type '${show().type(expected)}'`;
@@ -2889,7 +2915,7 @@ function checkFunctionBody(fn: TS.CallSig, body: JS.Stmt<any>[] | Expr | undefin
 		// Stamped like a block body's statements, so codegen's closure sees what this saw.
 		if (!noStamp && !narrowing)
 			(body as any).scope ??= inner;
-		const t = typeOf(body, inner, false, expected ?? inferHint, undefined, err, stampTypes);
+		const t = typeOf(body, inner, false, returnContext ?? inferHint, undefined, err, stampTypes);
 		if (expected) {
 			if (err && !checkFlow(body as Expr, T.unwrapIfAsync(t, inner, async), expected, inner, (body as any).pos, inner, err))
 				err(SEVERITY.ERROR, (body as any).pos)`Type '${show().type(t)}' is not assignable to declared return type '${show().type(expected)}'`;

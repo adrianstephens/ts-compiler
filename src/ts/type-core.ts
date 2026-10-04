@@ -1583,6 +1583,9 @@ export function resolve(scope: Scope, t: Type, depth = 10, stopAtRef = false): T
 						if (!t.typeArgs)
 							return resolveAliasBody(ns, entry, [], () => entry.defaultSubstitution ??= substituteType(entry.type, typeArgMap(tparams, undefined)), stopAtRef, t);
 						const args = [...typeArgMap(tparams, t.typeArgs).values()];
+						// TS's `intrinsic` aliases mean what their NAME says: `NoInfer<T>` is `T` (only inference skips it).
+						if (entry.type.type === 'ref' && entry.type.name === 'intrinsic' && name === 'NoInfer')
+							return resolve(scope, args[0], depth, stopAtRef);
 						return resolveAliasBody(ns, entry, args, () => substituteType(entry.type, new Map(tparams.map((p, i) => [p.name, args[i]]))), stopAtRef, t);
 					}
 				}
@@ -2012,11 +2015,11 @@ export function sealed(t: Type, scope: Scope, depth = 6): boolean {
 //  Signatures
 // ===================================================================
 
-// TS's getMinArgumentCount: through the last parameter a call must pass -- not optional (or defaulted), and not accepting `void`.
-export function minArgumentCount(sig: TS.Params, scope: Scope): number {
+// TS's getMinArgumentCount: through the last parameter a call must pass -- not optional (or defaulted), not accepting `void`, nor `omittable`.
+export function minArgumentCount(sig: TS.Params, scope: Scope, omittable = (_i: number) => false): number {
 	const own = sig.params;
 	let n = own.length;
-	while (n > 0 && (hasMod(own[n - 1], 'optional') || (own[n - 1].typeAnnotation && unionMembers(resolveOwn(own[n - 1].typeAnnotation!, scope), scope).some(m => m.type === 'ref' && m.name === 'void'))))
+	while (n > 0 && (omittable(n - 1) || hasMod(own[n - 1], 'optional') || (own[n - 1].typeAnnotation && unionMembers(resolveOwn(own[n - 1].typeAnnotation!, scope), scope).some(m => m.type === 'ref' && m.name === 'void'))))
 		n--;
 	return n;
 }
@@ -2891,12 +2894,20 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 			// A union argument (`number[] | number[]` from `x ?? y`) distributes; the first member to match wins (`out`'s guard).
 			} else if (a.type === 'union') {
 				a.types.forEach(m => recurse(paramT, m, depth - 1));
+			} else {
+				// An array-like spelled by name (`ReadonlyArray<A>`), which resolves to its interface's members.
+				const el = arrayLikeElement(argT);
+				if (el)
+					recurse(paramT.element, el, depth - 1);
 			}
 		} else if (paramT.type === 'ref' && paramT.typeArgs) {
 			// A generic alias unfolded one level (`paramT.name` is declared in `declScope`, not `scope`).
 			const entry		= declScope.type(paramT.name);
 			const unfold	= () => instantiateEntry(entry!, paramT.typeArgs);
-			const sameName	= argT.type === 'ref' && argT.name === paramT.name;
+			// The same declaration however spelled (`Bus<T>` inside its namespace, `Bacon.Bus<number>` outside it).
+			const sameDecl	= (t: Type): t is TS.RefType => t.type === 'ref' && (t.name === paramT.name
+				|| !!entry && (([ns, n]) => ns?.type(n) === entry)(declScopeOf(t, scope).qualified(t.name)));
+			const sameName	= sameDecl(argT);
 			// Array-like to array-like is element to element, covariantly, as TS infers it: through the methods, callback parameters would add CONTRAVARIANT
 			// candidates (`ReadonlyArray<T>` from a `(string | number)[]`).
 			const el = (paramT.name === 'Array' || paramT.name === 'ReadonlyArray') && paramT.typeArgs.length === 1
@@ -2916,9 +2927,7 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 				a.types.forEach(m => recurse(paramT, m, depth - 1));
 			} else {
 				// The argument's own named type, unresolved: `resolve()` substitutes a generic ref into its body, losing the `Polynomial<number>` identity to match.
-				const named = argT.type === 'ref' && argT.typeArgs && argT.name === paramT.name ? argT
-					: a.type === 'ref' && a.typeArgs && a.name === paramT.name ? a
-					: undefined;
+				const named = sameDecl(argT) && argT.typeArgs ? argT : sameDecl(a) && a.typeArgs ? a : undefined;
 				if (named) {
 					paramT.typeArgs.forEach((p, i) => {
 						const t = named.typeArgs![i];
@@ -3000,15 +3009,18 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 			}
 		} else if (paramT.type === 'object') {
 			for (const m of paramT.members) {
-				// An index signature binds through the argument's OWN index signature of that key kind only (from named properties, `Object.values`' generic
-				// overload would match a class instance). A NUMBER one also takes an array's or tuple's elements; a primitive argument uses its boxed interface.
+				// An index signature binds through the argument's OWN index signature of that key kind. A NUMBER one also takes an array's or tuple's elements;
+				// a primitive argument uses its boxed interface. As TS's `isObjectTypeWithInferableIndex`, only a type WRITTEN as an object (a literal's, a type
+				// literal) infers it from its properties (a class instance would match `Object.values`' generic overload); an optional one's without `undefined`.
 				if (m.type === 'index') {
 					const sameKey	= (x: Type) => typeId(resolveOwn(x, scope)) === typeId(resolveOwn(m.paramType, scope));
 					const base		= resolveOwn(widenLiterals(a), scope);
 					const boxed		= base.type === 'ref' ? scope.semantics.boxed(base.name) : undefined;
 					const idx		= collectMembers(boxed ? TS.RefType(boxed) : base, scope).find((p): p is IndexMember => p.type === 'index' && sameKey(p.paramType));
 					const elements	= !idx && sameKey(NUMBER) ? arrayLikeElement(a) ?? (a.type === 'tuple' ? combineTypes(elementTypes(a, scope)) : undefined) : undefined;
-					const from		= idx?.typeAnnotation ?? elements;
+					const props		= !idx && !elements && argT.type === 'object' ? argT.members.filter((p): p is Extract<TS.TypeMember, { type: 'property' }> =>
+						p.type === 'property' && (!sameKey(NUMBER) || (k => k !== undefined && String(+k) === k)(memberKey(p.key)))) : [];
+					const from		= idx?.typeAnnotation ?? elements ?? (props.length ? combineTypes(props.map(p => p.typeAnnotation)) : undefined);
 					if (from)
 						recurse(m.typeAnnotation, from, depth - 1);
 					continue;
@@ -3126,6 +3138,11 @@ export function wrapReturnIfAsync(t: Type, scope: Scope, async: boolean|undefine
 
 export function unwrapIfAsync(t: Type, scope: Scope, async: boolean|undefined): Type {
 	return async ? awaitType(t, scope) : t;
+}
+
+// TS's contextual type for what an `await` takes, or an async function returns: the value, or a promise of it.
+export function awaitContext(t: Type): Type {
+	return TS.UnionType([t, TS.RefType('PromiseLike', [t])]);
 }
 
 export function wrapType(t: Type, names: Set<string>, name: string) {
