@@ -4237,7 +4237,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					: c.which === 'assign' ? emitObjectAssign(c.call, ctx)
 					// SameValue, decided at run time by typed lib code: an operand is often a boxed union value.
 					: c.which === 'is' ? emitCall('__towasm_same_value', e.arguments, ctx)
-					: emitObjectEntries(e.arguments, ctx, c.which as 'entries' | 'keys' | 'values');
+					: emitObjectEntries(e.arguments, ctx, c.which as 'entries' | 'keys' | 'values', elementKindOfType(ctx.typeAt(e), ctx.scope));
 			case 'builtin':
 				return emitCall(c.name, e.arguments, ctx);
 			case 'static':
@@ -4405,7 +4405,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// `Object.entries/keys/values(x)`: what fields exist depends on `x`'s concrete type. A dynamic object has its own `entries()`; a struct known
 	// statically and never subclassed reads `owner.fields`; anything else needs `ensureAnyEntries`' `ref.test` cascade.
-	function emitObjectEntries(args: Expr[], ctx: FunctionContext, which: 'entries' | 'keys' | 'values' = 'entries'): W.Type {
+	// `kind`: the checker's element kind for the result (`Object.values({a: 1})` is a `number[]`), what the static path builds.
+	function emitObjectEntries(args: Expr[], ctx: FunctionContext, which: 'entries' | 'keys' | 'values' = 'entries', kind: W.ElementI = 'ref'): W.Type {
 		if (args.length !== 1)
 			throw `'Object.${which}' takes exactly one argument`;
 		const arg	= args[0];
@@ -4420,18 +4421,18 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		emitAs(arg, ctx, owner.thisWtype!);
 		if (isDynamicObject(owner))
 			return emitMethodCall(owner, which, [], ctx);
-		return emitEntriesOf(owner, which, ctx);
+		return emitEntriesOf(owner, which, ctx, kind);
 	}
 
 	// The projection itself, the receiver's struct known and on the stack; shared by the static path and every `ensureAnyEntries` arm.
 	// Each entry is a `[key, value]` pair array, an `Array` as a literal's would be; a value is boxed as an `any` slot holds it.
-	function emitEntriesOf(owner: ClassInfo, which: 'entries' | 'keys' | 'values', ctx: FunctionContext): W.Type {
+	function emitEntriesOf(owner: ClassInfo, which: 'entries' | 'keys' | 'values', ctx: FunctionContext, kind: W.ElementI = 'ref'): W.Type {
 		const obj	= ctx.temp(`$entries$${ctx.tempCounter++}`, owner.thisWtype!);
 		const named	= owner.fields.flatMap((f, i) => f.name.startsWith('#') ? [] : [i]);
 		const pair	= ensureClass('Array', [T.ANY])!.thisType;
-		const value	= (idx: number) => {
+		const value	= (idx: number, as: W.ElementI = 'ref') => {
 			ctx.emit(I.local.get(obj));
-			emitBoxedField(owner, idx, ctx, W.REF_ANY_NULLABLE);
+			emitBoxedField(owner, idx, ctx, elementValueType(as));
 		};
 		ctx.emit(I.local.set(obj));
 		for (const idx of named) {
@@ -4442,11 +4443,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				ctx.emit(I.array.new_fixed(types.array('ref'), 2));
 				coerceTop(W.ARRAY.ref, ctx, pair);
 			} else if (which === 'values') {
-				value(idx);
+				value(idx, kind);
 			}
 		}
-		ctx.emit(I.array.new_fixed(types.array('ref'), named.length));
-		return W.ARRAY.ref;
+		ctx.emit(I.array.new_fixed(types.array(kind), named.length));
+		return W.ARRAY[kind];
 	}
 
 	// `Object.defineProperty(target, key, {value | get/set, ...})`: `enumerable`/`configurable`/`writable` have no effect without field reflection.

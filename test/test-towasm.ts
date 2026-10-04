@@ -1617,6 +1617,14 @@ async function main() {
 	}
 
 	{
+		// `Object.values` of a struct is built as the checker types it: `{ a: 1, b: 2 }` infers `number[]` from its properties.
+		const { structValues } = await compile(`
+			export function structValues(): number { const o = { a: 1, b: 2 }; const v = Object.values(o); return v.length * 100 + v[0] + v[1] * 10 + Object.keys(o).length * 1000 + Object.entries(o).length * 10000; }
+		`);
+		check('structValues() (Object.values of a struct is its inferred number[])', structValues(), 22221);
+	}
+
+	{
 		// A generic function value passed to a generic call returning a function: the checker lifts its type parameter into the
 		// result (TS's higher-order inference); codegen compiles that one closure at the parameter's constraint.
 		const { liftedCount } = await compile(`
