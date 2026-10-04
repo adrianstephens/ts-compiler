@@ -1291,6 +1291,11 @@ function assignFlow(scope: Scope, key: string, t: Type, stamp: boolean) {
 		foldFlow(scope, key, t);
 }
 
+// A numeric unary's result, as TS's: a bigint stays one, an operand that MAY be one (`number | bigint`) gives either.
+function numericOf(t: Type, scope: Scope): Type {
+	return T.isBigint(t, scope) ? T.BIGINT : T.unionMembers(t, scope).some(m => T.isBigint(m, scope)) ? T.combineTypes([T.NUMBER, T.BIGINT]) : T.NUMBER;
+}
+
 // A pseudo-type as the range it is, before splitting into union members resolves it to plain `number`.
 const asRange = (t: Type, scope: Scope) => {
 	const m = T.machineOf(t, scope);
@@ -2524,9 +2529,9 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 					case '--':
 						if (err && !T.isNumberLike(r, scope))
 							err(SEVERITY.ERROR, pos)`Operand of '${e.operator}' must be numeric, got '${show().type(argT)}' in '${show().expression(e)}'`;
-						return T.isBigint(r, scope) ? T.BIGINT : T.NUMBER;
+						return numericOf(r, scope);
 					default:
-						return T.isBigint(r, scope) ? T.BIGINT : T.NUMBER;
+						return numericOf(r, scope);
 				}
 			}
 			case 'unary_post': {
@@ -2545,7 +2550,7 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 				// The value is the operand's OLD one.
 				if ((e.operator === '++' || e.operator === '--') && stepOperand(e.operand, argT, e.operator))
 					return argT;
-				return T.isAny(T.resolveOwn(argT, scope)) ? T.ANY : T.isBigint(argT, scope) ? T.BIGINT : T.NUMBER;
+				return T.isAny(T.resolveOwn(argT, scope)) ? T.ANY : numericOf(argT, scope);
 			}
 
 			// `x = y` is a MUTATION, not a binary: `operator` absent is a plain `=`, present the compound form's BASE operator.

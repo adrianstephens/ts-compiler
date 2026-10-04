@@ -4408,6 +4408,21 @@ async function main() {
 	}
 
 	{
+		// `-`/`~` of a `number | bigint` (ts-parser.ts's `-numberValue(s)`) act on whichever it holds; `~` is ToInt32's wraparound.
+		const { negUnion } = await compile(`
+			function val(s: string): number | bigint { return s.endsWith('n') ? BigInt(s.slice(0, -1)) : Number(s); }
+			const lit = (s: string) => -val(s);
+			const cpl = (s: string) => ~val(s);
+			export function negUnion(): number {
+				const a = lit('5'), b = lit('7n'), c = cpl('2'), d = cpl('3n');
+				const big = 4294967298;
+				return (a === -5 ? 1 : 0) + (b === -7n ? 10 : 0) + (c === -3 ? 100 : 0) + (d === -4n ? 1000 : 0) + (~big === -3 ? 10000 : 0);
+			}
+		`);
+		check('unary - and ~ on a number | bigint (a boxed bigint === compares by value)', negUnion(), 11111);
+	}
+
+	{
 		// A method of an interface no value in the program implements (type-core.ts's `Semantics`, implemented in type-utils.ts) is never called.
 		const { unimplemented } = await compile(`
 			interface Sem { boxed(p: string): string | undefined }

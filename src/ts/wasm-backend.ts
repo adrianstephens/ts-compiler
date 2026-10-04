@@ -5394,16 +5394,22 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				throw "'++'/'--' on a nullable primitive needs narrowing to non-null first, and isn't supported even then";
 			throw "'++'/'--' needs a number, a bigint, or an 'any' holding one";
 		}
+		emitNumericCases(wtype, ctx, () => emitMethodCall(big, method, [Literal(1n)], ctx), () => ctx.emit(I.f64.const(1), I.f64[method]));
+	}
+
+	// The boxed `number | bigint` on the stack, told apart at run time as `typeof` tells them: `big` runs on the bigint, `num` on the `f64`,
+	// each leaving its result, boxed back to `wtype`.
+	function emitNumericCases(wtype: W.Type, ctx: FunctionContext, big: () => void, num: () => void): void {
 		const heap	= types.heapType('bigint')!;
-		const v		= ctx.temp(`$step$${ctx.tempCounter++}`, wtype);
+		const v		= ctx.temp(`$num$${ctx.tempCounter++}`, wtype);
 		ctx.emit(I.local.set(v), I.local.get(v), I.ref.test(heap));
 		ctx.emitIf(toValType(wtype), () => {
 			ctx.emit(I.local.get(v), I.ref.cast(heap));
-			emitMethodCall(big, method, [Literal(1n)], ctx);
+			big();
 		}, () => {
 			ctx.emit(I.local.get(v));
 			coerceTop(wtype, ctx, 'f64');
-			ctx.emit(I.f64.const(1), I.f64[method]);
+			num();
 			coerceTop('f64', ctx, wtype);
 		});
 	}
@@ -5511,6 +5517,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// the rule for an index or a length; `ToInt32` is where JS specifies it, the bitwise operators. A non-finite input answers 0, as JS says.
 	function emitToInt32(e: Expr, ctx: FunctionContext): void {
 		emitAs(e, ctx, 'f64');
+		f64ToInt32(ctx);
+	}
+	function f64ToInt32(ctx: FunctionContext): void {
 		const tmp = ctx.temp(`$toint32$${ctx.tempCounter++}`, 'f64');
 		ctx.emit(I.local.set(tmp), I.local.get(tmp), I.f64.abs, I.f64.const(Infinity), I.f64.lt);
 		ctx.emitIf(toValType('i32'),
@@ -5970,10 +5979,21 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 							emitAs(e.operand, ctx, t);
 							return t;
 						case '~':
-							emitAs(e.operand, ctx, 'i32');
+							if (t === 'f64')
+								emitToInt32(e.operand, ctx);
+							else
+								emitAs(e.operand, ctx, 'i32');
 							ctx.emit(I.i32(-1), I.i32.xor);
 							return 'i32';
 					}
+				}
+				// A boxed `number | bigint` (`-numberValue(s)`) negates or complements whichever its value is.
+				if (W.isAny(info.wtype) && (e.operator === '-' || e.operator === '~')) {
+					const neg = e.operator === '-';
+					emitAs(e.operand, ctx, info.wtype);
+					emitNumericCases(info.wtype, ctx, () => emitMethodCall(builtinTypeOwner('bigint')!, neg ? 'neg' : 'not', [], ctx),
+						() => neg ? ctx.emit(I.f64.neg) : (f64ToInt32(ctx), ctx.emit(I.i32(-1), I.i32.xor, I.f64.convert_i32_s)));
+					return info.wtype;
 				}
 				throw `unsupported unary operator '${e.operator}'`;
 			}
@@ -8757,6 +8777,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			if (types.hasArray('i16')) {
 				const heap = types.array('i16');
 				arms.push({ heap, compare: [I.local.get(a), I.ref.cast(heap), I.local.get(b), I.ref.cast(heap), I.call(ensureMethod(builtinTypeOwner('string')!, 'eq', [], dctx)!.funcIndex)] });
+			}
+			// Two bigints compare by value, as `typeof` tells a bigint (its limb array).
+			if (types.hasArray('i32')) {
+				const heap = types.heapType('bigint')!;
+				arms.push({ heap, compare: [I.local.get(a), I.ref.cast(heap), I.local.get(b), I.ref.cast(heap), I.call(ensureMethod(builtinTypeOwner('bigint')!, 'eq', [], dctx)!.funcIndex)] });
 			}
 			for (const [kind, eq] of [['f64', I.f64.eq], ['i32', I.i32.eq], ['i64', I.i64.eq]] as const) {
 				if (types.hasBox(kind)) {
