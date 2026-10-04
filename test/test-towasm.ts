@@ -4408,6 +4408,20 @@ async function main() {
 	}
 
 	{
+		// A key typed as literals (checker.ts's `break`/`continue` target) reads the properties it names, not `any`.
+		const { literalKeys } = await compile(`
+			interface Target { labels: string[]; breaks: number[]; continues: number[] }
+			function push(o: Target | undefined, b: boolean) { o?.[b ? 'breaks' : 'continues'].push(5); }
+			export function literalKeys(): number {
+				const t: Target = { labels: [], breaks: [], continues: [] };
+				push(t, true); push(t, true); push(t, false); push(undefined, false);
+				return t.breaks.length * 10 + t.continues.length;
+			}
+		`);
+		check('a literal-union key reads the fields it names', literalKeys(), 21);
+	}
+
+	{
 		// A symbol key names no field: `defineProperty` and `x[sym]` reach the run-time struct's `#ext` (type-core.ts's `typeId` memo),
 		// a slot only the shapes such a key is written onto get.
 		const { symbolMemo } = await compile(`

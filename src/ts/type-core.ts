@@ -123,13 +123,15 @@ export function pathKey(e: Expr): string | undefined {
 			const k = pathKey(e.object);
 			return k && k + '.' + e.property;
 		}
-		// A LITERAL index names one element, so `a[0].k` is as stable a path as `a.b.k`, as TS narrows it; a COMPUTED one may evaluate differently
-		// between the guard and the read.
+		// A literal index names one element, so `a[0].k` is as stable a path as `a.b.k`; so does a NAMED one (`a[i]`, TS 5.5) until `i` is assigned
+		// (the checker's `forgetPathsThrough`). Any other computed index may evaluate differently between the guard and the read.
 		case 'index': {
 			const k = pathKey(e.object);
-			if (k === undefined || e.index.type !== 'literal')
+			if (k === undefined)
 				return undefined;
-			const v = e.index.value;
+			if (e.index.type === 'identifier')
+				return `${k}[${e.index.name}]`;
+			const v = e.index.type === 'literal' ? e.index.value : undefined;
 			return typeof v === 'number' ? `${k}[${v}]` : typeof v === 'string' ? `${k}["${v}"]` : undefined;
 		}
 		default:			return undefined;
@@ -3191,7 +3193,7 @@ export class Scope {
 	private values		= new Map<string, Type>();
 	private lazyValues?:	Map<string, () => Type>;
 	private types		= new Map<string, TypeEntry>();
-	private narrowings?:	Map<string, Type>;	// control-flow refinements, consulted before declarations
+	private narrowings?:	Map<string, Type | null>;	// control-flow refinements, consulted before declarations; `null`: a path an assignment invalidated
 	private aliases?:		Map<string, Expr>;	// const initializers -- narrowing a const also narrows through its initializer (TS 4.4 aliased conditions)
 	private sources?:		Map<string, Expr>;	// a const destructured from a union (`const {kind, a} = x`) IS `x.kind`: narrowed and read through it (TS 4.6)
 	private namespaces?:	Map<string, Scope>;	// nested namespace/module scopes, keyed by their bound name -- consulted by `resolve` for a dotted type ref (`NS.Foo`)
@@ -3271,7 +3273,10 @@ export class Scope {
 
 	isGenericTemplate(): boolean					{ return !!this.genericTemplate || !!this.parent?.isGenericTemplate(); }
 
-	value(name: string): Type | undefined			{ return this.narrowings?.get(name) ?? this.own(name) ?? (this.flowBoundary ? this.parent?.declared(name) : this.parent?.value(name)); }
+	value(name: string): Type | undefined {
+		const n = this.narrowings?.get(name);
+		return n === null ? undefined : n ?? this.own(name) ?? (this.flowBoundary ? this.parent?.declared(name) : this.parent?.value(name));
+	}
 	type(name: string): TypeEntry | undefined		{ return this.types.get(name) ?? this.parent?.type(name); }
 	typeDeclaredIn(name: string): Scope | undefined	{ return this.types.has(name) ? this : this.parent?.typeDeclaredIn(name); }
 	declared(name: string): Type | undefined		{ return this.own(name) ?? this.parent?.declared(name); }
@@ -3343,6 +3348,7 @@ export class Scope {
 	// `constraint` is only an upper bound, not a resolvable alias (`TypeEntry.isTypeParam`).
 	addTypeParam(name: string, constraint: Type)	{ this.types.set(name, {type: constraint, isTypeParam: true}); }
 	addNarrowing(name: string, t: Type)				{ (this.narrowings ??= new Map()).set(name, t); }
+	forget(path: string)							{ (this.narrowings ??= new Map()).set(path, null); }
 	addAlias(d: JS.Var<any>)						{ (this.aliases ??= new Map()).set(d.name, d.init); }
 	addSource(name: string, e: Expr)				{ (this.sources ??= new Map()).set(name, e); }
 	addNamespace(name: string, s: Scope)			{ (this.namespaces ??= new Map()).set(name, s); }

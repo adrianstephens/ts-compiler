@@ -871,7 +871,8 @@ export function narrow(test: Expr, scope: Scope, sense: boolean): Scope {
 					return !p || T.unionMembers(T.optional(p, T.memberOptional(m, test.property, narrowed)), narrowed).some(truthy);
 				}, objT);
 			}
-			// `if ((x = e))` narrows `x` by truthiness.
+			// `if ((x = e))` narrows `x` by truthiness, as `if (a[i])` does its element.
+			case 'index':
 			case 'assign':
 			case 'sequence':
 				return narrowKey(test, truthy) ?? scope;
@@ -1284,6 +1285,7 @@ function foldFlow(scope: Scope, name: string, t: Type) {
 
 // A write: the flow holds `t` from here, and a stamping check records it in the binding's hull (a value never read still lands in the slot).
 function assignFlow(scope: Scope, key: string, t: Type, stamp: boolean) {
+	forgetPathsThrough(scope, key);
 	scope.addNarrowing(key, t);
 	if (stamp)
 		foldFlow(scope, key, t);
@@ -1923,7 +1925,8 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 			case 'literal':
 				if (Array.isArray(e.value)) {
 					e.value.forEach(p => p.exp && recurse(p.exp));
-					return T.STRING;
+					const text = T.literalString(e);
+					return text === undefined ? T.STRING : { ...Literal(text), fresh: true };
 				}
 				switch (typeof e.value) {
 					case 'string':
@@ -2156,8 +2159,12 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 				const absent = chained || !!(e as { testedForAbsence?: boolean }).testedForAbsence;
 				// Only the non-nullish part of `objT` is indexed, or no branch below matches a union. `resolveMembers`: each branch reads a STRUCTURE (an element,
 				// a tuple, an index signature, a key), so a named class gives up its nominal identity here.
-				const objT = T.resolveMembers(T.nonNullable(rawObjT, scope, absent), scope);
-				recurse(e.index);
+				const declaredT	= T.nonNullable(rawObjT, scope, absent);
+				const objT		= T.resolveMembers(declaredT, scope);
+				const indexT	= recurse(e.index);
+				// A key typed as string literals (`o[k ? 'a' : 'b']`, a `const` key) reads each property it names, as TS's `T[K]`.
+				const named	= T.unionMembers(indexT, scope).map(m => T.literalString(m));
+				const keys	= named.length && named.every((k): k is string => k !== undefined) ? named : undefined;
 				if (objT.type === 'array')
 					return T.optional(objT.element, absent);
 				// A union of tuples and arrays reads each member's position (TS's getIndexedAccessType); a member too short or optional there reads `undefined`.
@@ -2171,11 +2178,11 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 				const atKey = objT.type !== 'tuple' && T.isLiteral(e.index, 'number') && T.lookupMember(objT, String(e.index.value), scope);
 				if (atKey)
 					return T.optional(atKey, absent);
-				const arrayUnion = T.literalString(e.index) === undefined && T.arrayUnionAsArray(objT, scope);
+				const arrayUnion = !keys && T.arrayUnionAsArray(objT, scope);
 				if (arrayUnion)
 					return T.optional(arrayUnion.element, absent);
 				// A tuple indexed by a COMPUTED number reads any of its positions, as TS's `T[number]`.
-				if (objT.type === 'tuple' && !T.isLiteral(e.index, 'number') && T.isNumberLike(recurse(e.index), scope))
+				if (objT.type === 'tuple' && !T.isLiteral(e.index, 'number') && T.isNumberLike(indexT, scope))
 					return T.optional(T.combineTypes(objT.elements.map((_, i) => T.tupleReadType(objT, i, scope) ?? T.UNDEFINED)), absent);
 				if (objT.type === 'tuple' && T.isLiteral(e.index, 'number')) {
 					const t = T.tupleReadType(objT, e.index.value, scope);
@@ -2185,21 +2192,17 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 				}
 				// A declared `[i: number]: T` index signature (`Record<number, T>`, typed arrays), searched through every intersection part (`indexSignatureOf`):
 				// for a computed key no named property applies.
-				if (T.literalString(e.index) === undefined) {
+				if (!keys) {
 					const idxT = T.indexSignatureOf(objT, scope);
-					if (idxT)
-						return T.optional(idxT, absent);
+					return idxT ? T.optional(idxT, absent) : T.ANY;
 				}
-				const literalKey = T.literalString(e.index);
-				if (literalKey !== undefined) {
-					const t = T.lookupMember(objT, literalKey, scope);
-					if (err && !t && T.sealed(objT, scope))
-						err(SEVERITY.ERROR, pos)`Property '${literalKey}' does not exist on type '${show().type(objT)}'`;
-					if (!t)
-						return T.ANY;
-					return T.optional(t, absent || T.memberOptional(objT, literalKey, scope));
-				}
-				return T.ANY;
+				const found = keys.map(k => T.lookupMember(objT, k, scope));
+				// Only a WRITTEN key is reported: one typed as literals reads `any`, as TS's implicit any does without `noImplicitAny`.
+				if (err && T.literalString(e.index) !== undefined && !found[0] && T.sealed(objT, scope))
+					err(SEVERITY.ERROR, pos)`Property '${keys[0]}' does not exist on type '${show().type(declaredT)}'`;
+				return found.every((t): t is Type => !!t)
+					? T.optional(T.combineTypes(found), absent || keys.some(k => T.memberOptional(objT, k, scope)))
+					: T.ANY;
 			}
 
 			case 'call':
@@ -2627,6 +2630,7 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 						if (key) {
 							// `x ??= y` leaves `x` holding its non-nullish members or `y` (likewise `||=`/`&&=`).
 							const other = T.isOther(e.operator[0]);
+							forgetPathsThrough(scope, key);
 
 							scope.addNarrowing(key, T.combineTypes([
 								...T.unionMembers(lt, scope).filter(m => !other(T.resolveOwn(m, scope), scope)),
@@ -3331,6 +3335,8 @@ function joinFlow(base: Scope, outs: (Scope | undefined)[]): Scope | undefined {
 		const ts = live.map(o => o.value(name));
 		if (ts.every(t => !!t))
 			joined.addNarrowing(name, joinTypes(base.declared(name), ts, base));
+		else if (/[.[]/.test(name))
+			joined.forget(name);
 	}
 	return joined;
 }
@@ -3346,8 +3352,11 @@ function joinTypes(declared: Type | undefined, ts: Type[], scope: Scope): Type {
 function widenFlow(base: Scope, prev: Scope, next: Scope): Scope {
 	const out = new Scope(base);
 	for (const n of next.outerNarrowings(base)) {
-		const a = T.toRange(prev.value(n)), b = T.toRange(next.value(n));
-		out.addNarrowing(n, a && b && a.base === b.base ? T.rangeToType(T.rangeWiden(a, b)) : next.value(n)!);
+		const a = T.toRange(prev.value(n)), b = T.toRange(next.value(n)), v = next.value(n);
+		if (!v)
+			out.forget(n);
+		else
+			out.addNarrowing(n, a && b && a.base === b.base ? T.rangeToType(T.rangeWiden(a, b)) : v);
 	}
 	return out;
 }
@@ -3368,8 +3377,16 @@ function havoc(base: Scope, names: Set<string>): Scope {
 		const t = base.declared(n);
 		if (t)
 			s.addNarrowing(n, t);
+		forgetPathsThrough(s, n);
 	}
 	return s;
+}
+
+// An assignment to `key` invalidates every narrowed path through it: `o.a` when `o` is assigned, `xs[i]` when `i` is.
+function forgetPathsThrough(scope: Scope, key: string) {
+	for (const k of scope.narrowedNames())
+		if (k.startsWith(key + '.') || k.startsWith(key + '[') || k.includes(`[${key}]`))
+			scope.forget(k);
 }
 
 // Every name `stmts` assign: `=`, a compound assignment, `++`/`--`, a destructuring target, a `for-in/of` target. Not a closure's.
