@@ -64,3 +64,20 @@ OPAQUE type is silently `any`, so a "does this key exist" probe proves nothing; 
 TYPE (`const bad: string = s.yx` must error). (3) test-ts-parser prints its errors to STDERR.
 
 Related: [[tison_nominal_class_refs]], [[tison_towasm_self_hosting_plan]].
+
+## TS-faithful fallbacks and what they exposed (2026-10-04: cd5f1e5, b2f7375, follow-up df5652a)
+
+An uninferred type parameter is `unknown` (was `any`), and `unknown` as a source fits only a top type (it fitted every class).
+**Measure with `corpus-ab.sh <rev>`** -- `npm run gate` is parser-only; three commits that session cited it as checker
+evidence and were wrong. The corpus showed ERROR +16 / GAP +11, all inference gaps the `any` had hidden; the follow-up
+(see its commit message) fixed them TS's way: async return/`await` contexts `T | PromiseLike<T>`, `yield*` context,
+`T & C` narrowing of a type-parameter value, `NoInfer<T>` = `T`, `ReadonlyArray<A>` and namespace-spelled refs in return
+inference, object types inferring index signatures from properties, result context heard FIRST (reaching only a nested
+generic call's context, unsolved params as `unknown`), `void`-accepting trailing params optional, no GAP for a param fixed
+to type a callback. Net vs the session's base: GAP -65, ERROR +2.
+
+**Open:** genericContextualTypes1 `f13` -- `compose(unbox, unlist)` against `<T>(x: Box<T[]>) => T`. B infers `unknown[]`:
+`unlist` is instantiated in context `(b: W) => C` (not lifted, since `B` already has the candidate `W`), `T[]` vs `W` infers
+nothing. TS's higher-order inference (instantiateTypeWithSingleGenericCallSignature / unique type parameters) unifies the
+lifted parameters. Also open: an error inside a callback two generic calls deep is not reported (`x.length` on `number`).
+Instrument: `assistant/probe-ctx.ts file.ts` prints each call/arrow's expected and checked type.
