@@ -37,3 +37,17 @@ class SyntaxError extends Error {
 		this.name = 'SyntaxError';
 	}
 }
+
+class TypeError extends Error {
+	constructor(message = '') {
+		super(message);
+		this.name = 'TypeError';
+	}
+}
+
+class AggregateError extends Error {
+	constructor(public errors: any[], message = '') {
+		super(message);
+		this.name = 'AggregateError';
+	}
+}

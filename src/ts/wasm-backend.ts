@@ -37,13 +37,9 @@ import * as WAT from '../wasm/wat-parser';
 //    - '.return()'/'.throw()' on a generator
 //    - 'for-of'/'for-await-of' over a generator or other iterable (stays under the general
 //      for-of-over-an-iterable gap below; call '.next()' manually instead)
-//    - 'Promise.race'/'Promise.any'/'Promise.allSettled' (only 'Promise.all' exists)
-//    - the standard 'new Promise((resolve, reject) => ...)' executor form ('resolve' is a plain
-//      public method on this compiler's 'Promise<T>' instead)
-//    - Promise rejection/'.catch' -- this compiler's 'Promise<T>' has no rejected state at all, so
-//      there's nothing yet for a real 'try'/'catch' to observe even where one could otherwise wrap
-//      an 'await' (which it still can't -- a suspend point directly inside a 'try' is its own,
-//      separate, permanent boundary, listed under Control flow above)
+//    - resolving with a thenable that is not a 'Promise' (an object with its own 'then'): only a
+//      'Promise' is followed
+//    - 'finally(f)' waiting on a promise 'f' returns ('f' is typed '() => void', its result unread)
 //    - a generic async or generator function
 //    - an async function or generator nested inside another closure, capturing that enclosing
 //      function's own free variables (its own params/locals are captured into its frame fine --
@@ -6214,6 +6210,20 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		}
 	}
 
+	// `body` in a try_table catching the one tag (all this compiler throws), branching to `afterDepth` once it completes. The caught value is left
+	// for `onCaught` OUTSIDE the block delivering it: a try_table the handler opens does not inherit outer stack values.
+	function emitCatching(ctx: FunctionContext, afterDepth: number, body: () => void, onCaught: () => void) {
+		ctx.enterLabel(2);			// $catchLand, and the try_table's own level
+		body();
+		ctx.emit(I.br(ctx.depth - afterDepth));
+		ctx.exitLabel();
+		ctx.emit(I.try_table(undefined, [wasm.Catch.tag(ensureExceptionTag(), 0)], ctx.swapOut()));
+		ctx.emit(I.unreachable);
+		ctx.exitLabel();
+		ctx.emit(I.block(toValType(W.REF_ANY), ctx.swapOut()));
+		onCaught();
+	}
+
 	// ===================================================================
 	//  Statement lowering
 	// ===================================================================
@@ -6586,25 +6596,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			case 'try': {
 				if (!s.handlers.length && !s.finalizer)
 					throw "'try' needs a 'catch' or 'finally'";
-				// The body in a try_table catching the one tag (all this compiler throws), its value delivered to a block and bound to the
-				// catch parameter, then `handler`. Bound OUTSIDE any try_table the handler opens: a block does not inherit outer stack values.
-				const emitCaught = (afterDepth: number, handler: () => void) => {
-					ctx.enterLabel(2);			// $catchLand, and the try_table's own level
-					ctx.inScope(() => emitStmts(s.body, ctx));
-					ctx.emit(I.br(ctx.depth - afterDepth));
-					ctx.exitLabel();
-					ctx.emit(I.try_table(undefined, [wasm.Catch.tag(ensureExceptionTag(), 0)], ctx.swapOut()));
-					ctx.emit(I.unreachable);
-					ctx.exitLabel();
-					ctx.emit(I.block(toValType(W.REF_ANY), ctx.swapOut()));
-					ctx.inScope(() => {
-						const param = s.handlers[0].param;
-						if (param && typeof param !== 'string')
-							throw "a destructured catch parameter ('catch ({...})'/'catch ([...])') is not supported";
-						ctx.emit(param ? I.local.set(ctx.declareValue(param, W.REF_ANY, T.ANY).index) : I.drop);
-						handler();
-					});
-				};
+				// The caught value bound to the catch parameter, then `handler`.
+				const emitCaught = (afterDepth: number, handler: () => void) => emitCatching(ctx, afterDepth, () => ctx.inScope(() => emitStmts(s.body, ctx)), () => ctx.inScope(() => {
+					const param = s.handlers[0].param;
+					if (param && typeof param !== 'string')
+						throw "a destructured catch parameter ('catch ({...})'/'catch ([...])') is not supported";
+					ctx.emit(param ? I.local.set(ctx.declareValue(param, W.REF_ANY, T.ANY).index) : I.drop);
+					handler();
+				}));
 
 				if (!s.finalizer) {
 					const saved = ctx.swapOut();
@@ -6924,15 +6923,20 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	function ensureGenericFunc(name: string, decl: FunctionDecl, call: CallSite, ctx: FunctionContext, expected?: Expected, homeModule = '.'): FuncInfo {
 		if (Array.isArray(call))
 			throw `internal: codegen's own call of generic '${name}' has no node to resolve`;
-		const typeParams	= decl.typeParams!;
 		const args			= call.arguments;
 		const map			= callTypeArgs(decl, callOf(call, ctx.scope), ctx, !!call.typeArgs, args, expected);
 		// A class instance filling a structural parameter specializes the instantiation further, as it does a plain function.
 		const substituted	= decl.params.map(p => p.typeAnnotation ? { ...p, typeAnnotation: T.substituteType(p.typeAnnotation, map) } : p);
 		const structural	= decl.body && structuralParams(substituted, args, ctx);
-		// Unmangled: `compileFunc` applies `homeKey` when it caches.
-		const key			= structural ? structuralKey(genericKey(name, typeParams, map, global), structural) : genericKey(name, typeParams, map, global);
-		const existing		= funcs.get(homeKey(homeModule, key));
+		return structural
+			? instantiateFunc(name, decl, map, homeModule, structuralKey(genericKey(name, decl.typeParams!, map, global), structural),
+				inst => ({ ...inst, params: inst.params.map((p, i) => structural[i] === substituted[i] ? p : structural[i]) }))
+			: instantiateFunc(name, decl, map, homeModule);
+	}
+
+	// `decl` with `map` substituted, compiled once per `key` (unmangled: `compileFunc` applies `homeKey` when it caches).
+	function instantiateFunc(name: string, decl: FunctionDecl, map: Map<string, Type>, homeModule = '.', key = genericKey(name, decl.typeParams!, map, global), adjust = (inst: FunctionDecl) => inst): FuncInfo {
+		const existing = funcs.get(homeKey(homeModule, key));
 		if (existing)
 			return existing;
 		// If the body calls `Object.defineProperty`, any of this instantiation's type arguments may be its target: all are marked extended (not final)
@@ -6942,8 +6946,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				if (t.type === 'ref' && !t.typeArgs)
 					everExtended.add(t.name);
 		}
-		const inst = instantiateDecl(decl, map, homeModule);
-		return compileFunc(key, structural ? { ...inst, params: inst.params.map((p, i) => structural[i] === substituted[i] ? p : structural[i]) } : inst, homeModule, name)!;
+		return compileFunc(key, adjust(instantiateDecl(decl, map, homeModule)), homeModule, name)!;
 	}
 
 	// `realName`: the DECLARED name, where `name` may be a generic instantiation's key.
@@ -7198,8 +7201,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		});
 	}
 
-	// An `async function` shares the generator's frame and dispatch but runs at once, synchronously, up to its first real suspension; an `await`
-	// registers a continuation through `Promise.then()`. Its step returns `void` and is called directly, the frame its first param.
+	// An `async function` shares the generator's frame and dispatch but runs at once, synchronously, up to its first `await`, which registers its resume
+	// through `then()`. A rejection resumes it throwing the reason; whatever escapes the body rejects the result.
 	function compileAsyncFunc(name: string, decl: FunctionDecl, homeModule = '.'): FuncInfo {
 		if (decl.typeParams?.length)
 			throw `generic async function '${name}' is not supported`;
@@ -7208,14 +7211,19 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const rt = decl.returnType;
 		if (rt?.type !== 'ref' || rt.name !== 'Promise' || (rt.typeArgs?.length ?? 0) !== 1)
 			throw `function '${name}' has an unexpected inferred return type`;
-		const promiseClass	= ensureClass('Promise', rt.typeArgs);
-		if (!promiseClass)
-			throw `the 'Promise' lib class was not found`;
+		const promiseOf		= (t: Type) => {
+			if (!typeOf(t))
+				throw "'await' on a Promise of an unsupported element type";
+			return ensureClass('Promise', [t])!;
+		};
+		const promiseClass	= promiseOf(rt.typeArgs![0]);
 		const promiseWtype	= promiseClass.thisType;
+		// A pending promise of `t`, from the lib's `__asyncResult<T>()`.
+		const newPromise	= (t: Type, ctx: FunctionContext) => ctx.emit(I.call(instantiateFunc('__asyncResult', LIB_DECL_MAP.get('__asyncResult') as FunctionDecl, new Map([['T', t]])).funcIndex));
 
-		// One hidden field after the locals: the function's own result Promise, resolved by every `return` and by completion.
-		const frame			= resumableFrame(decl, params, [{ type: toValType(promiseWtype), mut: true }]);
-		const resultPromise	= frame.extraAt;
+		// Two hidden fields after the locals: the function's own result Promise, and whether this resume delivers a rejection.
+		const frame			= resumableFrame(decl, params, [{ type: toValType(promiseWtype), mut: true }, { type: 'i32', mut: true }]);
+		const resultPromise	= frame.extraAt, threw = frame.extraAt + 1;
 		const { funcIndex: stepFuncIndex, typeIndex: stepFuncTypeIndex } = types.func(
 			[{ type: { ref: frame.typeIndex, nullable: false }, id: 'frame' }, { type: toValType(W.REF_ANY_NULLABLE), id: 'sent' }], []);
 		const stepInfo: FuncInfo = { params: [{ typeIndex: frame.typeIndex, nullable: false }, W.REF_ANY_NULLABLE], result: 'void', hasRest: false, funcIndex: stepFuncIndex, typeIndex: stepFuncTypeIndex };
@@ -7225,36 +7233,51 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const fnCtx			= new FunctionContext(name, new Scope(moduleScopeOf(homeModule) ?? libGlobal), plainReturn(), undefined, homeModule);
 			const frameLocal	= fnCtx.declareLocal('#frame', { typeIndex: frame.typeIndex, nullable: false });
 			const sentParam		= fnCtx.declareLocal('#sent', W.REF_ANY_NULLABLE);
-			const resolveMethod	= ensureMethod(promiseClass, 'resolve', [], fnCtx)!;
-			// `resolve`'s RESOLVED param, not `T`: a `Promise<void>`'s `T` was boxed to `any` by `ensureClass`.
-			const valueWtype	= resolveMethod.params[0];
+			const getFrame		= (ctx: FunctionContext) => ctx.emit(I.local.get(frameLocal.index));
+			// The result's private settling methods: `adopt`, as JS resolves an async function's result (a returned promise is followed), and `rejectWith`.
+			const adopt			= ensureMethod(promiseClass, 'adopt', [], fnCtx)!;
+			const rejectWith	= ensureMethod(promiseClass, 'rejectWith', [], fnCtx)!;
+			// `push` leaves the value on the stack.
+			const settle		= (m: FuncInfo, push: () => void, ctx: FunctionContext) => {
+				getFrame(ctx);
+				ctx.emit(I.struct.get(frame.typeIndex, resultPromise));
+				push();
+				ctx.emit(I.call(m.funcIndex));
+			};
 			const resolve		= (x: Expr | undefined, ctx: FunctionContext) => {
-				ctx.emit(I.local.get(frameLocal.index), I.struct.get(frame.typeIndex, resultPromise));
-				if (x)
-					emitAs(x, ctx, valueWtype);
-				else
-					ctx.emitDefaultValue(valueWtype, types, toValType);
-				ctx.emit(I.call(resolveMethod.funcIndex), I.return);
+				settle(adopt, () => emitAs(x ?? Identifier('undefined'), ctx, adopt.params[0]), ctx);
+				ctx.emit(I.return);
 			};
 
-			// One trampoline per awaited element type, shared by every await of it: it unboxes its value and forwards it, with the frame as
-			// its closure env, into the step -- whose state field, set before `.then()`, already says where the resume lands.
+			// One trampoline per callback type `then` takes, shared by every await of it: with the frame as its closure env, it forwards the value
+			// into the step, whose state field already says where the resume lands. The rejection's marks the frame first, so the step throws it.
 			const trampolines = new Map<string, { funcIndex: number; structTypeIndex: number }>();
-			const ensureTrampoline = (tWtype: W.Type) => {
-				const key = W.typeKey(tWtype);
+			const ensureTrampoline = (callback: W.Type, rejects: boolean) => {
+				const key = W.typeKey(callback) + (rejects ? '!' : '');
 				let info = trampolines.get(key);
 				if (!info) {
-					const { funcTypeIndex, structTypeIndex } = ensureClosureType({ params: [tWtype], result: 'void' });
+					const sig = closureSigOf(callback);
+					const { funcTypeIndex, structTypeIndex } = ensureClosureType(sig);
 					const { funcIndex } = types.funcAt(funcTypeIndex);
-					const tInfo: FuncInfo = { params: [tWtype], result: 'void', hasRest: false, funcIndex, typeIndex: funcTypeIndex };
+					const tInfo: FuncInfo = { params: sig.params, result: sig.result, hasRest: false, funcIndex, typeIndex: funcTypeIndex };
 					closureLiterals.push(tInfo);
 					worklist.push(() => {
 						const tCtx			= new FunctionContext(fnCtx.name, new Scope(libGlobal), plainReturn(), undefined);
 						const envParam		= tCtx.declareLocal('#envParam', { typeIndex: types.envBase(), nullable: false });
-						const valueParam	= tCtx.declareLocal('#value', tWtype);
-						tCtx.emit(I.local.get(envParam.index), I.ref.cast(frame.typeIndex), I.local.get(valueParam.index));
-						coerceTop(tWtype, tCtx, W.REF_ANY_NULLABLE);
-						tCtx.emit(I.call(stepFuncIndex), I.return);
+						const valueParam	= tCtx.declareLocal('#value', sig.params[0]);
+						const env			= () => tCtx.emit(I.local.get(envParam.index), I.ref.cast(frame.typeIndex));
+						if (rejects) {
+							env();
+							tCtx.emit(I.i32.const(1), I.struct.set(frame.typeIndex, threw));
+						}
+						env();
+						tCtx.emit(I.local.get(valueParam.index));
+						coerceTop(sig.params[0], tCtx, W.REF_ANY_NULLABLE);
+						tCtx.emit(I.call(stepFuncIndex));
+						// What the callback returns settles only `then`'s own result, which nothing reads.
+						if (sig.result !== 'void')
+							tCtx.emitDefaultValue(sig.result, types, toValType);
+						tCtx.emit(I.return);
 						tInfo.body			= tCtx.toFuncBody(2, toValType);
 					});
 					info = { funcIndex, structTypeIndex };
@@ -7262,70 +7285,78 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				}
 				return info;
 			};
+			const closureOf = (callback: W.Type, rejects: boolean) => {
+				const tramp = ensureTrampoline(callback, rejects);
+				fnCtx.emit(I.ref.func(tramp.funcIndex));
+				getFrame(fnCtx);
+				fnCtx.emit(I.i32.const(1), I.struct.new(tramp.structTypeIndex));
+			};
 			let awaitTemp = 0;
 
-			emitResumableBody(fnCtx, frame, frameLocal, sentParam, {
-				// A `return expr;` resolves the result Promise and returns nothing: the step's result is `void`, and nothing reads it.
-				onReturn: () => ({ wtype: () => valueWtype, emit: (ctx, argument) => resolve(argument, ctx) }),
-				// Only a REAL Promise suspension resumes through `#sent`: the synchronous fast path writes the local inline, and re-writing
-				// it from `#sent` would clobber it with an earlier resume's value.
-				resumesWithValue:	next => !!T.asPromiseRef(checkerTypeOf(next.operand!, fnCtx.scope), fnCtx.scope),
-				fromSent:			field => coerceTop(W.REF_ANY_NULLABLE, fnCtx, field.wtype),
-				suspend(next, resumeId, loopMark, setFrame) {
-					if (next.kind !== 'await')
-						throw "'yield' is not supported inside an async function";
-					if (next.delegate)
-						throw "'yield*' is not supported inside an async function";
-					const operand		= next.operand!;
-					const promiseRef	= T.asPromiseRef(checkerTypeOf(operand, fnCtx.scope), fnCtx.scope);
-					if (!promiseRef) {
-						// Not Promise-shaped, so nothing to suspend on: JS unwraps a non-thenable `await` at once, here one state transition.
-						if (next.resultVar) {
-							const field = frame.localFields.get(next.resultVar)!;
-							fnCtx.emit(I.local.get(frameLocal.index));
-							emitAs(operand, fnCtx, field.wtype);
-							fnCtx.emit(I.struct.set(frame.typeIndex, field.index));
+			const saved = fnCtx.swapOut();
+			const after = fnCtx.enterLabel();
+			emitCatching(fnCtx, after, () => {
+				// A rejected `await` throws its reason where the step resumes.
+				getFrame(fnCtx);
+				fnCtx.emit(I.struct.get(frame.typeIndex, threw));
+				fnCtx.emitIf(undefined, () => {
+					getFrame(fnCtx);
+					fnCtx.emit(I.i32.const(0), I.struct.set(frame.typeIndex, threw), I.local.get(sentParam.index));
+					coerceTop(W.REF_ANY_NULLABLE, fnCtx, W.REF_ANY);
+					fnCtx.emit(I.throw(ensureExceptionTag()));
+				});
+				emitResumableBody(fnCtx, frame, frameLocal, sentParam, {
+					// A `return expr;` resolves the result Promise and returns nothing: the step's result is `void`, and nothing reads it.
+					onReturn: () => ({ wtype: () => adopt.params[0], emit: (ctx, argument) => resolve(argument, ctx) }),
+					resumesWithValue:	() => true,
+					fromSent:			field => coerceTop(W.REF_ANY_NULLABLE, fnCtx, field.wtype),
+					suspend(next, resumeId, loopMark, setFrame) {
+						if (next.kind !== 'await')
+							throw "'yield' is not supported inside an async function";
+						if (next.delegate)
+							throw "'yield*' is not supported inside an async function";
+						const operand	= next.operand!;
+						const operandT	= checkerTypeOf(operand, fnCtx.scope);
+						const promiseRef	= T.asPromiseRef(operandT, fnCtx.scope);
+						const awaited	= promiseOf(promiseRef ? promiseRef.typeArgs![0] : operandT);
+						const promiseLocal = fnCtx.declareLocal(`$await$${awaitTemp++}`, awaited.thisType);
+						if (promiseRef) {
+							emitAs(operand, fnCtx, awaited.thisType);
+							fnCtx.emit(I.local.set(promiseLocal.index));
 						} else {
-							emitDiscarded(operand, fnCtx);
+							// Anything else is awaited as the promise `Promise.resolve` makes of it: settled, so it too resumes a tick later, never inline.
+							const adopt = ensureMethod(awaited, 'adopt', [], fnCtx)!;
+							newPromise(operandT, fnCtx);
+							fnCtx.emit(I.local.tee(promiseLocal.index));
+							emitAs(operand, fnCtx, adopt.params[0]);
+							fnCtx.emit(I.call(adopt.funcIndex));
 						}
 						setFrame(resumeId);
-						fnCtx.emit(I.br(fnCtx.depth - loopMark));
-						return;
-					}
-					const tType		= promiseRef.typeArgs![0];
-					if (!typeOf(tType))
-						throw "'await' on a Promise of an unsupported element type";
-					const awaitedClass = ensureClass('Promise', [tType]);
-					if (!awaitedClass)
-						throw `the 'Promise' lib class was not found`;
-					emitAs(operand, fnCtx, awaitedClass.thisType);
-					const promiseLocal = fnCtx.declareLocal(`$await$${awaitTemp++}`, awaitedClass.thisType);
-					fnCtx.emit(I.local.set(promiseLocal.index));
-					// `state` must say where to resume BEFORE `.then()`: a settled promise calls the trampoline synchronously,
-					// re-entering the step before `.then()` returns (safe -- this arm ends in `return`).
-					setFrame(resumeId);
-					// The trampoline takes what `then` hands its callback: the erased class's own parameter, not the awaited TS type's.
-					const then	= ensureMethod(awaitedClass, 'then', [], fnCtx)!;
-					const tramp	= ensureTrampoline(closureSigOf(then.params[then.params.length - 1]).params[0]);
-					fnCtx.emit(
-						I.local.get(promiseLocal.index),
-						I.ref.func(tramp.funcIndex), I.local.get(frameLocal.index), I.i32.const(1), I.struct.new(tramp.structTypeIndex),
-						I.call(then.funcIndex), I.return);
-				},
-				complete: () => resolve(undefined, fnCtx),
+						const then = ensureMethod(awaited, 'then', [], fnCtx)!;
+						fnCtx.emit(I.local.get(promiseLocal.index));
+						closureOf(then.params[0], false);
+						closureOf(then.params[1], true);
+						fnCtx.emit(I.call(then.funcIndex), I.drop, I.return);
+					},
+					complete: () => resolve(undefined, fnCtx),
+				});
+			}, () => {
+				const caught = fnCtx.temp('#caught', W.REF_ANY);
+				fnCtx.emit(I.local.set(caught));
+				settle(rejectWith, () => fnCtx.emit(I.local.get(caught)), fnCtx);
 			});
+			fnCtx.exitLabel();
+			fnCtx.emit(I.block(undefined, fnCtx.swapOut(saved)));
 			stepInfo.body = fnCtx.toFuncBody(2, toValType);
 		}, name, homeModule));
 
 		return compileResumableOuter(name, homeModule, params, promiseWtype, ctx => {
-			const promiseCtor	= ensureCtor(promiseClass, [], ctx);
-			const promiseLocal	= ctx.declareLocal('#resultPromise', promiseWtype);
-			// The constructor's RESOLVED `initial: T` (see `valueWtype`); its value never matters -- `resolve()` overwrites it.
-			ctx.emitDefaultValue(promiseCtor.params[0], types, toValType);
-			ctx.emit(I.call(promiseCtor.funcIndex), I.local.set(promiseLocal.index));
+			const promiseLocal = ctx.declareLocal('#resultPromise', promiseWtype);
+			newPromise(rt.typeArgs![0], ctx);
+			ctx.emit(I.local.set(promiseLocal.index));
 			emitFrameInit(ctx, params, frame);
-			ctx.emit(I.local.get(promiseLocal.index), I.struct.new(frame.typeIndex));
-			// Run the body at once, up to its first real suspension, as JS does; the entry segment never reads `#sent`.
+			ctx.emit(I.local.get(promiseLocal.index), I.i32.const(0), I.struct.new(frame.typeIndex));
+			// Run the body at once, up to its first suspension, as JS does; the entry segment never reads `#sent`.
 			ctx.emit(I.ref.null('any'), I.call(stepFuncIndex), I.local.get(promiseLocal.index), I.return);
 		});
 	}

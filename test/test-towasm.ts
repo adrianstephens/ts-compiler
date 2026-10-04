@@ -8001,19 +8001,9 @@ async function main() {
 	}
 
 	{
-		// Async/await -- reuses the exact same resumable-function machinery a generator does (frame,
-		// `flattenStateMachine`, the loop+block dispatch), but driven very differently: an async function
-		// runs immediately up to its first real suspend, and a suspended `await` resumes via
-		// `Promise.then()`, not an external caller (see wasm-backend.ts's own `compileAsyncFunc` header
-		// comment). A top-level mutable global is used to observe results below, not a captured closure
-		// variable -- capturing a *mutation* back out to the enclosing scope is a separate, pre-existing
-		// limitation (captures snapshot by value at creation time), not something these tests are about.
-		// Every case below reads its result through a SECOND exported call. `.then`/`await` continuations
-		// go on `lib/promise.ts`'s microtask queue, which towasm drains when an exported call returns to
-		// the host -- that call IS the job boundary, exactly as real JS defers a settled promise's
-		// callback to the end of the current job. So the value is still 0 inside the call that resolved
-		// the promise (asserted here, since that is the JS-faithful half these tests originally got
-		// wrong) and only observable from the next one.
+		// Async/await reuses the generator's resumable machinery, but runs at once up to its first `await`, which resumes through `then()`.
+		// Continuations go on `lib/promise.ts`'s microtask queue, drained when an exported call returns to the host: that call is the job
+		// boundary, so a result is still 0 inside the call that settled it, and is read through a second export.
 		const { alreadySettled, readSettled } = await compile(`
 			let output: number = 0;
 			async function addOne(p: Promise<number>): Promise<number> {
@@ -8022,9 +8012,7 @@ async function main() {
 				return v + 1;
 			}
 			export function alreadySettled(): number {
-				const p = new Promise<number>(0);
-				p.resolve(41);
-				const result = addOne(p);
+				addOne(Promise.resolve(41));
 				return output;
 			}
 			export function readSettled(): number { return output; }
@@ -8032,24 +8020,23 @@ async function main() {
 		check('async: await on an already-settled Promise does NOT resume inside the same call', alreadySettled(), 0);
 		check('async: ...and has resumed by the next one', readSettled(), 42);
 
-		// The promise is module-level so the suspend and the `resolve()` can be in DIFFERENT exported
-		// calls -- the only way to see that `start()` really suspended, since a drain at the end of it
-		// would otherwise be indistinguishable from never having suspended at all.
+		// The resolving function is kept at module level, so the suspend and the resolution happen in different exported calls.
 		const { start, resolveIt, readLater } = await compile(`
 			let output: number = 0;
-			const pending: Promise<number> = new Promise<number>(0);
+			let settle: (v: number) => void = v => {};
+			const pending: Promise<number> = new Promise<number>(resolve => { settle = resolve; });
 			async function addOne(p: Promise<number>): Promise<number> {
 				const v = await p;
 				output = v;
 				return v + 1;
 			}
 			export function start(): number { addOne(pending); return output; }
-			export function resolveIt(): number { pending.resolve(41); return output; }
+			export function resolveIt(): number { settle(41); return output; }
 			export function readLater(): number { return output; }
 		`);
 		check('async: await on a not-yet-settled Promise really suspends -- nothing runs, even at the drain', start(), 0);
-		check('async: ...and resolve() alone does not resume it inside its own call', resolveIt(), 0);
-		check('async: ...it resumes at the drain that resolve()\'s own call ends with', readLater(), 41);
+		check('async: ...and resolving it does not resume it inside its own call', resolveIt(), 0);
+		check('async: ...it resumes at the drain that call ends with', readLater(), 41);
 
 		const { twoAwaits, readTwo } = await compile(`
 			let output: number = 0;
@@ -8060,11 +8047,7 @@ async function main() {
 				return a + b;
 			}
 			export function twoAwaits(): number {
-				const p1 = new Promise<number>(0);
-				const p2 = new Promise<number>(0);
-				p1.resolve(10);
-				p2.resolve(20);
-				const result = addTwo(p1, p2);
+				addTwo(Promise.resolve(10), Promise.resolve(20));
 				return output;
 			}
 			export function readTwo(): number { return output; }
@@ -8072,7 +8055,8 @@ async function main() {
 		check('async: two sequential awaits in the same function', twoAwaits(), 0);
 		check('async: ...both resumptions drain by the next call', readTwo(), 30);
 
-		const { nonPromise } = await compile(`
+		// JS awaits a non-promise as `Promise.resolve` of it: it still resumes a tick later, never inline.
+		const { nonPromise, readNonPromise } = await compile(`
 			let output: number = 0;
 			async function identity(x: number): Promise<number> {
 				const v = await x;
@@ -8083,46 +8067,31 @@ async function main() {
 				identity(41);
 				return output;
 			}
+			export function readNonPromise(): number { return output; }
 		`);
-		check('async: awaiting a non-Promise value unwraps immediately (no real suspension)', nonPromise(), 41);
+		check('async: awaiting a non-Promise value still suspends', nonPromise(), 0);
+		check('async: ...and resumes with the value at the drain', readNonPromise(), 41);
 
-		// 'Promise.all' -- a static method with its own generic type param (deliberately named 'U', not
-		// 'T', to avoid colliding with the class's own 'T': a static member's own type param sharing the
-		// class's name confirmed the hard way to corrupt the method's own return-type substitution,
-		// independent of Promise specifically -- a real, general generic-static-method gap, worked around
-		// here rather than fixed given the risk of touching shared substitution machinery for it).
-		// Resolves only once every input has, regardless of resolution order -- a bare 'await all;' (no
-		// binding) sidesteps a separate, also pre-existing gap (a non-nullable ref/array-typed *hoisted*
-		// local -- as opposed to a param, which already works -- crossing a suspend isn't supported yet,
-		// `emitDefaultValue`'s own clear throw), which reading the resolved array back out would need.
 		const { startAll, resolveTwo, resolveLast, readAll } = await compile(`
 			let output: number = 0;
-			const p1: Promise<number> = new Promise<number>(0);
-			const p2: Promise<number> = new Promise<number>(0);
-			const p3: Promise<number> = new Promise<number>(0);
+			const settle: ((v: number) => void)[] = [];
+			const p1 = new Promise<number>(resolve => { settle.push(resolve); });
+			const p2 = new Promise<number>(resolve => { settle.push(resolve); });
+			const p3 = new Promise<number>(resolve => { settle.push(resolve); });
 			async function markDone(all: Promise<number[]>): Promise<number> {
-				await all;
-				output = 999;
-				return 999;
+				const xs = await all;
+				output = xs[0] + xs[1] * 10 + xs[2] * 100;
+				return output;
 			}
-			export function startAll(): number { markDone(Promise.all<number>([p1, p2, p3])); return output; }
-			export function resolveTwo(): number { p1.resolve(10); p2.resolve(20); return output; }
-			export function resolveLast(): number { p3.resolve(30); return output; }
+			export function startAll(): number { markDone(Promise.all([p1, p2, p3])); return output; }
+			export function resolveTwo(): number { settle[2](3); settle[0](1); return output; }
+			export function resolveLast(): number { settle[1](2); return output; }
 			export function readAll(): number { return output; }
 		`);
-		// Each of these calls ends with a full drain, so `readAll()` staying 0 after two of the three
-		// inputs resolved is a real "not yet", not just "not drained yet".
 		check("async: 'Promise.all' -- two of three inputs resolved leaves it pending", (startAll(), resolveTwo(), readAll()), 0);
-		check("async: 'Promise.all' resolves only once every input has, order-independent", (resolveLast(), readAll()), 999);
+		check("async: 'Promise.all' resolves once every input has, in input order", (resolveLast(), readAll()), 321);
 
-		// `Promise<void>` -- a real, common instantiation -- unlike `Generator`'s own `Y | R` union,
-		// `Promise<T>.value: T` is a *bare* field with no union to fall back on, so `T=void` needed a
-		// real fix (not something the existing machinery already handled): `compileAsyncFunc` now
-		// substitutes `any` for `T` right where `Promise<T>` gets instantiated, once, whenever the
-		// async function's own declared return is `void` -- both natural completion (no explicit
-		// `return` at all, here) and every `resolve()`/await site downstream then agree on that same
-		// substituted shape. Also exercises awaiting an existing `Promise<void>` value (`observe`
-		// below), which must reference the *same* substituted instantiation its producer built.
+		// `Promise<void>`: natural completion (no `return`) resolves it, and awaiting one works.
 		const { asyncVoidTest, readVoid } = await compile(`
 			let output: number = 0;
 			async function addOneVoid(p: Promise<number>): Promise<void> {
@@ -8131,16 +8100,15 @@ async function main() {
 			}
 			async function observe(p: Promise<number>): Promise<void> {
 				await addOneVoid(p);
+				output = output * 10;
 			}
 			export function asyncVoidTest(): number {
-				const p = new Promise<number>(0);
-				p.resolve(41);
-				observe(p);
+				observe(Promise.resolve(41));
 				return output;
 			}
 			export function readVoid(): number { return output; }
 		`);
-		check("async: 'Promise<void>' -- natural completion (no explicit 'return') resolves fine", (asyncVoidTest(), readVoid()), 42);
+		check("async: 'Promise<void>' -- natural completion (no explicit 'return') resolves fine", (asyncVoidTest(), readVoid()), 420);
 	}
 
 	{
@@ -8187,6 +8155,77 @@ async function main() {
 		check('a type parameter no stored field mentions does not split the layout', unstoredParam(), 5);
 		check('instanceof a generic class with no defaults matches every instantiation', bareInstanceof(), 12);
 		check('a reference-typed local held across a yield', frameLocal(), 46);
+	}
+
+	{
+		// The standard Promise: an executor, rejection, chaining, and the statics.
+		const { chain, executorThrows, rejectThenCatch, finallyRuns, adopts, read } = await compile(`
+			let output: number = 0;
+			export function chain(): number {
+				output = 0;
+				new Promise<number>(resolve => resolve(1)).then(v => v + 1).then(v => { output = v * 10; });
+				return output;
+			}
+			export function executorThrows(): number {
+				output = 0;
+				new Promise<number>(() => { throw 7; }).then(v => { output = 1; }, e => { output = e; });
+				return output;
+			}
+			export function rejectThenCatch(): number {
+				output = 0;
+				Promise.reject(3).then(v => { output = 1; }).catch(e => { output = e * 100; });
+				return output;
+			}
+			export function finallyRuns(): number {
+				output = 0;
+				Promise.resolve(5).finally(() => { output += 1; }).then(v => { output += v * 10; });
+				return output;
+			}
+			export function adopts(): number {
+				output = 0;
+				new Promise<number>(resolve => resolve(Promise.resolve(8))).then(v => { output = v; });
+				return output;
+			}
+			export function read(): number { return output; }
+		`);
+		check('promise: then chains, each callback a tick after the last', (chain(), read()), 20);
+		check('promise: an executor that throws rejects', (executorThrows(), read()), 7);
+		check('promise: a rejection skips then() and reaches catch()', (rejectThenCatch(), read()), 300);
+		check('promise: finally() runs, and passes the value through', (finallyRuns(), read()), 51);
+		check('promise: resolving with a promise follows it', (adopts(), read()), 8);
+
+		const { thrower, rejectedAwait, race, allSettled, anyOf, anyNone, read: readS } = await compile(`
+			let output: number = 0;
+			async function fails(): Promise<number> { throw 3; }
+			async function relay(p: Promise<number>): Promise<number> { const v = await p; output = 999; return v; }
+			export function thrower(): number { output = 0; fails().catch(e => { output = e * 2; }); return output; }
+			export function rejectedAwait(): number { output = 0; relay(Promise.reject(4)).catch(e => { output += e; }); return output; }
+			export function race(): number {
+				output = 0;
+				Promise.race([new Promise<number>(() => {}), Promise.resolve(6)]).then(v => { output = v; });
+				return output;
+			}
+			export function allSettled(): number {
+				output = 0;
+				Promise.allSettled([Promise.resolve(1), Promise.reject(2)]).then(rs => {
+					output = (rs[0].status === 'fulfilled' ? 10 : 0) + (rs[1].status === 'rejected' ? 100 : 0);
+				});
+				return output;
+			}
+			export function anyOf(): number { output = 0; Promise.any([Promise.reject(1), Promise.resolve(2)]).then(v => { output = v; }); return output; }
+			export function anyNone(): number {
+				output = 0;
+				Promise.any([Promise.reject(1)]).catch(e => { output = e instanceof AggregateError ? e.errors.length * 5 : -1; });
+				return output;
+			}
+			export function read(): number { return output; }
+		`);
+		check('async: a throw inside an async function rejects its promise', (thrower(), readS()), 6);
+		check('async: awaiting a rejected promise throws at the await, rejecting the caller', (rejectedAwait(), readS()), 4);
+		check("promise: 'Promise.race' settles with the first to settle", (race(), readS()), 6);
+		check("promise: 'Promise.allSettled' reports each outcome", (allSettled(), readS()), 110);
+		check("promise: 'Promise.any' takes the first fulfilment", (anyOf(), readS()), 2);
+		check("promise: 'Promise.any' with every input rejected rejects with an AggregateError", (anyNone(), readS()), 5);
 	}
 
 	{
@@ -8475,9 +8514,7 @@ async function main() {
 				return v;
 			}
 			export function asyncFinallyTest(): number {
-				const p = new Promise<number>(0);
-				p.resolve(41);
-				const result = observe(p);
+				const result = observe(Promise.resolve(41));
 				return output * 10 + finallyRan;
 			}
 			export function readFinally(): number { return output * 10 + finallyRan; }
