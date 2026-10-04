@@ -48,12 +48,9 @@ import * as WAT from '../wasm/wat-parser';
 //    - an async function or generator nested inside another closure, capturing that enclosing
 //      function's own free variables (its own params/locals are captured into its frame fine --
 //      only capturing an *outer* function's variables is unsupported)
-//    - a non-nullable object/array/closure-typed local that's hoisted into a generator/async frame
-//      (i.e. assigned before its first suspend point) without ever having a real initial value at
-//      frame-construction time -- the frame is built via one real 'struct.new', which needs a
-//      concrete value for every non-nullable field up front; declare it nullable, or give it a real
-//      initial value at declaration, instead
 //  - Classes:
+//    - a method call on a value 'instanceof' narrowed to a generic class whose instantiations differ
+//      in layout (a stored 'T'): the narrowed 'C<any>' is not the struct of a 'C<number>'
 //    - 'abstract'
 //    - computed field names
 //    - a field cycle (a field can't be of its own class's type, directly or indirectly)
@@ -258,8 +255,6 @@ class ClassInfo extends W.ClassInfo {
 	declScope?:		Scope;
 	// Built for an unnamed object type, so reached only through that type (`ensureAnonObjectShape`), never matched for another.
 	anonymous		= false;
-	// One instantiation of a generic class, each its own struct: `instanceof` must test them all.
-	instantiation	= false;
 	// Its constructor needs `this` before every required field has a value (`ctorNeedsEarlyThis`), so the object is
 	// built up front: the fields are stored nullable and it takes `ensureCtor`'s `struct.new_default` path.
 	earlyThis		= false;
@@ -1707,7 +1702,7 @@ function homeKey(homeModule: string, name: string) {
 
 
 // Substitutes a generic class's type parameters throughout its decl.
-function substituteClassTypeParam(decl: JS.ClassDecl<Type>, map: ReadonlyMap<string, Type>): JS.ClassDecl<Type> {
+function substituteClassTypeParam(decl: JS.ClassDecl<Type>, map: Map<string, Type>): JS.ClassDecl<Type> {
 	const out = substituteTypeParams(map).statement(decl) as JS.ClassDecl<Type>;
 	// A STATIC member is restored verbatim: TS forbids it referencing its class's type parameters, so substituting could only corrupt a static's OWN
 	// same-named one (`Array<any>._alloc<T>`). Order is structural, so `out.body[i]` is `decl.body[i]`.
@@ -1721,12 +1716,13 @@ function substituteClassTypeParam(decl: JS.ClassDecl<Type>, map: ReadonlyMap<str
 }
 
 // Applies a whole set of type-param substitutions in one walk.
-function substituteTypeParams(map: ReadonlyMap<string, Type>): Walker {
+function substituteTypeParams(map: Map<string, Type>): Walker {
 	return walker(
 		// The checker's stamps are the TEMPLATE's, where `T` is opaque: an instance is re-checked (`instantiateDecl`, `ensureClass`), stamping afresh.
 		(s, process) => unstamped(process(s)),
 		(e, process) => unstamped(process(e)),
-		(t, process) => t.type === 'ref' && map.has(t.name) ? map.get(t.name)! : process(t),
+		// `substituteType`, not a ref swap: it normalizes what substitution leaves (`A | B` at `never` is `A`).
+		t => T.substituteType(t, map),
 		undefined,
 		(m, process) => unstamped(process(m))
 	);
@@ -1841,9 +1837,27 @@ function ownsLayout(t: Type, scope: Scope): boolean {
 	const r = T.resolve(scope, t);
 	return r.type === 'ref' && (r.name === 'number' || r.name === 'boolean' || r.name === 'any');
 }
-// A class instantiation's physical arguments, as `ensureClass` keys it: every other argument erases to `any`.
-function classLayoutArgs(typeArgs: readonly Type[], scope: Scope): Type[] {
-	return typeArgs.map(t => ownsLayout(t, scope) ? t : T.ANY);
+// A class instantiation's physical arguments, as `ensureClass` keys it: every other argument erases to `any`, as does one no stored field mentions.
+function classLayoutArgs(typeArgs: readonly Type[], scope: Scope, decl: JS.ClassDecl<Type>): Type[] {
+	const stored = classLayoutParams(decl);
+	return typeArgs.map((t, i) => ownsLayout(t, scope) && stored.has(decl.typeParams?.[i]?.name ?? '') ? t : T.ANY);
+}
+// The type parameters a class's stored fields (its own, and its parameter properties) mention: only these change its layout. Every one counts
+// where the layout is not all written in field types: an unannotated field, a base class's fields, an index signature or `__asm` (`RawArray<T>`).
+const classLayoutParamsCache = new WeakMap<JS.ClassDecl<Type>, ReadonlySet<string>>();
+function classLayoutParams(decl: JS.ClassDecl<Type>): ReadonlySet<string> {
+	let params = classLayoutParamsCache.get(decl);
+	if (!params) {
+		const names		= (decl.typeParams ?? []).map(p => p.name);
+		const members	= decl.body as TS.ClassMember[];
+		const stored	= members.flatMap(m => m.type === 'field' && !hasMod(m, 'static') ? [m.typeAnnotation]
+			: m.type === 'method' && m.key === 'constructor' ? m.params.filter(T.isParamProperty).map(p => p.typeAnnotation) : []);
+		let asm = false;
+		walkerB(undefined, (e, process) => (asm ||= e.type === 'identifier' && e.name === '__asm', !asm && process(e))).statement(decl);
+		const opaque	= !!decl.superClass || asm || members.some(m => m.type === 'index_signature');
+		classLayoutParamsCache.set(decl, params = new Set(opaque ? names : names.filter(n => stored.some(t => !t || T.mentionsTypeParam(t, n)))));
+	}
+	return params;
 }
 
 // The tag is read UNRESOLVED on purpose: `T.resolve` collapses every `TypedArray` tag alike to plain `number`.
@@ -1907,8 +1921,10 @@ function resolveParts(t: Type, scope: Scope, depth = 3): Type {
 // A generic's layout is the instantiation `layoutArgs` (a class: `classLayoutArgs`) makes of it, as `openKey` keys it: `Spread<Type>` and
 // `Spread<any>` are one struct.
 function genericSketch(t: Type & { type: 'ref' }, scope: Scope): string {
-	const typeParams = t.typeArgs?.length && !T.isClassRef(t, scope) ? T.ownScope(t, scope).lookupType(t.name)?.typeParams : undefined;
-	return layoutKey(t.name, typeParams ? layoutArgs(typeParams, t.typeArgs, scope) : classLayoutArgs(t.typeArgs ?? [], scope), scope);
+	const typeParams	= t.typeArgs?.length && !T.isClassRef(t, scope) ? T.ownScope(t, scope).lookupType(t.name)?.typeParams : undefined;
+	const decl			= typeParams ? undefined : LIB_DECL_MAP.get(t.name) ?? T.ownScope(t, scope).decl(t.name);
+	return layoutKey(t.name, typeParams ? layoutArgs(typeParams, t.typeArgs, scope)
+		: decl?.type === 'class_decl' ? classLayoutArgs(t.typeArgs ?? [], scope, decl) : (t.typeArgs ?? []).map(a => ownsLayout(a, scope) ? a : T.ANY), scope);
 }
 
 // Would these two types occupy the same wasm slot? Answered WITHOUT building a shape (this runs before codegen), by `ensureClass`'s collapse:
@@ -2313,17 +2329,19 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// A string literal is built at run time; anything rejected here is `lazyGlobalFor`'s.
 	function libGlobalFor(name: string) {
 		const decl	= LIB_DECL_MAP.get(name);
-		const eager	= decl?.type === 'var_decl' && decl.init ? eagerGlobalInit(decl.init, decl.typeAnnotation) : undefined;
-		return decl?.type === 'var_decl' && eager ? ensureGlobal(name, typeOf(decl.typeAnnotation!)!, eager, decl.kind !== 'const') : undefined;
+		const eager	= decl?.type === 'var_decl' && decl.init ? eagerGlobal(decl.init, decl.typeAnnotation) : undefined;
+		return decl?.type === 'var_decl' && eager ? ensureGlobal(name, eager.wtype, eager.init, decl.kind !== 'const') : undefined;
 	}
 
-	function eagerGlobalInit(init: Expr, typeAnnotation?: Type): Expr | undefined {
+	// Folded first: `-1`/`!true` parse as `unary`/`binary` nodes. Not a string (built at run time), nor a bigint unless on an `i64` slot.
+	function eagerGlobal(init: Expr, typeAnnotation?: Type): { init: Expr; wtype: W.Type } | undefined {
 		const folded = foldConstants(init);
 		if (folded?.type !== 'literal')
 			return undefined;
-		const kind = W.notUnsigned(W.scalarKind(typeOf(typeAnnotation ?? checkerTypeOf(init, libGlobal))));
+		const wtype	= typeOf(typeAnnotation ?? checkerTypeOf(init, libGlobal));
+		const kind	= W.notUnsigned(W.scalarKind(wtype));
 		return kind && (typeof folded.value === 'number' || typeof folded.value === 'boolean' || (typeof folded.value === 'bigint' && kind === 'i64'))
-			? folded : undefined;
+			? { init: folded, wtype: wtype! } : undefined;
 	}
 
 	function ensureGlobal(name: string, wtype: W.Type, init: Expr, mut: boolean) {
@@ -2466,6 +2484,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		return elems.length ? typeOf(TS.ArrayType(T.combineTypes(elems))) : wt;
 	}
 
+	// A function's result: none for no return type, or for `never`, since a call that never returns gives no value.
+	function resultTypeOf(t: Type | undefined): W.Type | undefined {
+		return !t || T.isRef(t, 'never') ? 'void' : typeOf(t);
+	}
+
 	function closureSigParts(sig: TS.CallSig): FullSig | undefined {
 		// A bounded type parameter is free here, at its bound (as in `emitClosureLiteral`).
 		const func = T.baseSignature(sig, T.ANY);
@@ -2502,7 +2525,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			if (element && ewt)
 				restElem = { key: func.rest.key, wtype: ewt === 'void' ? W.REF_ANY : ewt, tsType: element };
 		}
-		let result = func.returnType ? typeOf(func.returnType) : 'void';
+		let result = resultTypeOf(func.returnType);
 		// A function TYPE's return annotation is a declared-type position: an inline `{value: T; consumed: number}` still needs a representation.
 		if (!result && func.returnType) {
 			const returnResolved = T.resolve(global, func.returnType);
@@ -3380,6 +3403,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// `coerceTop` for a value whose EXPRESSION is known: `coerceTop` has only physical types, so it would box and unbox a compact
 	// `i32` as a boolean. Every conversion of an emitted value into a wanted representation goes through here.
 	function coerceValue(e: Expr, got: W.Type, ctx: FunctionContext, want: W.Type, adoptErased = false): W.Type {
+		// A `never` value (a call that never returns) is the point past which nothing runs: whatever is wanted, unreachably.
+		if (got === 'void' && want !== 'void' && T.isRef(ctx.typeAt(e), 'never')) {
+			ctx.emit(I.unreachable);
+			return want;
+		}
 		// A bigint's canonical `any` form is its limb array, never a number box (`typeof` tests the heap type), so a machine-int bigint widens first.
 		if (W.isAny(want) && typeof got === 'string' && T.typeofName(ctx.narrowedTypeOf(e), ctx.scope) === 'bigint') {
 			const big = builtinTypes.get('bigint')!.wtype;
@@ -3401,6 +3429,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (typeof got !== typeof want && !W.isAny(got) && !W.isAny(want) && throughTop(e)) {
 			coerceTop(got, ctx, W.REF_ANY);
 			got = W.REF_ANY;
+		}
+		// Into an erased slot (`Array<any>` holding `F[]`), a closure is stored as the slot's own closure type: what a read casts it back to.
+		const slot = W.isAny(want) && W.isClosure(got) ? contextOf(e) : undefined;
+		const slotW = slot && typeOf(slot);
+		if (W.isClosure(slotW) && W.isClosure(got) && !W.typeEq({ ...slotW, nullable: got.nullable }, got)) {
+			coerceTop(got, ctx, slotW);
+			got = slotW;
 		}
 		if (adoptErased && erasedTwin(got, want))
 			return got;
@@ -4982,7 +5017,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		// nominal identity, while the caller's declared signature names the shape. An annotation is checked assignable, so the physical types agree.
 		const wantSig	= W.isClosure(want) ? closureSigOf(want) : undefined;
 		const overloaded	= e.name ? overloadedReturn(e, (e as { scope?: Scope }).scope?.value(e.name)) : undefined;
-		const result	= wantSig?.result ?? (overloaded ? typeOf(overloaded) : e.returnType ? typeOf(e.returnType) : 'void');
+		const result	= wantSig?.result ?? resultTypeOf(overloaded ?? e.returnType);
 		if (!result)
 			throw 'closure has an unsupported return type';
 
@@ -5116,7 +5151,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			pending.forEach(lowering(fnCtx).emit);
 			if (Array.isArray(body)) {
 				emitStmts(body, fnCtx);
-				fnCtx.emitTrailingUnreachable(result);
+				emitBodyEnd(fnCtx, result, body);
 			} else {
 				// The checker stamps an expression body with the scope it checked it in, as it stamps a block body's statements.
 				emitStmt(Object.assign(JS.Return(body) as Stmt, { scope: (body as any).scope }), fnCtx);
@@ -5413,7 +5448,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						wctx.emitDefaultValue(p, types, toValType);
 				});
 			}, wctx);
-			coerceTop(gotSig.result, wctx, wantSig.result);
+			// A `void` callback in a value-returning slot (`reject` as an `onrejected`) gives `undefined`, as calling it does in JS; a `void` slot
+			// discards what its callback returns.
+			if (gotSig.result === 'void' && wantSig.result !== 'void')
+				emitAs(Identifier('undefined'), wctx, wantSig.result);
+			else if (wantSig.result === 'void' && gotSig.result !== 'void')
+				wctx.emit(I.drop);
+			else
+				coerceTop(gotSig.result, wctx, wantSig.result);
 			info.body = wctx.toFuncBody(1 + argLocals.length, toValType);
 		});
 		return result;
@@ -5979,18 +6021,19 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					case 'instanceof': {
 						if (right.type !== 'identifier')
 							throw "'instanceof' is only supported against a plain class name";
-						const cls = ensureClass(right.name, undefined, ctx.scope);
-						if (!cls)
-							throw `'instanceof' against unknown class '${right.name}'`;
 						const leftWtype = wtypeOf(left, ctx);
 						if (!leftWtype || typeof leftWtype === 'string')
 							throw "'instanceof' needs an object-typed left-hand value";
-						// Each instantiation of a generic class is its own struct, and `instanceof C` is true for all of them.
-						if (cls.instantiation) {
+						// Each instantiation of a generic class is its own struct, and `instanceof C` is true for all of them: no one instantiation is built.
+						const decl = classDeclOf(right.name, ctx.scope);
+						if (decl?.type === 'class_decl' && decl.typeParams?.length) {
 							emitAs(left, ctx, W.REF_ANY_NULLABLE);
-							ctx.emit(I.call(ensureInstanceTest(cls).funcIndex));
+							ctx.emit(I.call(ensureInstanceTest(right.name, stmtHomeModule.get(decl)).funcIndex));
 							return 'i32';
 						}
+						const cls = ensureClass(right.name, undefined, ctx.scope);
+						if (!cls)
+							throw `'instanceof' against unknown class '${right.name}'`;
 						emitAs(left, ctx, leftWtype);
 						ctx.emit(I.ref.test(cls.typeIndex));
 						return 'i32';
@@ -6197,6 +6240,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					} else {
 						emitAs(argument, ctx, result);
 					}
+				} else {
+					emitAs(Identifier('undefined'), ctx, result);
 				}
 				ctx.emit(I.return);
 			},
@@ -6788,7 +6833,16 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	function emitFuncBody(ctx: FunctionContext, body: Stmt[], params: ResolvedParam[], result: W.Type) {
 		beginBody(ctx, body, params);
 		emitStmts(body, ctx);
-		ctx.emitTrailingUnreachable(result);
+		emitBodyEnd(ctx, result, body);
+	}
+	// Falling off the end is a bare `return;`. Valid TS reaches it only where the result admits `undefined`: a scalar result's end is unreachable,
+	// and so is one after a final `return`/`throw`.
+	function emitBodyEnd(ctx: FunctionContext, result: W.Type, body: Stmt[]) {
+		const last = body[body.length - 1]?.type;
+		if (W.isNullable(result) && last !== 'return' && last !== 'throw')
+			ctx.onReturn.emit(ctx, undefined);
+		else
+			ctx.emitTrailingUnreachable(result);
 	}
 
 	// The type arguments the checker resolved `decl` with, or under which `decl` realizes the signature it resolved (an overload's implementation).
@@ -6910,10 +6964,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const checkedType = moduleScope?.value(realName) ?? global.value(realName);
 			const inferredReturnType = !decl.returnType && checkedType?.type === 'function' ? checkedType.returnType : undefined;
 			const overloaded = overloadedReturn(decl, checkedType);
-			const result = overloaded ? typeOf(overloaded)
-				: decl.returnType ? typeOf(decl.returnType)
-				: inferredReturnType ? typeOf(inferredReturnType)
-				: 'void';
+			const result = resultTypeOf(overloaded ?? decl.returnType ?? inferredReturnType);
 			if (!result)
 				throw `'${name}' has an unsupported return type`;
 
@@ -6978,9 +7029,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			if (!d.init && !d.typeAnnotation)
 				throw `local '${localName}' needs an initializer or an explicit type`;
 			const tsType = d.typeAnnotation ?? slotType(d.flowType) ?? (d.init && T.literalTypeOf(d.init)) ?? checkerTypeOf(d.init!, (stmt as any).scope as Scope ?? libGlobal);
-			const wt = typeOf(tsType);
-			if (!wt || wt === 'void')
+			const declared = typeOf(tsType);
+			if (!declared || declared === 'void')
 				throw `local '${localName}' has an unsupported type`;
+			// Stored nullable: the frame is built before the body assigns it, and a non-nullable reference has no default.
+			const wt = typeof declared === 'string' ? declared : types.nullable(declared);
 			localFields.set(localName, { index: frameFields.length, wtype: wt, tsType });
 			frameFields.push({ type: toValType(wt), mut: true });
 		}
@@ -7644,13 +7697,15 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		return layoutTwin(info, key);
 	}
 
+	const classDeclOf = (name: string, declScope?: Scope) => LIB_DECL_MAP.get(name) ?? userGenericClassDecls.get(name) ?? declScope?.decl(name);
+
 	// Resolves fields and the struct type eagerly, but only collects method/ctor decls: each is built by `ensureMethod`/`ensureCtor` on demand.
 	function ensureClass(name: string, typeArgs?: Type[], declScope?: Scope): ClassInfo | undefined {
 		// A generic class's instantiation keys by the arguments that change its LAYOUT: a value stored unboxed, or a typed-array tag (by machine type).
 		// A reference argument erases to `any`: wasm struct fields are invariant, and methods compile once for the erased form (a type parameter is opaque).
-		const classDecl = LIB_DECL_MAP.get(name) ?? userGenericClassDecls.get(name) ?? declScope?.decl(name);
+		const classDecl = classDeclOf(name, declScope);
 		if (classDecl?.type === 'class_decl')
-			typeArgs = typeArgs && classLayoutArgs(typeArgs, global);
+			typeArgs = typeArgs && classLayoutArgs(typeArgs, global, classDecl);
 		// A class declared outside the entry module is keyed by its module too: `W.FunctionContext` and this file's subclass of it are two classes.
 		const tag	= classDecl?.type === 'class_decl' ? moduleTag(stmtHomeModule.get(classDecl)) : '';
 		const key	= (typeArgs?.length ? `${name}<${typeArgs.map(t => layoutArgKey(t, global)).join(',')}>` : name) + tag;
@@ -7664,7 +7719,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 		if (!info) {
 			// A lib class is seeded lazily; `declScope?.decl(name)` finds a non-entry module's class (with its methods) through the scope chain.
-			let decl = LIB_DECL_MAP.get(name) ?? userGenericClassDecls.get(name) ?? declScope?.decl(name);
+			let decl = classDeclOf(name, declScope);
 			if (decl?.type !== 'class_decl') {
 				// `resolveClassAlias` covers only a lib alias to a real class; a generic interface or alias goes to `ensureObjectShape`.
 				if (!typeArgs?.length) {
@@ -7702,7 +7757,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			info = new ClassInfo(key, -1, decl, thisTsType);
 			info.declScope		= declScope;
 			info.homeModule		= homeModule;
-			info.instantiation	= generic;
 			classes.set(key, info);
 			// Known by its declaration, as a shape is: another module's same-named interface (`Predicate`) must not take this class.
 			const entry = home?.type(name);
@@ -8158,7 +8212,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (instance?.length)
 			checkMethodInstance(owner.decl, decl, moduleScopeOf(owner.homeModule) ?? owner.declScope ?? libGlobal);
 
-		const result = decl.returnType ? typeOf(decl.returnType) : 'void';
+		const result = resultTypeOf(decl.returnType);
 		if (!result)
 			throw `'${fullName}' has an unsupported return type`;
 
@@ -8520,9 +8574,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 	// `instanceof` a generic class: a `ref.test` over every instantiation of it reached.
-	function ensureInstanceTest(cls: ClassInfo): FuncInfo {
-		return synthesize(`<instanceof>.${homeKey(cls.homeModule ?? '.', cls.decl.name!)}`, () => ({ params: [param('recv', W.REF_ANY_NULLABLE)], result: 'i32' as W.Type }), (dctx, [recv]) =>
-			emitTestsAny(dctx, recv, [...classes.values()].filter(c => c.typeIndex !== -1 && c.decl.name === cls.decl.name && c.homeModule === cls.homeModule).map(c => c.typeIndex)));
+	function ensureInstanceTest(name: string, homeModule: string | undefined): FuncInfo {
+		return synthesize(`<instanceof>.${homeKey(homeModule ?? '.', name)}`, () => ({ params: [param('recv', W.REF_ANY_NULLABLE)], result: 'i32' as W.Type }), (dctx, [recv]) =>
+			emitTestsAny(dctx, recv, [...classes.values()].filter(c => c.typeIndex !== -1 && c.decl.name === name && c.homeModule === homeModule).map(c => c.typeIndex)));
 	}
 
 	// `k in x` on an erased receiver: "has `k`" is "is a representation declaring `k`" (a field, getter or method, as JS finds prototype members).
@@ -8834,17 +8888,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						if (moduleId === '.')
 							promotedConsts.add(d.name);
 					} else if (moduleId === '.') {
-						// Folded first: `-1`/`!true` parse as `unary`/`binary` nodes.
-						const folded = foldConstants(d.init)!;
-						// Only a literal a wasm global can be INITIALIZED from: not a string (built at run time), nor a bigint unless on an `i64` slot.
-						const eagerKind = folded.type === 'literal' && W.notUnsigned(W.scalarKind(typeOf(d.typeAnnotation ?? checkerTypeOf(d.init, libGlobal))));
-						if (eagerKind && (typeof folded.value === 'number' || typeof folded.value === 'boolean' || (typeof folded.value === 'bigint' && eagerKind === 'i64'))) {
-							// Registered eagerly: once a global, its position in `ast.body` stops mattering. `mut: false` for a `const`.
-							const wtype = typeOf(d.typeAnnotation ?? checkerTypeOf(d.init, libGlobal));
-							if (wtype && wtype !== 'void') {
-								ensureGlobal(d.name, wtype, folded, s.kind !== 'const');
-								promotedConsts.add(d.name);
-							}
+						// Registered eagerly: once a global, its position in `ast.body` stops mattering.
+						const eager = eagerGlobal(d.init, d.typeAnnotation);
+						if (eager) {
+							ensureGlobal(d.name, eager.wtype, eager.init, s.kind !== 'const');
+							promotedConsts.add(d.name);
 						}
 					}
 				}

@@ -8144,6 +8144,52 @@ async function main() {
 	}
 
 	{
+		// Function results, closure adaptation and generic layouts the standard Promise relies on, each on its own.
+		const { neverCall, fallsOff, adaptVoid, erasedClosure, unionArg, unstoredParam, bareInstanceof, frameLocal } = await compile(`
+			let out = 0;
+			function fail(n: number): never { throw n; }
+			function pick(n: number): number { return n > 0 ? n : fail(n); }
+			export function neverCall(): number { try { return pick(2) + pick(-1); } catch (e) { return 7; } }
+			function find(xs: number[], k: number): string | undefined { for (const x of xs) if (x === k) return 'hit'; }
+			export function fallsOff(): number { return (find([1, 2], 2) === 'hit' ? 10 : 0) + (find([1], 3) === undefined ? 1 : 0); }
+			function apply(f: (x: number) => unknown): unknown { return f(1); }
+			function noop(x: number): void { out = x; }
+			function each(f: (x: number) => void): void { f(2); }
+			function twice(x: number): number { out = x * 2; return out; }
+			export function adaptVoid(): number { out = 0; const r = apply(noop); each(twice); return out * 10 + (r === undefined ? 1 : 0); }
+			const fs: ((v: number) => void)[] = [];
+			function keep(f: (v: number | string) => void): void { fs.push(f); }
+			export function erasedClosure(): number { out = 0; keep(v => { out = 5; }); fs[0](3); return out; }
+			class Box<T> {
+				constructor(public v: T) {}
+				map<A = T, B = never>(f?: ((v: T) => A) | null): Box<A | B> { return new Box<A | B>(f ? f(this.v) : this.v as unknown as A); }
+			}
+			export function unionArg(): number { return new Box<number>(4).map().v; }
+			class Holder<T> { private v: any; constructor(v: T) { this.v = v; } get(): T { return this.v; } }
+			function readAny(x: unknown): number { return x instanceof Holder ? x.get() : -1; }
+			export function unstoredParam(): number { return readAny(new Holder<number>(5)); }
+			class Cell<T> { constructor(public v: T) {} }
+			export function bareInstanceof(): number {
+				const xs: unknown[] = [new Cell<number>(1), new Cell<string>('a'), 3];
+				let k = 0;
+				for (const x of xs)
+					k += x instanceof Cell ? 1 : 10;
+				return k;
+			}
+			function* gen(): Generator<number, void, unknown> { const a: number[] = [4]; yield a[0]; a.push(6); yield a[1]; }
+			export function frameLocal(): number { const g = gen(); return g.next().value! * 10 + g.next().value!; }
+		`);
+		check("a 'never' call in a value position", neverCall(), 7);
+		check("falling off a function's end returns 'undefined'", fallsOff(), 11);
+		check("a 'void' callback in a value slot gives 'undefined'; a value callback in a 'void' slot is discarded", adaptVoid(), 41);
+		check('a closure stored into an erased slot is stored as the slot\'s closure type', erasedClosure(), 5);
+		check("a generic method's 'A | B' at 'never' instantiates as 'A'", unionArg(), 4);
+		check('a type parameter no stored field mentions does not split the layout', unstoredParam(), 5);
+		check('instanceof a generic class with no defaults matches every instantiation', bareInstanceof(), 12);
+		check('a reference-typed local held across a yield', frameLocal(), 46);
+	}
+
+	{
 		// A negative-literal (or other foldable, e.g. `!true`) top-level `const`/`let` initializer parses
 		// as a real `unary`/`binary` AST node, not a bare `literal` one -- `foldConstants` (already used by
 		// `case 'switch'`'s own jump-table detection) recognizes it as a compile-time constant so it still
