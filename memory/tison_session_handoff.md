@@ -109,12 +109,14 @@ Fixed since, all committed and probed: `boxed`/`refinedMember` dispatch with no 
 type-core.ts); `Number(any)` ToNumber + `RegExp.toString` (5, walker.ts); unary `-`/`~` on `number | bigint` + boxed bigint
 `===` (25, ts-parser.ts); `x === null` on a never-null representation (13, js-parser.ts); `{}` in a `Record | {}` context
 (tison core.ts:312); `never`-typed param (6, transform.ts); call/construct members in structural assignability (ReadType ->
-codegen.ts 13 -> 1 checker errors, wasm.ts 7 -> 1). **Open, put to the user (design decisions):** (1) binary-libs' instruction
-builder `I` (`TreeBuilder` + `Split`/`Nest`/`UnionToIntersection` types, built by dynamic writes): `I.f64` is `any` -- codegen.ts's
-27 rows; (2) a method overridden on one instance (transform.ts:698 `global.hitDepthLimit = fn => ...`): needs a closure slot per
-overridden method; (3) `new Map()` is `Map<any, any>` in TS's lib (first overload), ours infers from context because `Map` lays
-out by `K`/`V` -- type-core.ts:3373's 2 self-host checker errors. Also open: local `class_decl` in a function, async function
-expressions (transform.ts). Re-run the survey before trusting rows.
+codegen.ts 13 -> 1 checker errors, wasm.ts 7 -> 1). **User decisions (2026-10-04), status:** (1) binary-libs' instruction builder `I`: "evaluate the types" -- CHECKER DONE (`9b…` "evaluate
+binary-libs' instruction-builder types": template-literal infer, conditional infer union/intersection, tuple-spread normalization, remapped
+`keyof`, numeric mapped keys, identity-sharing type walker; codegen.ts self-checks with 0 errors in 12 s). BACKEND OPEN: `I` is built by
+dynamic writes into `{}` (`insertFactory`, `Object.assign(fn, existing)` = closures carrying properties), so no struct layout is known where
+`{}` is created; `I.f64.const(0)` throws "unknown method 'const'". Representation put back to the user. (2) per-instance method override:
+closure slot `#own:<method>` on the declaring class, DONE. (3) `new Map()` is TS's `Map<any, any>`, built at its contextual instantiation, DONE.
+Also open: local `class_decl` in a function, async function expressions (transform.ts); `unique symbol` types (a remapped symbol key is
+kept unfiltered meanwhile). Re-run the survey before trusting rows.
 **Checker queue (found 2026-10-04, left):** a declaration's initializer is checked WIDENED, so `const r: 'a' = 'b'` is only a
 GAP (lax "widened source" rule). Checking it precisely (tried, corpus ERROR +24) exposes tison's flow ranges of `number` slots
 compared as literals: `var x = 1` reads as `1`, so `f(x)` with `f(p: E)` already errs on ARGUMENTS. Fix needs flow ranges told
