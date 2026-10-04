@@ -96,6 +96,20 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
   `towasm-run.ts file.ts export...` (reads dist/).
 - The checker never reports an unknown name for TYPES; for values TS2304 is behind `Scope.unknownNames` ([[tison_unknown_name_diagnostic]]).
 
+## Self-hosting survey baseline (2026-10-04)
+
+Full survey, snapshot `compiler@d8641ea` (clean tree): 146/420 top-level declarations compile in isolation, 344 failures from
+92 causes; `wasm-backend.ts`'s worker CRASHED (562s, likely the 2 GB heap), not measured. Since then (all committed):
+`WeakRef` in the lib (was the top cause, 84 blocks, `resolve`'s `resolveCacheById?.[i]?.deref()`), and checker inference fixes
+that took walker.ts's survey checker errors 40 -> 1. Under the survey's sibling-source resolution (`SNAP=<snapshot> errcount.ts`),
+checker errors equal the session base (07b036e) everywhere but binary-libs/wasm.ts (+2, its generic instruction builders; see
+[[tison-checker-inference]]). **Work queue** (rows from the survey, re-probe before trusting): `typeId`'s symbol-keyed memo
+(`(t as Record<symbol, ...>)[memo]` + `Object.defineProperty(t, memo, ...)`, 23 rows + now `resolve`'s next blocker -- needs
+symbol-keyed expandos on every shape a `Type` can be: per-object `#ext` keyed by `PropertyKey`, since the lib `Map` is a linear
+scan and a global side table would make every lookup O(n); a layout decision, put to the user); closure conversion
+`() => void` -> `(Array<any>, Array<any>) => void` (53, checker.ts); `unknown field 'f64'` (27, codegen.ts); unary `-` (25,
+ts-parser.ts); `comparing to null needs a nullable object` (13, js-parser.ts).
+
 ## Next up (2026-09-30, end of session)
 
 0. **Size** ([[feedback_track_total_size]]): tracked src (`ts/` sans lib + `wasm/` + `vsdg.ts` + `transpile.ts`) 29,149 at the
