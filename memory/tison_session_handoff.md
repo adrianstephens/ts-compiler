@@ -115,6 +115,11 @@ symbol-keyed expandos on every shape a `Type` can be: per-object `#ext` keyed by
 scan and a global side table would make every lookup O(n); a layout decision, put to the user); closure conversion
 `() => void` -> `(Array<any>, Array<any>) => void` (53, checker.ts); `unknown field 'f64'` (27, codegen.ts); unary `-` (25,
 ts-parser.ts); `comparing to null needs a nullable object` (13, js-parser.ts).
+**Checker queue (found 2026-10-04, left):** a declaration's initializer is checked WIDENED, so `const r: 'a' = 'b'` is only a
+GAP (lax "widened source" rule). Checking it precisely (tried, corpus ERROR +24) exposes tison's flow ranges of `number` slots
+compared as literals: `var x = 1` reads as `1`, so `f(x)` with `f(p: E)` already errs on ARGUMENTS. Fix needs flow ranges told
+apart from literal types (TS reads a `number` slot as `number`); then drop the widening. checker.ts:2329 `sig!.returnType`:
+`pathKey` doesn't see through a non-null assertion (TS's isMatchingReference does) -- one-line fix, next.
 
 ## Next up (2026-09-30, end of session)
 
