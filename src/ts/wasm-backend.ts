@@ -6869,7 +6869,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			tsType ??= checkerTypeOf(p.default, scope);
 		if (!tsType)
 			throw `'param '${describeBinding(p.key)}' needs an explicit type`;
-		const rawWtype = typeOf(tsType);
+		// A `never` param, as a `never` result (`resultTypeOf`), carries no value (`operator?: O` at `O = never` only ever holds `undefined`).
+		const rawWtype = T.isRef(T.resolveOwn(tsType, scope), 'never') ? 'void' : typeOf(tsType);
 		if (!rawWtype)
 			throw `'param '${describeBinding(p.key)}' needs an explicit type`;
 		// A wasm-unrepresentable `void` is boxed as `any`.

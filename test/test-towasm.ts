@@ -4408,6 +4408,16 @@ async function main() {
 	}
 
 	{
+		// `operator?: O` instantiated at `O = never` (transform.ts's `Assign<TS.Expr, never>(...)`) only ever holds `undefined`.
+		const { neverParam } = await compile(`
+			interface A<O> { op?: O; v: number }
+			function Assign<const O>(v: number, op?: O): A<O> { return { op, v }; }
+			export function neverParam(): number { const a = Assign<never>(5); const b = Assign(6, '+'); return a.v + b.v + (a.op === undefined ? 100 : 0) + (b.op === '+' ? 1000 : 0); }
+		`);
+		check('an optional never parameter', neverParam(), 1111);
+	}
+
+	{
 		// `{}` against `Record<string, V> | {}` (tison's `spec.rules ?? {}`) is the record's dynamic object.
 		const { recordOrEmpty } = await compile(`
 			interface Spec { rules?: Record<string, number> }
