@@ -208,8 +208,9 @@ export interface FinallyGuard {
 };
 
 
-// The closure struct's own fields (code, env, length), leading a callable object's struct, immutable as they are there.
-export const CALLABLE_PREFIX = 3;
+
+// A closure's immutable fields: code, env, length.
+export const CLOSURE_CORE = 3;
 
 // A method-bearing struct (a class, a synthesized shape, a builtin owner): only physical facts. What a method DECLARES, and `declScope`,
 // stay with the language (`Scope` belongs to type-utils, which imports this).
@@ -224,7 +225,7 @@ export class ClassInfo {
 	thisWtype?:		Type;
 	// `fields`/`fieldIndex` are seeded with the superclass's, in order, so wasm-GC's prefix field subtyping holds.
 	superClass?:	ClassInfo;
-	// A callable object with properties: its struct extends this closure's, whose fields are its first `CALLABLE_PREFIX`.
+	// A callable object with properties: its struct extends this closure's, whose fields are its first `Types.callablePrefix`.
 	callable?:		ClosureType;
 
 	// `typeIndex` is -1 until `fields` is populated; a constructor returning a scalar never gets a struct type.
@@ -590,6 +591,14 @@ export function mentionsTypeIndex(t: wasm.SubType, index: number): boolean {
 
 export class Types extends Array<wasm.SubType> {
 	typeMap			= new Map<string, number>();
+	// Set when the program gives a function a property its type lacks: every closure then carries a mutable `#ext` map slot (null until written).
+	closureExt		= false;
+	// Before the first closure type exists, since every closure struct extends the base.
+	enableClosureExt() {
+		if (this.typeMap.has(wasm.typeKey({ final: false, supertypes: [], type: { kind: 'struct', fields: this.closureFields('func') } })!))
+			throw "internal: the closure '#ext' slot was enabled after a closure type was made";
+		this.closureExt = true;
+	}
 
 	array(kind: ElementI): number		{ return this.register(this.arrayDesc(kind)); }
 	hasArray(kind: ElementI): boolean	{ return this.has(this.arrayDesc(kind)); }
@@ -614,21 +623,23 @@ export class Types extends Array<wasm.SubType> {
 	// The prefix of every closure struct (code pointer, env, arity). Its first field is `(ref $itsFuncType)` under a covariant immutable field,
 	// so `ref.test` against it is exactly "is this a function", nominal.
 	closureBase(): number {
-		return this.register({ final: false, supertypes: [], type: { kind: 'struct', fields: [
-			{ type: { ref: 'func', nullable: false }, mut: false },
-			{ type: { ref: this.envBase(), nullable: false }, mut: false },
-			{ type: 'i32', mut: false },
-		] } });
+		return this.register({ final: false, supertypes: [], type: { kind: 'struct', fields: this.closureFields('func') } });
 	}
 
 	// One closure struct per call signature, `closureBase` plus its func type (rendered by the caller). Not final: a callable object extends it.
 	closure(funcTypeIndex: number): number {
-		return this.register({ final: false, supertypes: [this.closureBase()], type: { kind: 'struct', fields: [
-			{ type: { ref: funcTypeIndex, nullable: false }, mut: false },
+		return this.register({ final: false, supertypes: [this.closureBase()], type: { kind: 'struct', fields: this.closureFields(funcTypeIndex) } });
+	}
+	closureFields(code: number | 'func'): wasm.FieldType[] {
+		return [
+			{ type: { ref: code, nullable: false }, mut: false },
 			{ type: { ref: this.envBase(), nullable: false }, mut: false },
 			{ type: 'i32', mut: false },
-		] } });
+			...this.closureExt ? [{ type: { ref: 'any' as const, nullable: true }, mut: true }] : [],
+		];
 	}
+	// The closure struct's own fields (code, env, length, `#ext` if any), leading a callable object's struct.
+	get callablePrefix(): number	{ return CLOSURE_CORE + (this.closureExt ? 1 : 0); }
 
 	// The one-field mutable cell a captured binding becomes, shared by the closure and the declaring scope.
 	holder(vt: wasm.ValType): number {

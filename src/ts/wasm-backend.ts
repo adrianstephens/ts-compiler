@@ -502,11 +502,13 @@ function isAsmMethod(m: JS.Method<Type>): JS.Call<Type> | undefined {
 // A structural `{[k: string]: V}` type is the lib's `DynamicObject<V>`, whose `get`/`set`/`delete`/`has`/`keys` implement it.
 const isDynamicObject = (cls: ClassInfo) => cls.decl.name === 'DynamicObject' && cls.homeModule === undefined;
 
+// A string index signature makes a dynamic object, its declared properties beside it too (`{ op: string; [k: string]: any }`): TS holds them to
+// the index type, so they are entries like any other key.
 export function indexSignatureValueType(w: Type): Type | undefined {
-	if (w.type !== 'object' || w.members.length !== 1)
+	if (w.type !== 'object')
 		return undefined;
-	const m = w.members[0];
-	return m.type === 'index' && m.paramType.type === 'ref' && m.paramType.name === 'string' ? m.typeAnnotation : undefined;
+	const index = w.members.find(m => m.type === 'index' && m.paramType.type === 'ref' && m.paramType.name === 'string');
+	return index?.type === 'index' && w.members.every(m => m === index || m.type === 'property' || m.type === 'method') ? index.typeAnnotation : undefined;
 }
 
 interface AsmCodegen {
@@ -935,7 +937,7 @@ function noteAssignExpr(e: Expr, into: Set<string>) {
 
 // A call to one of `Object`'s compiler intrinsics (lib.d.ts's `declare var Object`): compiled by its own emitter, never through `Object`
 // as a value, which has no runtime shape. `defineProperty` gives a struct an expando field (`collectExpandoFields`).
-const OBJECT_INTRINSICS = new Set(['entries', 'keys', 'values', 'defineProperty', 'assign', 'is']);
+const OBJECT_INTRINSICS = new Set(['entries', 'keys', 'values', 'fromEntries', 'defineProperty', 'assign', 'is']);
 function objectIntrinsic(e: Expr): string | undefined {
 	return e.type === 'call' && e.callee.type === 'member' && e.callee.object.type === 'identifier' && e.callee.object.name === 'Object'
 		&& OBJECT_INTRINSICS.has(e.callee.property) ? e.callee.property : undefined;
@@ -1408,6 +1410,8 @@ function collectExpandoFields(
 	const pendingExtensions = new Map<string, string[] | 'dynamic'>();
 	// Methods a write overrides on an instance (`global.hitDepthLimit = fn => ...`), keyed by the class DECLARING each, whose instances get the slot.
 	const methodOverrides = new Map<string, Set<string>>();
+	// Whether a write gives a function a property its type lacks (`Object.assign(fn, existing)`): closures then carry `#ext` (`Types.closureExt`).
+	let functionProps = false;
 	const methodOwner = (ref: TS.RefType, key: string, scope: Scope): string | undefined => {
 		const [ns, leaf]	= T.declScopeOf(ref, scope).qualified(ref.name);
 		const decl			= LIB_DECL_MAP.get(leaf) ?? ns?.decl(leaf);
@@ -1426,9 +1430,15 @@ function collectExpandoFields(
 		const entry = T.isClassRef(ref, scope) || depth <= 0 ? undefined : scope.type(ref.name);
 		return entry?.type.type === 'ref' && !entry.typeParams?.length ? unalias(entry.type, scope, depth - 1) : ref;
 	};
-	const noteType = (raw: Type, key: string | undefined, scope: Scope, accessor = false) => {
+	// `built`: the receiver is made with these keys (`Object.assign(fn, {k: v})`), a function there becoming a callable object, not gaining `#ext`.
+	const noteType = (raw: Type, key: string | undefined, scope: Scope, accessor = false, built = false) => {
 		for (const member of T.unionMembers(raw, scope)) {
 			const part = member.type === 'array' || member.type === 'tuple' ? TS.RefType('Array') : member.type === 'ref' ? unalias(member, scope) : member;
+			const fn = T.resolveOwn(part, scope);
+			if (fn.type === 'function' || fn.type === 'constructor') {
+				functionProps ||= !built && (key === undefined || !T.lookupMember(fn, key, scope));
+				continue;
+			}
 			if (part.type === 'ref' && (T.isAny(part) || scope.type(part.name)?.isTypeParam))
 				continue;
 			const isClass	= part.type === 'ref' && (T.isClassRef(part, scope) || LIB_DECL_MAP.get(part.name)?.type === 'class_decl');
@@ -1465,7 +1475,7 @@ function collectExpandoFields(
 	const fnOf		= new Map<object, Fn>();
 	const calls: Call[]			= [];
 	const assigns: { target: Site; value: Site }[]	= [];
-	const writes: { s: Site; key?: string; accessor?: boolean }[]	= [];
+	const writes: { s: Site; key?: string; accessor?: boolean; built?: boolean }[]	= [];
 
 	const bindingIn = (node: object): Binding => bindingAt.get(node) ?? (b => (bindingAt.set(node, b), b))({ values: [] });
 	const enter = (node: object, sig: TS.CallSig, scope: Scope): Fn => {
@@ -1546,7 +1556,10 @@ function collectExpandoFields(
 					}
 					const assign = objectAssignCall(e);
 					for (const w of assign?.writes ?? [])
-						writes.push({ s: site(assign!.target), key: w.key });
+						writes.push({ s: site(assign!.target), key: w.key, built: true });
+					// A source whose keys are known only at run time writes any key.
+					if (!assign && objectIntrinsic(e) === 'assign' && e.arguments[0])
+						writes.push({ s: site(e.arguments[0]) });
 				} else if (e.type === 'assign' && e.target.type === 'identifier') {
 					assigns.push({ target: site(e.target), value: site(e.value) });
 				} else if (e.type === 'assign' && e.target.type === 'member') {
@@ -1582,11 +1595,11 @@ function collectExpandoFields(
 	// Each write lands on its receiver's type -- a local's annotation where it has one, since `const p: P = {...}` types as the
 	// literal's shape and loses `P`'s name; a receiver whose type names no struct is followed back to its sources below.
 	const seeds: { s: Site; key: string }[] = [];
-	for (const { s, key, accessor } of writes) {
+	for (const { s, key, accessor, built } of writes) {
 		const bare	= unwrapAs(s.e);
 		const b		= bindingOf(s, bare);
 		const local	= b && !b.param ? b.declared : undefined;
-		noteType(local ?? checkerTypeOf(bare, s.scope), key, local ? b!.declScope ?? s.scope : s.scope, accessor);
+		noteType(local ?? checkerTypeOf(bare, s.scope), key, local ? b!.declScope ?? s.scope : s.scope, accessor, built);
 		if (key !== undefined && untyped(s.e, s.scope))
 			seeds.push({ s, key });
 	}
@@ -1712,7 +1725,7 @@ function collectExpandoFields(
 		noteType(checkerTypeOf(e, s.scope), key, s.scope);
 	}
 
-	return { accessorKeys, pendingExtensions, methodOverrides };
+	return { accessorKeys, pendingExtensions, methodOverrides, functionProps };
 }
 
 function homeKey(homeModule: string, name: string) {
@@ -3519,7 +3532,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const { info, wantStructTypeIndex, envTypeIndex } = ensureClosureCoercionWrapper(gotSig, wantSig);
 				// The wrapper is the same JS function, so it keeps the original's `length`.
 					ctx.emit(I.ref.func(info.funcIndex), I.local.get(orig), I.struct.new(envTypeIndex),
-						I.local.get(orig), I.struct.get(types.closureBase(), CLOSURE_FIELDS.get('length')!), I.struct.new(wantStructTypeIndex));
+						I.local.get(orig), I.struct.get(types.closureBase(), CLOSURE_FIELDS.get('length')!), ...newClosure(wantStructTypeIndex, [I.local.get(orig), I.struct.get(types.closureBase(), W.CLOSURE_CORE)]));
 				return;
 			}
 		}
@@ -4295,6 +4308,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					: c.which === 'assign' ? emitObjectAssign(c.call, ctx)
 					// SameValue, decided at run time by typed lib code: an operand is often a boxed union value.
 					: c.which === 'is' ? emitCall('__towasm_same_value', e.arguments, ctx)
+					: c.which === 'fromEntries' ? emitFromEntries(c.call, ctx)
 					: emitObjectEntries(e.arguments, ctx, c.which as 'entries' | 'keys' | 'values', elementKindOfType(ctx.typeAt(e), ctx.scope));
 			case 'builtin':
 				return emitCall(c.name, e.arguments, ctx);
@@ -4654,7 +4668,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	function emitObjectAssign(e: JS.Call<Type>, ctx: FunctionContext): W.Type {
 		const call = objectAssignCall(e);
 		if (!call)
-			throw "'Object.assign' needs a target and sources that write their keys out (`{k: v}`) -- a source whose keys are only known at run time is not supported";
+			return emitDynamicAssign(e.arguments[0], e.arguments.slice(1), ctx);
 		const target	= call.target;
 		const tsType	= ctx.narrowedTypeOf(target);
 		const wtype		= typeOf(tsType);
@@ -4669,6 +4683,32 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			throw `'Object.assign': '${T.showType(tsType)}' is not an object to assign onto`;
 		const { temp, emit, check } = lowering(ctx);
 		return emitExpr(check(lowerObjectAssign(target, call.writes, temp, emit)), ctx);
+	}
+
+	// `Object.fromEntries(src)`: a dynamic object of the call's type, each entry's key (as a property key, its string) set in order.
+	function emitFromEntries(e: JS.Call<Type>, ctx: FunctionContext): W.Type {
+		const { temp, emit, check } = lowering(ctx);
+		const o = temp('object'), entry = temp('entry');
+		emit(JS.VarDecl('const', JS.Var(o, { type: 'object', properties: [] }, ctx.typeAt(e))));
+		emit({ type: 'for', kind: 'of', init: JS.VarDecl('const', JS.Var(entry)), right: e.arguments[0],
+			body: JS.ExprStmt(Assign<Expr, never>(JS.Index(Identifier(o), JS.Call(Identifier('String'), [JS.Index(Identifier(entry), Literal(0))])), JS.Index(Identifier(entry), Literal(1)))) });
+		return emitExpr(check(Identifier(o)), ctx);
+	}
+
+	// `Object.assign` with a source whose keys are known only at run time copies each source in order, as JS does: a literal's keys as written,
+	// another's own enumerable keys one by one, each through a keyed write on `any` (a closure's `#ext`, a dynamic object, a struct's field).
+	function emitDynamicAssign(target: Expr, sources: Expr[], ctx: FunctionContext): W.Type {
+		const { temp, emit, check } = lowering(ctx);
+		const anyOf	= (name: string): Expr => ({ type: 'as', expression: Identifier(name), typeAnnotation: T.ANY });
+		const t		= temp('assign');
+		emit(JS.VarDecl('const', JS.Var(t, target)));
+		for (const src of sources) {
+			const s = temp('source'), k = temp('key');
+			emit(JS.VarDecl('const', JS.Var(s, src)));
+			emit({ type: 'for', kind: 'of', init: JS.VarDecl('const', JS.Var(k)), right: JS.Call(JS.Member(Identifier('Object'), 'keys'), [anyOf(s)]),
+				body: JS.ExprStmt(Assign<Expr, never>(JS.Index(anyOf(t), Identifier(k)), JS.Index(anyOf(s), Identifier(k)))) });
+		}
+		return emitExpr(check(Identifier(t)), ctx);
 	}
 
 	// A function given its properties where it is made (`Object.assign(fn, {k: v})`, a literal typed as a callable object) is built as one
@@ -4691,9 +4731,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			ctx.emit(I.local.set(local));
 			return [w.key, local];
 		}));
-		for (let i = 0; i < W.CALLABLE_PREFIX; i++)
+		for (let i = 0; i < types.callablePrefix; i++)
 			ctx.emit(I.local.get(held), I.struct.get(structTypeIndex, i));
-		for (const f of cls.fields.slice(W.CALLABLE_PREFIX)) {
+		for (const f of cls.fields.slice(types.callablePrefix)) {
 			const local = values.get(f.name);
 			if (local !== undefined)
 				ctx.emit(I.local.get(local));
@@ -5238,7 +5278,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			if (allowSelfCall && e.name)
 				fnCtx.selfCall = info;
 			if (selfType) {
-				fnCtx.emit(I.ref.func(funcIndex), I.local.get(envParam.index), I.i32.const(jsLength(e.params)), I.struct.new(structTypeIndex));
+				fnCtx.emit(I.ref.func(funcIndex), I.local.get(envParam.index), I.i32.const(jsLength(e.params)), ...newClosure(structTypeIndex));
 				fnCtx.emit(I.local.set(fnCtx.declareValue(e.name!, closureWtype(sig), selfType).index));
 			}
 			for (const name of capturedNames) {
@@ -5272,7 +5312,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				ctx.rawSlot(name);
 		}
 		ctx.emit(fields ? I.struct.new(envTypeIndex) : I.struct.new_default(envBase));
-		ctx.emit(I.i32.const(jsLength(e.params)), I.struct.new(structTypeIndex));
+		ctx.emit(I.i32.const(jsLength(e.params)), ...newClosure(structTypeIndex));
 		return closureWtype(sig);
 	}
 
@@ -5361,7 +5401,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		}
 		ctx.emit(I.ref.func(info.funcIndex));
 		emitAs(e.object, ctx, W.REF_ANY_NULLABLE);
-		ctx.emit(I.struct.new(envThis()), I.i32.const(jsLength(fnType.params)), I.struct.new(structTypeIndex));
+		ctx.emit(I.struct.new(envThis()), I.i32.const(jsLength(fnType.params)), ...newClosure(structTypeIndex));
 		return w;
 	}
 
@@ -5399,7 +5439,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// The closure `held` with its env replaced by `envThis(thisVal)`: same code, same `length`.
 	const rebuildWithThis = (structTypeIndex: number, held: wasm.Instr[], thisVal: wasm.Instr[]): wasm.Instr[] => [
-		...held, I.struct.get(structTypeIndex, 0), ...thisVal, I.struct.new(envThis()), ...held, I.struct.get(structTypeIndex, 2), I.struct.new(structTypeIndex),
+		...held, I.struct.get(structTypeIndex, 0), ...thisVal, I.struct.new(envThis()), ...held, I.struct.get(structTypeIndex, 2), ...newClosure(structTypeIndex, [...held, I.struct.get(structTypeIndex, W.CLOSURE_CORE)]),
 	];
 
 	// `.call` on a function held as `any`: which closure type it is is known only at run time, so every closure type is a candidate (late worklist).
@@ -5510,7 +5550,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	function emitFunctionValue(fn: { name: string; decl: FunctionDecl; module: string }, want: W.Type | undefined, ctx: FunctionContext, typeArgs?: Type[]): W.Type {
 		const { info, structTypeIndex } = ensureFunctionValueWrapper(fn.name, fn.decl, fn.module, want, typeArgs);
-		ctx.emit(I.ref.func(info.funcIndex), I.struct.new_default(types.envBase()), I.i32.const(jsLength(fn.decl.params)), I.struct.new(structTypeIndex));
+		ctx.emit(I.ref.func(info.funcIndex), I.struct.new_default(types.envBase()), I.i32.const(jsLength(fn.decl.params)), ...newClosure(structTypeIndex));
 		return closureWtype({ params: info.params, result: info.result, hasRest: info.hasRest, defaults: info.defaults });
 	}
 
@@ -6900,6 +6940,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		return sig;
 	}
 
+	// A closure struct from its core fields on the stack: its `#ext` slot (`Types.closureExt`) is null, or `ext`'s, a closure derived from another.
+	function newClosure(structTypeIndex: number, ext?: wasm.Instr[]): wasm.Instr[] {
+		return [...types.closureExt ? ext ?? [I.ref.null('any')] : [], I.struct.new(structTypeIndex)];
+	}
+
 	// One pair of wasm types per distinct function signature, every literal still getting its own env type and `funcIndex`: one `call_ref` type,
 	// one `{code, env}` struct. `closureTypes` enumerates the signatures seen (the `any` dispatch scans them); `types.closure` dedupes the struct.
 	function ensureClosureType(sig: FuncSig): ClosureTypeInfo {
@@ -7029,6 +7074,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const map			= templateOf(sig.origin) === templateOf(decl)
 			? new Map(typeParams.map((p, i) => [p.name, typeArgs!.get(sig.typeParams![i].name)!]))
 			: implementationTypeArgs(decl, inst, scope);
+		// An `any` argument holds whatever it holds at run time, whichever overload it statically fits (`reduce`'s `initialValue: string`):
+		// a type parameter its parameter mentions is `any`, as TS infers from an `any` argument.
+		const anyAt = args.map(a => a.type !== 'spread' && T.isAny(ctx.narrowedTypeOf(a)));
+		for (const p of typeParams)
+			if (decl.params.some((q, i) => anyAt[i] && q.typeAnnotation && T.mentionsTypeParam(q.typeAnnotation, p.name)))
+				map.set(p.name, T.ANY);
 		const want			= typeof expected === 'function' ? expected() : expected;
 		if (want && decl.returnType && !explicit) {
 			const context = checkerInferTypeArgMap({ params: [], returnType: decl.returnType, typeParams }, [], undefined, scope, undefined, want);
@@ -7342,7 +7393,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const genCtor = ensureCtor(genClass, [], ctx);
 			ctx.emit(I.ref.func(stepFuncIndex));
 			emitFrameInit(ctx, params, frame);
-			ctx.emit(I.struct.new(frame.typeIndex), I.i32.const(sig.params.length), I.struct.new(structTypeIndex), I.call(genCtor.funcIndex), I.return);
+			ctx.emit(I.struct.new(frame.typeIndex), I.i32.const(sig.params.length), ...newClosure(structTypeIndex), I.call(genCtor.funcIndex), I.return);
 		});
 	}
 
@@ -7434,7 +7485,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const tramp = ensureTrampoline(callback, rejects);
 				fnCtx.emit(I.ref.func(tramp.funcIndex));
 				getFrame(fnCtx);
-				fnCtx.emit(I.i32.const(1), I.struct.new(tramp.structTypeIndex));
+				fnCtx.emit(I.i32.const(1), ...newClosure(tramp.structTypeIndex));
 			};
 			let awaitTemp = 0;
 
@@ -7659,7 +7710,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// A callable object's closure prefix is immutable, as in the closure struct it extends.
 	function structFields(info: ClassInfo): wasm.FieldType[] {
-		return info.fields.map((f, i) => ({ type: toValType(f.wtype), mut: !info.callable || i >= W.CALLABLE_PREFIX }));
+		return info.fields.map((f, i) => ({ type: toValType(f.wtype), mut: !info.callable || i >= W.CLOSURE_CORE }));
 	}
 
 	function buildObjectShape(key: string, members: TS.TypeMember[], thisTsType: Type, declName: string, everFinal: boolean, shape = shapeKey(members)): ClassInfo {
@@ -7678,6 +7729,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			info.addField('#code', { typeIndex: closureType.funcTypeIndex });
 			info.addField('#env', { typeIndex: types.envBase() });
 			info.addField('#length', 'i32');
+			if (types.closureExt)
+				info.addField('#ext', W.REF_ANY_NULLABLE);
 		}
 		for (const m of members) {
 			switch (m.type) {
@@ -8624,7 +8677,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					dctx.emit(I.drop);
 				deleted();
 			});
-			emitTypeCascade(dctx, recv, [...dynamic, ...owners.map(({ heap, cls }) => ({ heap, emit: () => {
+			const ext = closureExtArm(() => kind === 'set' ? emitClosureExtSet(dctx, keyArg, localArg(dctx, value, W.REF_ANY_NULLABLE))
+				: kind === 'get' ? emitClosureExtGet(dctx, keyArg, result) : emitClosureExtDelete(dctx, keyArg));
+			emitTypeCascade(dctx, recv, [...dynamic, ...ext, ...owners.map(({ heap, cls }) => ({ heap, emit: () => {
 				const obj = dctx.temp(`$keyobj$${heap}`, cls.thisWtype!);
 				dctx.emit(I.local.set(obj));
 				emitKeyedField(cls, key, dctx, idx => {
@@ -8707,6 +8762,44 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// `x.name` where `x` is `any`: a `ref.test` over every representation declaring `name`, boxed. A receiver declaring nothing reads `undefined`;
 	// a NULL receiver, which JS throws on, traps.
+	// A closure's `#ext` map (`Types.closureExt`), the closure on the stack: entry `key`, `undefined` while it has no map.
+	function emitClosureExtGet(dctx: FunctionContext, key: HeldArg, result: W.Type): void {
+		const map = extMapClass(), ext = dctx.temp(`$ext$${dctx.tempCounter++}`, W.REF_ANY_NULLABLE);
+		dctx.emit(I.struct.get(types.closureBase(), W.CLOSURE_CORE), I.local.tee(ext), I.ref.is_null);
+		dctx.emitIf(toValType(result), () => dctx.emitDefaultValue(result, types, toValType), () => {
+			dctx.emit(I.local.get(ext), I.ref.cast(map.typeIndex));
+			coerceTop(emitCallOn(map, 'get', [key], dctx), dctx, result);
+		});
+	}
+	// `fn[key] = value` on the closure on the stack, its `#ext` map made on the first write.
+	function emitClosureExtSet(dctx: FunctionContext, key: HeldArg, value: HeldArg): void {
+		const map = extMapClass(), base = types.closureBase();
+		const fn = dctx.temp(`$extfn$${dctx.tempCounter++}`, { typeIndex: base });
+		dctx.emit(I.local.tee(fn), I.struct.get(base, W.CLOSURE_CORE), I.ref.is_null);
+		dctx.emitIf(undefined, () => {
+			dctx.emit(I.local.get(fn));
+			const ctor = ensureCtor(map, [], dctx);
+			emitCallArgs(`${map.name}'s constructor`, ctor.params, ctor.defaults, !!ctor.hasRest, [], dctx, ctor.resolvedParams);
+			dctx.emit(I.call(ctor.funcIndex), I.struct.set(base, W.CLOSURE_CORE));
+		});
+		dctx.emit(I.local.get(fn), I.struct.get(base, W.CLOSURE_CORE), I.ref.cast(map.typeIndex));
+		if (emitCallOn(map, 'set', [key, value], dctx) !== 'void')
+			dctx.emit(I.drop);
+	}
+	// `delete fn[key]` on the closure on the stack: true, as JS answers for an own configurable key or none.
+	function emitClosureExtDelete(dctx: FunctionContext, key: HeldArg): void {
+		const map = extMapClass(), ext = dctx.temp(`$ext$${dctx.tempCounter++}`, W.REF_ANY_NULLABLE);
+		dctx.emit(I.struct.get(types.closureBase(), W.CLOSURE_CORE), I.local.tee(ext), I.ref.is_null, I.i32.eqz);
+		dctx.emitIf(undefined, () => {
+			dctx.emit(I.local.get(ext), I.ref.cast(map.typeIndex));
+			if (emitCallOn(map, 'delete', [key], dctx) !== 'void')
+				dctx.emit(I.drop);
+		});
+		dctx.emit(I.i32.const(1));
+	}
+	// The `#ext` arm of a by-name dispatch, on closures, when the program gives any function a property.
+	const closureExtArm = (emit: () => void) => types.closureExt ? [{ heap: types.closureBase(), emit }] : [];
+
 	function ensureAnyField(name: string): FuncInfo {
 		return synthesize(`<any field>.${name}`, () => ({ params: [param('recv')], result: W.REF_ANY_NULLABLE }), (dctx, [recv], { result }) => {
 			const readOf = ({ heap, cls }: Receiver) => {
@@ -8726,6 +8819,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					coerceTop('u32', dctx, 'f64');
 					coerceTop('f64', dctx, result);
 				} });
+			} else {
+				arms.push(...closureExtArm(() => emitClosureExtGet(dctx, stringArg(dctx, name), result)));
 			}
 			emitTypeCascade(dctx, recv, arms, () => dctx.emit(I.local.get(recv), I.ref.is_null,
 				I.if(toValType(result), [I.unreachable], [I.ref.null(heapTypeIndexOf(result))])), result);
@@ -8741,13 +8836,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				emitCallOn(cls, 'set', [stringArg(dctx, name), localArg(dctx, value, W.REF_ANY_NULLABLE)], dctx);
 				dctx.emit(I.drop);
 			});
-			if (!owners.length && !dynamic.length)
+			const ext		= closureExtArm(() => emitClosureExtSet(dctx, stringArg(dctx, name), localArg(dctx, value, W.REF_ANY_NULLABLE)));
+			if (!owners.length && !dynamic.length && !ext.length)
 				throw `no reachable class declares a field '${name}' -- a dynamic write on 'any' needs at least one real candidate`;
 			emitTypeCascade(dctx, recv, [...dynamic, ...owners.map(({ heap, cls }) => ({ heap, emit: () => {
 				// Through the owner's own receiver type, so a key with a setter (`emitFieldWrite`) calls it here too.
 				dctx.emit(I.local.get(value));
 				emitBoxedFieldWrite(cls, cls.fieldIndex.get(name)!, dctx);
-			} }))], trap(dctx));
+			} })), ...ext], trap(dctx));
 		});
 	}
 
@@ -8892,18 +8988,50 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			coerceTop(result, dctx, want);
 	}
 
+	// The closure types a call through `any` with these arguments may reach.
+	// A rest signature counts when its rest is `any`-element storage (`(...args: any[]) => R`): the trailing arguments go into it, boxed.
+	function anyCallCandidates(argWtypes: W.Type[], want: W.Type) {
+		const fixedFit = (params: W.Type[], n: number) => argWtypes.slice(0, n).every((w, i) => fits(w, params[i])) && params.slice(argWtypes.length, n).every(p => W.isNullable(p) || W.isAny(p));
+		return [...closureTypes.values()].filter(c => (want === 'void' || fits(c.sig.result, want)) && (c.sig.hasRest
+			? storageKindOf(c.sig.params[c.sig.params.length - 1]) === 'ref' && fixedFit(c.sig.params, c.sig.params.length - 1)
+			: c.sig.params.length >= argWtypes.length && fixedFit(c.sig.params, c.sig.params.length)));
+	}
+	// The arguments held in `args`, into a rest signature's fixed parameters and then its `any`-element rest storage.
+	function pushRestArgs(dctx: FunctionContext, args: number[], argWtypes: W.Type[], params: W.Type[]): void {
+		const fixed = params.length - 1;
+		for (let i = 0; i < fixed; i++) {
+			if (i < args.length) {
+				dctx.emit(I.local.get(args[i]));
+				coerceTop(argWtypes[i], dctx, params[i]);
+			} else {
+				emitAs(Identifier('undefined'), dctx, params[i]);
+			}
+		}
+		const extra = args.slice(fixed);
+		extra.forEach((a, j) => {
+			dctx.emit(I.local.get(a));
+			coerceTop(argWtypes[fixed + j], dctx, W.REF_ANY_NULLABLE);
+		});
+		dctx.emit(I.array.new_fixed(types.array('ref'), extra.length));
+		coerceTop(W.ARRAY.ref, dctx, params[fixed]);
+	}
+
 	function ensureAnyCallDispatch(argWtypes: W.Type[], want: W.Type): FuncInfo {
 		return synthesize(`<any dispatch>.#call(${argWtypes.map(W.typeKey).join(',')})=>${W.typeKey(want)}`, () => ({
 			params: [param('callee'), ...argWtypes.map((wtype, i) => param(`arg${i}`, wtype))], result: want,
 		}), (dctx, [callee, ...args]) => {
-			const candidates = [...closureTypes.values()].filter(c => !c.sig.hasRest && c.sig.params.length >= argWtypes.length
-				&& argWtypes.every((w, i) => fits(w, c.sig.params[i])) && (want === 'void' || fits(c.sig.result, want))
-				&& c.sig.params.slice(argWtypes.length).every(p => W.isNullable(p) || W.isAny(p)));
+			const candidates = anyCallCandidates(argWtypes, want);
 			if (!candidates.length)
 				throw `no closure type in the program takes ${argWtypes.length} such argument(s) -- a call through 'any' needs at least one real candidate`;
-			emitTypeCascade(dctx, callee, candidates.map(c => ({ heap: c.structTypeIndex, emit: () =>
-				dispatchArm(dctx, args, argWtypes, c.sig.params, undefined, want, push => emitClosureCall({ closure: c.sig, nullable: false }, push, dctx)),
-			})), trap(dctx), want);
+			emitTypeCascade(dctx, callee, candidates.map(c => ({ heap: c.structTypeIndex, emit: () => {
+				if (!c.sig.hasRest)
+					return dispatchArm(dctx, args, argWtypes, c.sig.params, undefined, want, push => emitClosureCall({ closure: c.sig, nullable: false }, push, dctx));
+				const result = emitClosureCall({ closure: c.sig, nullable: false }, () => pushRestArgs(dctx, args, argWtypes, c.sig.params), dctx);
+				if (want === 'void' && result !== 'void')
+					dctx.emit(I.drop);
+				else if (want !== 'void')
+					coerceTop(result, dctx, want);
+			} })), trap(dctx), want);
 		});
 	}
 
@@ -8924,10 +9052,31 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const sig	= closureSigOf(wt);
 				return (sig.hasRest || sig.params.length >= argTs.length) && (want === 'void' || fits(sig.result, want)) ? [{ cls, idx: idx!, wt, sig }] : [];
 			});
+			// An entry looked up by `name` at run time -- a dynamic object's, a closure's `#ext` -- is called through `any`.
+			const callEntry = (got: W.Type) => {
+				const entryWant = want === 'void' ? want : W.REF_ANY_NULLABLE;
+				// No function of this shape exists in the program, so no entry can be one: calling it fails, as JS's "is not a function".
+				if (!anyCallCandidates(argWtypes, entryWant).length)
+					return void dctx.emit(I.drop, I.unreachable);
+				coerceTop(got, dctx, W.REF_ANY);
+				args.forEach(a => dctx.emit(I.local.get(a)));
+				const call = ensureAnyCallDispatch(argWtypes, entryWant);
+				dctx.emit(I.call(call.funcIndex));
+				if (want !== 'void')
+					coerceTop(call.result, dctx, want);
+			};
+			const keyed = [
+				...dynamicObjectArms(cls => callEntry(emitCallOn(cls, 'get', [stringArg(dctx, name)], dctx))),
+				...types.closureExt ? [{ heap: types.closureBase(), emit: () => {
+					const map = extMapClass();
+					dctx.emit(I.struct.get(types.closureBase(), W.CLOSURE_CORE), I.ref.cast(map.typeIndex));
+					callEntry(emitCallOn(map, 'get', [stringArg(dctx, name)], dctx));
+				} }] : [],
+			];
 			// No value in the program has a `name` at all (an interface only code outside it implements): the call can never run.
-			if (!methods.length && !held.length && ![...classes.values()].some(c => c.methodDecls.has(name) || c.inlineMethods?.has(name) || c.fieldIndex.has(name)))
+			if (!methods.length && !held.length && !keyed.length && ![...classes.values()].some(c => c.methodDecls.has(name) || c.inlineMethods?.has(name) || c.fieldIndex.has(name)))
 				return dctx.emit(I.unreachable);
-			if (!methods.length && !held.length)
+			if (!methods.length && !held.length && !keyed.length)
 				throw `no reachable class (or 'number'/'boolean'/'string'/array) declares a '${name}' callable with ${argTs.length} such argument(s) -- a dynamic dispatch on 'any' needs at least one real candidate`;
 			emitTypeCascade(dctx, recv, [
 				...methods.map(c => ({ heap: c.heap, emit: () => {
@@ -8941,6 +9090,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					coerceTop(wt, dctx, callable);
 					dispatchArm(dctx, args, argWtypes, sig.params, undefined, want, push => emitClosureCall(callable, push, dctx));
 				} })),
+				...keyed,
 			], trap(dctx), want);
 		});
 	}
@@ -8980,7 +9130,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			else
 				emitFieldRead(f.cls, f.fieldIdx, dctx);
 			coerceUnionArm(f.wtype, dctx, result);
-		} })), trap(dctx), result), false);
+		// A union is physically `any`, so a value that came through `any` may be laid out as none of its members (a factory's own literal):
+		// read by name at run time, as `x.name` on `any` is.
+		} })), () => {
+			dctx.emit(I.local.get(recv), I.call(ensureAnyField(name).funcIndex));
+			coerceTop(W.REF_ANY_NULLABLE, dctx, result);
+		}, result), false);
 	}
 
 	// `arr[i]` on a union of indexable classes (`Uint8Array | number[]`): each member's own `__get(i)`, the one convention every indexable class shares.
@@ -9080,7 +9235,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	};
 	// A slot holding more than one array storage (`collectOpenShapes`) is stored as `any`, and so is what is read from it.
 	const openedAs = (d: Slot, t: Type) => openSlots.has(d) ? OPEN_SLOT : t;
-	const { accessorKeys, pendingExtensions, methodOverrides } = collectExpandoFields(stmtHomeModule, moduleBodies);
+	const { accessorKeys, pendingExtensions, methodOverrides, functionProps } = collectExpandoFields(stmtHomeModule, moduleBodies);
+	if (functionProps)
+		types.enableClosureExt();
 
 
 	// Only functions are seeded across every module; class and scalar promotion below stays entry-only.

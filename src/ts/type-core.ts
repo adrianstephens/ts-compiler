@@ -3348,6 +3348,8 @@ export class Scope {
 	// Set on a function body's own scope: whether it is `async` (an async generator's `yield`/`yield*` await and iterate asynchronously), and for
 	// a generator with a declared type what its `yield` must produce and evaluates to.
 	functionKind?: { async: boolean; yield?: Type; next?: Type };
+	// A statement's stamped flow (`stampedScope`): its narrowings copied, the scope it froze consulted only for declarations.
+	snapshot?:	boolean;
 
 	// `false` on a program's scope: `strictNullChecks` off, so `null`/`undefined` belong to every type. Unset inherits; the root is strict.
 	nullChecks?: boolean;
@@ -3401,7 +3403,8 @@ export class Scope {
 
 	value(name: string): Type | undefined {
 		const n = this.narrowings?.get(name);
-		return n === null ? undefined : n ?? this.own(name) ?? (this.flowBoundary ? this.parent?.declared(name) : this.parent?.value(name));
+		// A snapshot holds every narrowing as of its statement: a name narrowed later in the scope it copied is no business of that statement.
+		return n === null ? undefined : n ?? this.own(name) ?? (this.flowBoundary || this.snapshot ? this.parent?.declared(name) : this.parent?.value(name));
 	}
 	type(name: string): TypeEntry | undefined		{ return this.types.get(name) ?? this.parent?.type(name); }
 	typeDeclaredIn(name: string): Scope | undefined	{ return this.types.has(name) ? this : this.parent?.typeDeclaredIn(name); }

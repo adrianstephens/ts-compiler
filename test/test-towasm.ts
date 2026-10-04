@@ -4415,6 +4415,52 @@ async function main() {
 	}
 
 	{
+		// Objects built by dynamic writes (binary-libs' instruction builder `I`): `node[k] ??= {}` makes dynamic objects, `Object.assign` from a
+		// source whose keys are known only at run time copies key by key, a function gains properties in a closure `#ext`, and a method read
+		// off such an object is called through `any`.
+		const { dynamicTree, fromEntries, unionForeign } = await compile(`
+			type Loose = { op: string; [key: string]: any };
+			type Factory = (...args: any[]) => Loose;
+			function insert(root: any, mnemonic: string, fn: Factory | Loose) {
+				const path = mnemonic.split('.');
+				let node = root;
+				for (let i = 0; i < path.length - 1; i++)
+					node = node[path[i]] ??= {};
+				const key = path[path.length - 1];
+				const existing = node[key];
+				if (existing && typeof existing === 'object')
+					Object.assign(fn, existing);
+				node[key] = fn;
+			}
+			export function dynamicTree(): number {
+				const root: any = {};
+				insert(root, 'i32.add', { op: 'i32.add' });
+				insert(root, 'f64.const', (imm: number) => ({ op: 'f64.const', imm }));
+				insert(root, 'i32.load.x', { op: 'x' });
+				insert(root, 'i32.load', (o: number) => ({ op: 'i32.load', o }));
+				const c = root.f64.const(3);
+				return (root.i32.add.op === 'i32.add' ? 1 : 0) + (c.imm === 3 ? 10 : 0) + (root.i32.load(7).o === 7 ? 100 : 0) + (root.i32.load.x.op === 'x' ? 1000 : 0);
+			}
+			export function fromEntries(): number {
+				const o = Object.fromEntries([['a', 1], ['b', 2]]);
+				return o.a * 10 + o.b;
+			}
+			type U = { op: 'nop' } | { op: string; imm?: number };
+			const make: (imm: number) => any = imm => ({ tag: 1, op: 'c', imm });
+			export function unionForeign(): number { const u: U = make(5); return u.op === 'c' ? 5 : 0; }
+		`);
+		check('a tree built by dynamic writes, functions carrying properties', dynamicTree(), 1111);
+		check('Object.fromEntries', fromEntries(), 12);
+		const { deepRegex, reduceAny } = await compile(`
+			export function deepRegex(): number { const r = /^(.*)i(\\d+(?:[._].*)?)_s$/.exec('i64.atomic.rmw32.sub_s'); return r ? r[2].length : -1; }
+			export function reduceAny(): number { const root: any = { a: { b: 7 } }; const v: any = 'a.b'.split('.').reduce((n: any, k: string) => n[k], root); return v; }
+		`);
+		check('a regex backtracking past its initial stack', deepRegex(), 19);
+		check('reduce with an any initial value is instantiated at any', reduceAny(), 7);
+		check('a union read of a value laid out as none of its members', unionForeign(), 5);
+	}
+
+	{
 		// A method overridden on one instance (transform.ts's `global.hitDepthLimit = fn => ...`): a closure slot on the declaring class, tried first.
 		const { instanceOverride } = await compile(`
 			class Scope {

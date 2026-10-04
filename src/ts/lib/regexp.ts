@@ -655,8 +655,9 @@ export class RegExp {
 	}
 	private pushFrame(pc: number, sp: number): void {
 		const frameWidth = 2 + this.groups.length;
-		//while (this.stackTop + frameWidth > this.stack.length)
-		//	this.stack = growInt32(this.stack);
+		// The backtracking stack grows with the input (`(.*)` pushes a frame per character).
+		while (this.stackTop + frameWidth > this.stack.length)
+			this.stack.push(0);
 		this.stack[this.stackTop] = pc;
 		this.stack[this.stackTop + 1] = sp;
 		for (let i = 0; i < this.groups.length; i++)

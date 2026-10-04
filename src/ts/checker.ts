@@ -658,11 +658,9 @@ function writesAny(body: JS.Stmt<any>[] | Expr, names: Set<string>): boolean {
 // A statement's stamp is its scope's state at the START: an assignment narrowing (its own, or a later statement's on the same live scope) would
 // otherwise read back as the later type (`asm.some(...)` before `asm = asm.map(...).join('')`). So the narrowings are copied whenever there are any.
 function stampedScope(s: Stmt, scope: Scope): Scope {
-	const narrowed = scope.narrowedNames();
-	if (!narrowed.size)
-		return scope;
 	const frozen = new Scope(scope);
-	for (const name of narrowed) {
+	frozen.snapshot = true;
+	for (const name of scope.narrowedNames()) {
 		const t = scope.value(name);
 		if (t)
 			frozen.addNarrowing(name, t);
@@ -3043,9 +3041,18 @@ export function checkSynthesized(stmts: Stmt[], scope: Scope): void {
 				checkSynthesized(s.body, new T.Scope(scope));
 				break;
 			case 'for': {
-				if (s.kind !== 'normal')
-					throw `internal: a synthesized 'for...${s.kind}' is not checked`;
 				const loop = new T.Scope(scope);
+				if (s.kind !== 'normal') {
+					// `for (const k of xs)` / `in`: the declared name takes the element (a key), as `checkLoop`'s head does.
+					const elemT = s.kind === 'in' ? (type(s.right, loop), T.STRING) : T.iterationTypes(type(s.right, loop), loop, s.kind === 'of await')?.yield ?? T.ANY;
+					if (s.init.type !== 'var_decl')
+						throw `internal: a synthesized 'for...${s.kind}' needs a declared loop variable`;
+					for (const d of s.init.declarations)
+						bindPattern(loop, d.name, elemT, undefined, s.init.kind === 'const', MUTED);
+					(s.init as { scope?: Scope }).scope = loop;
+					checkSynthesized([s.body], new T.Scope(loop));
+					break;
+				}
 				if (s.init)
 					checkSynthesized([s.init.type === 'var_decl' ? s.init : JS.ExprStmt(s.init)], loop);
 				[s.test, s.update].forEach(e => e && type(e, loop));
