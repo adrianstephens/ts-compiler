@@ -1457,8 +1457,8 @@ export function resolve(scope: Scope, t: Type, depth = 10, stopAtRef = false): T
 				}
 				// A non-literal key reads the index signature covering it (`Record<string,V>[string]`), each key of a union its own, a number key a string
 				// one too (`Foo[keyof Foo]` with `keyof Foo = string | number`).
-				if (object.type === 'object') {
-					const indexes	= indexMembers(object.members);
+				const indexes = object.type === 'object' ? indexMembers(object.members) : [];
+				if (indexes.length) {
 					const parts		= unionMembers(index, scope).map(k => (indexes.find(m => isAssignable(k, m.paramType, scope))
 						?? (isNumberLike(k, scope) ? indexes.find(m => isRef(m.paramType, 'string')) : undefined))?.typeAnnotation);
 					if (parts.length && parts.every(p => !!p))
@@ -2364,6 +2364,21 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 		return s.params.every((p, i) => !p.typeAnnotation || !dp[i]?.typeAnnotation || recurse(p.typeAnnotation, dp[i].typeAnnotation!, depth - 1))
 			&& (!s.returnType || !d.returnType || isRef(s.returnType, 'void') || recurse(d.returnType, s.returnType, depth - 1));
 	};
+	// A target's call or construct signature (`{ new (s: any): R }`): some signature of that kind on the source fits it, as TS's signaturesRelatedTo.
+	// Coinductive like `recurse`: a pair already being related further up (`EventListener` through `Event.target`'s listeners) is assumed to hold.
+	const signatureFits = (src: Type, m: TS.CallSig & { type: 'call' | 'construct' }, depth: number): boolean => {
+		const asType = (s: TS.CallSig, sc: Scope) => withScope({ ...TS.FunctionType(JS.Params(s.params, s.rest), s.returnType ?? ANY, s.typeParams), type: m.type === 'call' ? 'function' as const : 'constructor' as const }, sc);
+		const want = asType(m, dstScope);
+		return signaturesOf(src, m.type, scope).some(s => {
+			const got = asType(s, declScopeOf(s, scope)), key = `${typeKey(got)} -> ${typeKey(want)}`;
+			if (inProgress.has(key))
+				return true;
+			inProgress.add(key);
+			const r = recurse(got, want, depth - 1);
+			inProgress.delete(key);
+			return r;
+		});
+	};
 	const related = (src: Type, dst: Type, depth: number): boolean => {
 		if (depth < 0) {
 			scope.hitDepthLimit('isAssignable');
@@ -2587,6 +2602,8 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 			if (src.type === 'function' || src.type === 'constructor')
 				// A function's apparent type is `Function`, then `Object` (both through `lookupMember`).
 				return dst.members.every(m => {
+					if (m.type === 'call' || m.type === 'construct')
+						return signatureFits(src, m, depth);
 					if ((m.type !== 'property' && m.type !== 'method') || hasMod(m, 'optional') || typeof m.key === 'object')
 						return true;
 					const got = lookupMember(src, String(m.key), scope);
@@ -2595,8 +2612,10 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 			if (src.type === 'object' || src.type === 'intersection' || src.type === 'tuple')
 				return dst.members.every(m => {
 					// A computed key names its member by path (`[Symbol.iterator]`), as `lookupMember` finds it.
+					if (m.type === 'call' || m.type === 'construct')
+						return signatureFits(src, m, depth);
 					if (m.type !== 'property' && m.type !== 'method')
-						return true;		// call/index: unchecked (inventory C4)
+						return true;		// index: unchecked (inventory C4)
 					const key = memberKey(m.key);
 					if (key === undefined)
 						return true;
@@ -3026,6 +3045,19 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 				a.types.forEach(m => recurse(paramT, m, depth - 1));
 			}
 		} else if (paramT.type === 'object') {
+			const fromSignature = (target: TS.CallSig, source: TS.CallSig) => {
+				flipped(() => target.params.forEach((p, i) => {
+					const q = source.params[i];
+					if (p.typeAnnotation && q?.typeAnnotation)
+						recurse(p.typeAnnotation, q.typeAnnotation, depth - 1);
+				}));
+				if (target.returnType) {
+					if (deferred)
+						deferred.push({ paramT: target.returnType, argT: source.returnType ?? ANY, contra });
+					else
+						recurse(target.returnType, source.returnType ?? ANY, depth - 1);
+				}
+			};
 			for (const m of paramT.members) {
 				// An index signature binds through the argument's OWN index signature of that key kind. A NUMBER one also takes an array's or tuple's elements;
 				// a primitive argument uses its boxed interface. As TS's `isObjectTypeWithInferableIndex`, only a type WRITTEN as an object (a literal's, a type
@@ -3043,12 +3075,12 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 						recurse(m.typeAnnotation, from, depth - 1);
 					continue;
 				}
-				// A call or construct signature member: the argument's own (a function value is one), its return type.
+				// A call or construct signature member: as TS's inferFromSignatures, the target's and the argument's signatures of that kind pair up from the last.
 				if (m.type === 'call' || m.type === 'construct') {
-					const own = a.type === (m.type === 'call' ? 'function' : 'constructor') ? a
-						: collectMembers(a, scope).find((x): x is TS.CallSig & TS.TypeMember => x.type === m.type);
-					if (m.returnType && own?.returnType)
-						recurse(m.returnType, own.returnType, depth - 1);
+					const targets = paramT.members.filter(x => x.type === m.type), sources = signaturesOf(a, m.type, scope);
+					const own = sources[sources.length - targets.length + targets.indexOf(m)];
+					if (own)
+						fromSignature(m, own);
 					continue;
 				}
 				const key = (m.type === 'property' || m.type === 'method') ? memberKey(m.key) : undefined;
@@ -3061,20 +3093,8 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 				} else if (m.type === 'method') {
 					// Same shape as `function`/`constructor` above -- `adapter0<T,D>`-style interfaces often carry `T`/`D` only in a method's own signature.
 					const member = lookupMember(a, key, scope);
-					if (member?.type === 'function') {
-						const t = baseSignature(member);
-						flipped(() => m.params.forEach((p, i) => {
-							const q = t.params[i];
-							if (p.typeAnnotation && q?.typeAnnotation)
-								recurse(p.typeAnnotation, q.typeAnnotation, depth - 1);
-						}));
-						if (m.returnType) {
-							if (deferred)
-								deferred.push({ paramT: m.returnType, argT: t.returnType ?? ANY, contra });
-							else
-								recurse(m.returnType, t.returnType ?? ANY, depth - 1);
-						}
-					}
+					if (member?.type === 'function')
+						fromSignature(m, baseSignature(member));
 				}
 			}
 		} else if (paramT.type === 'mapped' && !paramT.nameType) {
