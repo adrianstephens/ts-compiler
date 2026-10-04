@@ -261,6 +261,8 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		[NOT_ASSIGNABLE('Promise<unknown>', 'Promise<number>'), NOT_ASSIGNABLE('Promise<number>', 'Promise<string>')]],
 	// `instanceof` narrows to the class's prototype type: a generic one's arguments are `any`.
 	['instanceof a generic class narrows to its prototype type', 'declare const x: unknown; if (x instanceof Map) { const q: string = x; }', [NOT_ASSIGNABLE('Map<any, any>', 'string')]],
+	// `unknown` is a top type only as a target.
+	['unknown is assignable only to a top type', 'class C { x = 1; } declare const u: unknown; const p: C = u; const r: unknown = u; const s: any = u;', [NOT_ASSIGNABLE('unknown', 'C')]],
 	['a destructuring default adds its own type', "let [x = 'a' in {}] = []; x = !x; const { y = 1 } = {} as { y?: string }; const q: boolean = y;", [NOT_ASSIGNABLE('string | number', 'boolean')]],
 	// Stripping `undefined` keeps an aliased union by name, as TS does: expanded, it no longer matched the alias itself.
 	['?? and ! keep an aliased union by name', "type U = { a: 1 } | { b: 2 }; declare const p: { c?: U }; declare function d(): U; const q: string = p.c ?? d(); declare const n: U | undefined; const r: string = n!;", [NOT_ASSIGNABLE('U', 'string'), NOT_ASSIGNABLE('U', 'string')]],

@@ -2412,6 +2412,8 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 		// `unknown` is a top type only as a target: as a source it fits nothing but a top type.
 		if (src === dst || isAny(dst))
 			return true;
+		if (isRef(src, 'unknown'))
+			return false;
 		// Under the subtype relation (`precise`) `any` is below nothing but itself: structurally it would fit every object target.
 		if (isRef(src, 'any'))
 			return !precise;
