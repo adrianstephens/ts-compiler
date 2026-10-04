@@ -4491,6 +4491,51 @@ async function main() {
 			export function bareMap(): number { const m: Map<string, number> = new Map(); m.set('a', 4); return new S().add('x', 3) * 10 + (m.get('a') ?? 0); }
 		`);
 		check('a bare new Map() takes its context', bareMap(), 34);
+		// binary-libs' builder: a tree written through `any`, read back as an intersection whose callable part `Object.assign` builds -- not the
+		// `{f64: F}` literal sharing its member names -- and rest closures called through `any`.
+		const { callableShape, restHeld } = await compile(`
+			type LooseInstr = { op: string; [key: string]: any }; type Instr = { op: string; imm?: number; o?: number };
+			type InstrFactory = (...args: any[]) => LooseInstr;
+			type InstrOrFactory = InstrFactory | LooseInstr;
+			function insertFactory(root: any, mnemonic: string, fn: InstrOrFactory) {
+				const path = mnemonic.split('.');
+				let node = root;
+				for (let i = 0; i < path.length - 1; i++)
+					node = node[path[i]] ??= {};
+				const key = path[path.length - 1];
+				const existing = node[key];
+				if (existing && typeof existing === 'object')
+					Object.assign(fn, existing);
+				node[key] = fn;
+			}
+			type Split<S extends string> = S extends \`\${infer Head}.\${infer Rest}\` ? [Head, ...Split<Rest>] : [S];
+			type Nest<Path extends readonly string[], Fn> = Path extends readonly [infer Only extends string] ? { [K in Only]: Fn }
+				: Path extends readonly [infer Head extends string, ...infer Rest extends string[]] ? { [K in Head]: Nest<Rest, Fn> } : never;
+			type PerMnemonic<S extends string, Fn extends InstrOrFactory> = S extends any ? Nest<Split<S>, Fn extends InstrFactory ? (...args: Parameters<Fn>) => Instr : {op: S}> : never;
+			class TreeBuilder<T extends object> {
+				constructor(private root: T) {}
+				one<S extends string, Fn extends InstrOrFactory>(op: S, fn: Fn): TreeBuilder<T & PerMnemonic<S, Fn>> {
+					insertFactory(this.root, op, fn);
+					return this as never;
+				}
+				more<S>(s: S): TreeBuilder<T & S> {
+					for (const [k, v] of Object.entries(s as object)) {
+						const existing = (this.root as any)[k];
+						(this.root as any)[k] = typeof v === 'function' && existing && typeof existing === 'object' ? Object.assign(v, existing) : v;
+					}
+					return this as never;
+				}
+				build(): T { return this.root; }
+			}
+			const I0 = new TreeBuilder({}).one('f64.eq', { op: 'f64.eq' }).one('f64.const', (imm: number) => ({ op: 'f64.const', imm }));
+			const I1 = I0.build();
+			const I = I0.more({ f64: Object.assign(function(imm: number) { return I1.f64.const(imm); }, { load: (o: number) => ({ op: 'f64.load', o }) }) }).build();
+			export function callableShape(): number { return (I.f64.eq.op === 'f64.eq' ? 1 : 0) + (I.f64.const(3).imm === 3 ? 10 : 0) + (I.f64(4).imm === 4 ? 100 : 0) + (I.f64.load(2).o === 2 ? 1000 : 0); }
+			const ops: any = { size: (...a: any[]) => a.length };
+			export function restHeld(): number { return ops.size(1, 2) + ops.size(9) * 10; }
+		`);
+		check('an intersection named like a literal it is not built by is read by name', callableShape(), 1111);
+		check('a rest closure in a field, called through any', restHeld(), 12);
 	}
 
 	{

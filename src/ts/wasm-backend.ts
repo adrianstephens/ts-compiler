@@ -999,7 +999,7 @@ function genericKey(name: string, typeParams: readonly TS.TypeParam[], map: Map<
 
 // What each imported module's own flows open (`collectOpenShapes`), by its body: the same walk over the same stamped AST, so a
 // later compile in the same process replays it instead of repeating it. `DBG_VERIFYSHAPES=1` walks anyway and checks it matches.
-const openedByModule		= new WeakMap<object, { shapes: string[]; slots: Slot[]; built: string[] }>();
+const openedByModule		= new WeakMap<object, { shapes: string[]; slots: Slot[]; built: Built[] }>();
 // An open slot's type, and this compile's reads of one: `any` physically, while the checker's type still names what it holds.
 const OPEN_SLOT: Type	= { type: 'ref', name: 'any' };
 // A slot with a declaration of its own: a declarator, a parameter (a parameter property is its field too), or a class field.
@@ -1041,8 +1041,10 @@ function collectOpenShapes(
 ) {
 	const escaping		= escapingParams();
 	const openShapes	= new Set<string>();
-	// The layout of every object literal, as built: at its slot, and as its own type where its slot is not a shape.
-	const builtShapes	= new Set<string>();
+	// The shape of every object literal, as built: at its slot, and as its own type where its slot is not a shape.
+	const builtShapes	= new Map<string, Built[]>();
+	const noteBuilt		= (b: Built) => builtShapes.set(b.key, [...builtShapes.get(b.key) ?? [], b]);
+	const built			= (t: Type, scope: Scope) => (shape => shape.type === 'object' && noteBuilt({ key: shapeKey(shape.members), shape, scope }))(resolvedShape(t, scope));
 	// A SLOT (`Slot`) that holds more than one array storage is opened alone, and so is every read of it.
 	const openSlots		= new Set<Slot>();
 	const openReads		= new Set<Expr>();
@@ -1107,7 +1109,7 @@ function collectOpenShapes(
 			return;
 		const s = resolvedShape(slot, scope);
 		if (value.type === 'object' && s.type === 'object')
-			builtShapes.add(builtKey(s, scope));
+			built(s, scope);
 		if ((value.type === 'object' || value.type === 'array') && s.type === 'union')
 			// Built as the member it matches, even as an array element: only what it holds can widen anything.
 			return s.types.filter(m => T.isAssignable(checkerTypeOf(value, scope, false, m), m, scope)).forEach(m => noteSlot(m, value, scope, depth, false, id));
@@ -1275,10 +1277,10 @@ function collectOpenShapes(
 			if (remembered && !VERIFY_OPEN_SHAPES) {
 				remembered.shapes.forEach(k => openShapes.add(k));
 				remembered.slots.forEach(d => openSlots.add(d));
-				remembered.built.forEach(k => builtShapes.add(k));
+				remembered.built.forEach(noteBuilt);
 				continue;
 			}
-			const before = new Set(openShapes), slotsBefore = new Set(openSlots), builtBefore = new Set(builtShapes);
+			const before = new Set(openShapes), slotsBefore = new Set(openSlots), builtBefore = new Set([...builtShapes.values()].flat());
 			let scope = modScope;
 			const within = <R>(inner: Scope | undefined, fn: () => R): R => {
 				const saved = scope;
@@ -1325,8 +1327,9 @@ function collectOpenShapes(
 						});
 					if (readsOpen(e, scope))
 						openReads.add(e);
-					if (e.type === 'object')
-						builtShapes.add(builtKey(T.widenLiterals(checkerTypeOf(e, scope)), scope));
+					// `Object.assign(fn, {...})` builds its callable object as a literal builds its struct.
+					if (e.type === 'object' || (call => !!call && T.resolve(scope, checkerTypeOf(call.target, scope)).type === 'function')(objectAssignCall(e)))
+						built(T.widenLiterals(checkerTypeOf(e, scope)), scope);
 					if (e.type === 'call' || e.type === 'new') {
 						const callee		= unwrapAs(e.callee);
 						const calleeDecl	= callee.type === 'identifier' ? scope.decl(callee.name)
@@ -1374,7 +1377,7 @@ function collectOpenShapes(
 				}).statements(m.body);
 			if (propagating)
 				continue;
-			const opened	= { shapes: [...openShapes].filter(k => !before.has(k)), slots: [...openSlots].filter(d => !slotsBefore.has(d)), built: [...builtShapes].filter(k => !builtBefore.has(k)) };
+			const opened	= { shapes: [...openShapes].filter(k => !before.has(k)), slots: [...openSlots].filter(d => !slotsBefore.has(d)), built: [...builtShapes.values()].flat().filter(b => !builtBefore.has(b)) };
 			const key		= (r: typeof opened) => [...r.shapes].sort().join('\n') + `\n${r.slots.length} slots`;
 			if (remembered && key(remembered) !== key(opened))
 				throw `internal: '${moduleId}' opened different shapes than the compile before it (${remembered.shapes.length} then, ${opened.shapes.length} now)`;
@@ -1929,7 +1932,8 @@ function openKey(t: Type, scope: Scope): string {
 }
 
 // By member names, as a shape's identity is (`shapeKey`): a literal in a generic body builds every instantiation of its slot.
-const builtKey = (t: Type, scope: Scope) => (s => s.type === 'object' ? shapeKey(s.members) : '')(resolvedShape(t, scope));
+// A shape an object literal builds, with the scope its member types resolve in.
+interface Built { key: string; shape: TS.ObjectType; scope: Scope }
 
 // `t`'s non-nullish part resolved, an interface's `extends` intersection merged into the one object it describes.
 function resolvedShape(t: Type, scope: Scope): Type {
@@ -4438,16 +4442,18 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 		const method = methodFor(owner, name, call, ctx, bypassVirtual || !!typeArgs);
 		if (!method) {
-			// Not a declared method: a closure-typed FIELD called with member syntax (`this.step(v)`), read off the receiver and called.
+			// Not a declared method: a FIELD called with member syntax (`this.step(v)`), read off the receiver and called -- through `any` unless it holds a closure.
 			const fieldIndex = owner.fieldIndex.get(name);
-			const fieldClosure = closurePart(fieldIndex !== undefined ? owner.fields[fieldIndex].wtype : undefined);
-			if (fieldClosure) {
-				ctx.emit(I.struct.get(owner.typeIndex, fieldIndex!));
+			if (fieldIndex === undefined)
+				throw `unknown method '${name}' on ${owner.name}`;
+			const wtype			= emitFieldRead(owner, fieldIndex, ctx);
+			const fieldClosure	= closurePart(wtype);
+			if (fieldClosure)
 				return emitClosureCall(fieldClosure, sourceArgs(name, fieldClosure, args, ctx), ctx);
-			}
-			if (process.env.MDBG)
-				console.error('MDBG', name, 'owner', owner.name, new Error().stack!.split('\n').slice(2, 8).join('\n'));
-			throw `unknown method '${name}' on ${owner.name}`;
+			coerceTop(wtype, ctx, W.REF_ANY);
+			const info = ensureAnyCallDispatch(emitDynamicArgs(args, ctx), W.REF_ANY);
+			ctx.emit(I.call(info.funcIndex));
+			return info.result;
 		}
 		const direct = () => {
 			emitCallArgs(name, method.params, method.defaults, !!method.hasRest, args, ctx, method.resolvedParams);
@@ -8993,9 +8999,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	function anyCallCandidates(argWtypes: W.Type[], want: W.Type) {
 		const fixedFit = (params: W.Type[], n: number) => argWtypes.slice(0, n).every((w, i) => fits(w, params[i])) && params.slice(argWtypes.length, n).every(p => W.isNullable(p) || W.isAny(p));
 		return [...closureTypes.values()].filter(c => (want === 'void' || fits(c.sig.result, want)) && (c.sig.hasRest
-			? storageKindOf(c.sig.params[c.sig.params.length - 1]) === 'ref' && fixedFit(c.sig.params, c.sig.params.length - 1)
+			? anyRest(c.sig) && fixedFit(c.sig.params, c.sig.params.length - 1)
 			: c.sig.params.length >= argWtypes.length && fixedFit(c.sig.params, c.sig.params.length)));
 	}
+	const anyRest = (sig: W.ClosureSig) => storageKindOf(sig.params[sig.params.length - 1]) === 'ref';
 	// The arguments held in `args`, into a rest signature's fixed parameters and then its `any`-element rest storage.
 	function pushRestArgs(dctx: FunctionContext, args: number[], argWtypes: W.Type[], params: W.Type[]): void {
 		const fixed = params.length - 1;
@@ -9016,6 +9023,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		coerceTop(W.ARRAY.ref, dctx, params[fixed]);
 	}
 
+	// The closure on the stack called with the arguments held in `args`; a rest signature takes the trailing ones in its storage.
+	function emitHeldCall(dctx: FunctionContext, callable: W.ClosureType, args: number[], argWtypes: W.Type[], want: W.Type): void {
+		const sig = callable.closure;
+		dispatchArm(dctx, args, argWtypes, sig.params, undefined, want, push => emitClosureCall(callable, sig.hasRest ? () => pushRestArgs(dctx, args, argWtypes, sig.params) : push, dctx));
+	}
+
 	function ensureAnyCallDispatch(argWtypes: W.Type[], want: W.Type): FuncInfo {
 		return synthesize(`<any dispatch>.#call(${argWtypes.map(W.typeKey).join(',')})=>${W.typeKey(want)}`, () => ({
 			params: [param('callee'), ...argWtypes.map((wtype, i) => param(`arg${i}`, wtype))], result: want,
@@ -9023,15 +9036,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const candidates = anyCallCandidates(argWtypes, want);
 			if (!candidates.length)
 				throw `no closure type in the program takes ${argWtypes.length} such argument(s) -- a call through 'any' needs at least one real candidate`;
-			emitTypeCascade(dctx, callee, candidates.map(c => ({ heap: c.structTypeIndex, emit: () => {
-				if (!c.sig.hasRest)
-					return dispatchArm(dctx, args, argWtypes, c.sig.params, undefined, want, push => emitClosureCall({ closure: c.sig, nullable: false }, push, dctx));
-				const result = emitClosureCall({ closure: c.sig, nullable: false }, () => pushRestArgs(dctx, args, argWtypes, c.sig.params), dctx);
-				if (want === 'void' && result !== 'void')
-					dctx.emit(I.drop);
-				else if (want !== 'void')
-					coerceTop(result, dctx, want);
-			} })), trap(dctx), want);
+			emitTypeCascade(dctx, callee, candidates.map(c => ({ heap: c.structTypeIndex, emit: () => emitHeldCall(dctx, { closure: c.sig, nullable: false }, args, argWtypes, want) })), trap(dctx), want);
 		});
 	}
 
@@ -9050,7 +9055,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				if (!wt)
 					return [];
 				const sig	= closureSigOf(wt);
-				return (sig.hasRest || sig.params.length >= argTs.length) && (want === 'void' || fits(sig.result, want)) ? [{ cls, idx: idx!, wt, sig }] : [];
+				return (sig.hasRest ? anyRest(sig) : sig.params.length >= argTs.length) && (want === 'void' || fits(sig.result, want)) ? [{ cls, idx: idx!, wt }] : [];
 			});
 			// An entry looked up by `name` at run time -- a dynamic object's, a closure's `#ext` -- is called through `any`.
 			const callEntry = (got: W.Type) => {
@@ -9084,11 +9089,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						dctx.emit(I.struct.get(c.heap as number, 0));
 					dispatchArm(dctx, args, argWtypes, c.funcInfo.params, c.funcInfo.defaults ?? [], want, push => (push(), dctx.emit(I.call(c.funcInfo.funcIndex)), c.funcInfo.result), name);
 				} })),
-				...held.map(({ cls, idx, wt, sig }) => ({ heap: cls.typeIndex, emit: () => {
+				...held.map(({ cls, idx, wt }) => ({ heap: cls.typeIndex, emit: () => {
 					const callable: W.ClosureType = { ...wt, nullable: false };
 					dctx.emit(I.struct.get(cls.typeIndex, idx));
 					coerceTop(wt, dctx, callable);
-					dispatchArm(dctx, args, argWtypes, sig.params, undefined, want, push => emitClosureCall(callable, push, dctx));
+					emitHeldCall(dctx, callable, args, argWtypes, want);
 				} })),
 				...keyed,
 			], trap(dctx), want);
@@ -9231,7 +9236,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (T.isClassRef(n, global) || (n.type === 'ref' && READONLY_ALIAS.has(n.name)) || (r.type !== 'object' && r.type !== 'intersection') || (r.type === 'intersection' && (arrayPartOf(r, global) || primitivePart(r, global))))
 			return false;
 		const s = resolvedShape(n, global);
-		return s.type === 'object' && s.members.length > 0 && s.members.every(m => m.type === 'property' || m.type === 'method') && !builtShapes.has(builtKey(s, global));
+		// Built only by a literal that may flow to it: one sharing its member names alone (`{f64: F}` for `{f64: F & G}`) is laid out apart.
+		return s.type === 'object' && s.members.length > 0 && s.members.some(m => m.type !== 'call') && s.members.every(m => m.type === 'property' || m.type === 'method' || m.type === 'call')
+			&& !builtShapes.get(shapeKey(s.members))?.some(b => b.shape === s || T.isAssignable(b.shape, s, b.scope));
 	};
 	// A slot holding more than one array storage (`collectOpenShapes`) is stored as `any`, and so is what is read from it.
 	const openedAs = (d: Slot, t: Type) => openSlots.has(d) ? OPEN_SLOT : t;
