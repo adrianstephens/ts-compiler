@@ -4536,6 +4536,12 @@ async function main() {
 		`);
 		check('an intersection named like a literal it is not built by is read by name', callableShape(), 1111);
 		check('a rest closure in a field, called through any', restHeld(), 12);
+		const { heldArity } = await compile(`
+			const tbl: any = { get: (k: string) => k.length };
+			const other = { get: (k: string, n: number) => n };
+			export function heldArity(): number { return tbl.get('abc') + other.get('x', 4); }
+		`);
+		check('a held closure needing an argument the call omits is no candidate', heldArity(), 7);
 	}
 
 	{

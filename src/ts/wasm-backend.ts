@@ -8997,11 +8997,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// The closure types a call through `any` with these arguments may reach.
 	// A rest signature counts when its rest is `any`-element storage (`(...args: any[]) => R`): the trailing arguments go into it, boxed.
 	function anyCallCandidates(argWtypes: W.Type[], want: W.Type) {
-		const fixedFit = (params: W.Type[], n: number) => argWtypes.slice(0, n).every((w, i) => fits(w, params[i])) && params.slice(argWtypes.length, n).every(p => W.isNullable(p) || W.isAny(p));
-		return [...closureTypes.values()].filter(c => (want === 'void' || fits(c.sig.result, want)) && (c.sig.hasRest
-			? anyRest(c.sig) && fixedFit(c.sig.params, c.sig.params.length - 1)
-			: c.sig.params.length >= argWtypes.length && fixedFit(c.sig.params, c.sig.params.length)));
+		return [...closureTypes.values()].filter(c => (want === 'void' || fits(c.sig.result, want)) && takesArgCount(c.sig, argWtypes.length)
+			&& argWtypes.slice(0, fixedCount(c.sig)).every((w, i) => fits(w, c.sig.params[i])));
 	}
+	const fixedCount = (sig: W.ClosureSig) => sig.hasRest ? sig.params.length - 1 : sig.params.length;
+	// A parameter no argument fills receives `undefined`, which only a nullable or `any` slot holds.
+	const takesArgCount = (sig: W.ClosureSig, n: number) => (sig.hasRest ? anyRest(sig) : sig.params.length >= n)
+		&& sig.params.slice(n, fixedCount(sig)).every(p => W.isNullable(p) || W.isAny(p));
 	const anyRest = (sig: W.ClosureSig) => storageKindOf(sig.params[sig.params.length - 1]) === 'ref';
 	// The arguments held in `args`, into a rest signature's fixed parameters and then its `any`-element rest storage.
 	function pushRestArgs(dctx: FunctionContext, args: number[], argWtypes: W.Type[], params: W.Type[]): void {
@@ -9055,7 +9057,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				if (!wt)
 					return [];
 				const sig	= closureSigOf(wt);
-				return (sig.hasRest ? anyRest(sig) : sig.params.length >= argTs.length) && (want === 'void' || fits(sig.result, want)) ? [{ cls, idx: idx!, wt }] : [];
+				return takesArgCount(sig, argTs.length) && (want === 'void' || fits(sig.result, want)) ? [{ cls, idx: idx!, wt }] : [];
 			});
 			// An entry looked up by `name` at run time -- a dynamic object's, a closure's `#ext` -- is called through `any`.
 			const callEntry = (got: W.Type) => {
