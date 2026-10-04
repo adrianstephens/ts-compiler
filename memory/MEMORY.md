@@ -77,6 +77,7 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 
 - [type-core / Semantics split](tison_type_core_semantics.md) — `type-core.ts` is language-neutral (TS vocabulary), `type-utils.ts` is JS's layer; a root `Scope` carries its language's `Semantics`; Python imports type-core only
 - [CHECKER TYPE STAMPS -- current plan](tison_checker_type_stamps.md) — the checker records each expression's final type, the backend reads instead of re-checking; codegen keeps its freedom to pick simpler representations; the backend compiles its input AST literally (VSDG is optional, outputs a new AST)
+- [Promise runtime](tison_promise_runtime.md) — the lib's standard Promise is one struct for every `Promise<T>` (value stored `any` + the stored-field class layout rule); how async functions settle and resume it; remaining gaps
 - [REPRESENTATION TABLE](tison_representation_table.md) — which wasm representations are valid for which TS types, and that the BACKEND alone decides (never a stamp)
 - [type vs representation](tison_type_vs_representation.md) — many-to-one and must stay separable; tags name representations, and it is what lets `Node[]`/`Foo[]` share one physical array type
 - [array identity — RESOLVED](tison_array_identity.md) — `Array<T>` owns a `RawArray` field; the compiler knows only `RawArray`; the traps hit, the pre-existing bugs found, and why struct merging wasn't built

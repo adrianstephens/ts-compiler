@@ -92,7 +92,8 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
   (`Scope.addLazyValue`); speculative walks (`trying`) stamp nothing and undo what they wrote onto the AST (`ahead`/`written`). `var` is
   function-scoped (`scope.varScope()`; backend `hoistVars`). A node codegen SYNTHESIZES is typed with `typeOf(..., overStamps)`.
 - Proof a refactor changes no behaviour: **a WAT A/B over the towasm suite** (`suite-wat-diff.py before.out after.out` names the tests whose
-  printed WAT changed) -- stronger than difftest agreeing.
+  printed WAT changed; `test-watdiff.py before.out after.out <test>` shows one) -- stronger than difftest agreeing. A snippet runs with
+  `towasm-run.ts file.ts export...` (reads dist/).
 - The checker never reports an unknown name for TYPES; for values TS2304 is behind `Scope.unknownNames` ([[tison_unknown_name_diagnostic]]).
 
 ## Next up (2026-09-30, end of session)
