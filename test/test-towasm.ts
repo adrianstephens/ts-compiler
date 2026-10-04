@@ -4408,6 +4408,16 @@ async function main() {
 	}
 
 	{
+		// A generic's `t !== null` where an instantiation's `T` can't be null (tison's `stampPos`) is decided statically.
+		const { neverNull } = await compile(`
+			function stamp<T>(t: T): number { return typeof t === 'object' && t !== null ? 1 : t === undefined ? 2 : 3; }
+			interface P { x: number }
+			export function neverNull(): number { const p: P = { x: 1 }; return stamp(p) * 100 + stamp(5) * 10 + stamp<P | null>(null); }
+		`);
+		check('comparing a never-null value to null', neverNull(), 133);
+	}
+
+	{
 		// `-`/`~` of a `number | bigint` (ts-parser.ts's `-numberValue(s)`) act on whichever it holds; `~` is ToInt32's wraparound.
 		const { negUnion } = await compile(`
 			function val(s: string): number | bigint { return s.endsWith('n') ? BigInt(s.slice(0, -1)) : Number(s); }

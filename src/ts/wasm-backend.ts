@@ -6165,8 +6165,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 							}
 							const valueExpr	= leftIsNull ? right : left;
 							const wt		= wtypeOf(valueExpr, ctx);
-							if (!W.isNullable(wt))
-								throw "comparing to 'null'/'undefined' needs a nullable object-typed value on the other side";
+							// A representation that cannot hold null (a scalar, a non-null ref: `t !== null` in a generic instantiated so) is never nullish.
+							if (!W.isNullable(wt)) {
+								emitDiscarded(valueExpr, ctx);
+								ctx.emit(I.i32.const(negate ? 1 : 0));
+								return 'i32';
+							}
 							// `null` and `undefined` are both `ref.null`, so a strict comparison separates them only statically: when the type carries the other kind
 							// and not this one. Never for a type carrying neither: a missing `{[k: string]: V}` key is a physical `undefined` its type denies.
 							if (operator.length === 3) {
