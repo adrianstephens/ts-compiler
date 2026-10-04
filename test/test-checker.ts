@@ -285,6 +285,8 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 	// As TS's inferFromTypes: an `any` argument is an `any` candidate; a union infers from each member; a const context still types a call element.
 	['inference from any, from a union, and in a const context', "interface R<T> { x: T } declare function Fw<T>(r: () => any): () => R<T>; declare const a: any; const m: Map<string, number> = new Map(a); const z: (() => R<number>) | string = Fw(() => 1); const q: string = z; declare function Ru<const A extends readonly ((() => R<number>) | string)[]>(rhs: A): A; const w: [string] = Ru([Fw(() => 1)]);",
 		[NOT_ASSIGNABLE('() => R<number>', 'string'), NOT_ASSIGNABLE('readonly [() => R<number>]', '[string]')]],
+	// Under strict null checks `undefined` is below no class, so `o => !!o` infers `o is Sc` (TS 5.5) and `filter` narrows.
+	['an inferred predicate excludes undefined from a class union', 'class Sc { x = 1; } declare const outs: (Sc | undefined)[]; const live = outs.filter(o => !!o); const n: string = live;', [NOT_ASSIGNABLE('Sc[]', 'string')]],
 	['a destructuring default adds its own type', "let [x = 'a' in {}] = []; x = !x; const { y = 1 } = {} as { y?: string }; const q: boolean = y;", [NOT_ASSIGNABLE('string | number', 'boolean')]],
 	// Stripping `undefined` keeps an aliased union by name, as TS does: expanded, it no longer matched the alias itself.
 	['?? and ! keep an aliased union by name', "type U = { a: 1 } | { b: 2 }; declare const p: { c?: U }; declare function d(): U; const q: string = p.c ?? d(); declare const n: U | undefined; const r: string = n!;", [NOT_ASSIGNABLE('U', 'string'), NOT_ASSIGNABLE('U', 'string')]],

@@ -2623,6 +2623,10 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 				const boxedSrc = scope.semantics.boxed(src.name);
 				if (boxedSrc && (isClassRef(dst, dstScope) || dst.name === 'Array' || dst.name === 'ReadonlyArray'))
 					return boxedSrc === dst.name;
+				// Under the subtype relation (strict null checks; else answered above) `undefined`/`null` are below no class: an inferred predicate
+				// (`o => !!o` is `o is C`) and a static guard both rest on it.
+				if (precise && isNullOrUndefined(src))
+					return false;
 				return !(INTRINSIC_TYPES.has(src.name) && INTRINSIC_TYPES.has(dst.name));	// distinct primitives: no; unresolved names: lenient
 			}
 			// `Array`/`ReadonlyArray` are known shapes: a plain object or function (every array-like source was handled above) never satisfies one.
