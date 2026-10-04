@@ -4459,6 +4459,26 @@ async function main() {
 	}
 
 	{
+		// A module-level `let` with no initializer is a global its functions share (checker.ts's `aheadLog`), shadowed by no `__toplevel` local.
+		const { uninitLet } = await compile(`
+			let log: (() => void)[] | undefined;
+			let count: number;
+			function note(): void { if (!log) return; log.push(() => { count++; }); }
+			count = 0;
+			export function uninitLet(): number {
+				note();
+				log = [];
+				note(); note();
+				log.forEach(f => f());
+				log = undefined;
+				note();
+				return count;
+			}
+		`);
+		check('a module-level let with no initializer is a shared global', uninitLet(), 2);
+	}
+
+	{
 		// An empty statement (a stray `;`) had no `case` in `emitStmt` at all, so it reached the `default:`
 		// throw -- js-parser.ts's own source is full of them.
 		const { strays, emptyLoopBody } = await compile(`

@@ -2366,7 +2366,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const resolved = checkedType && T.resolve(global, checkedType);
 		const wt = (checkedType && typeOf(openedAs(d, checkedType)))
 			?? (resolved?.type === 'object' ? ensureAnonObjectShape(resolved)?.thisType : undefined);
-		if (!wt || wt === 'void' || !d.init)
+		if (!wt || wt === 'void')
 			return undefined;
 		const g = ensureGlobal(`$lazy$${key}`, types.nullable(wt), Identifier('undefined'), true);
 		lazyGlobalSlots.set(key, g);
@@ -2376,14 +2376,17 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		lazyGlobals.set(key, info);
 		worklist.push(W.withCatch(() => {
 			const ctx = new FunctionContext(name, new Scope(declScope), plainReturn(wt), undefined, homeModule);
-			// `if (slot === null) slot = <init>; return slot!;`, hand-emitted: only `d.init` is source the checker saw.
-			ctx.emit(I.global.get(g.index), I.ref.is_null);
-			ctx.emitIf(undefined, () => {
-				// Built as the VALUE type, then boxed into the slot: a bigint literal only takes an `i64` form when that is what it is built as.
-				emitAs(d.init!, ctx, wt);
-				coerceValue(d.init!, wt, ctx, g.wtype);
-				ctx.emit(I.global.set(g.index));
-			});
+			// `if (slot === null) slot = <init>; return slot!;`, hand-emitted: only `d.init` is source the checker saw. Without an initializer
+			// the slot is whatever was last assigned.
+			if (d.init) {
+				ctx.emit(I.global.get(g.index), I.ref.is_null);
+				ctx.emitIf(undefined, () => {
+					// Built as the VALUE type, then boxed into the slot: a bigint literal only takes an `i64` form when that is what it is built as.
+					emitAs(d.init!, ctx, wt);
+					coerceValue(d.init!, wt, ctx, g.wtype);
+					ctx.emit(I.global.set(g.index));
+				});
+			}
 			// `coerceTop`, not a bare `ref.as_non_null`: `types.nullable` BOXES a scalar slot, while the wrapper returns the scalar.
 			ctx.emit(I.global.get(g.index));
 			coerceTop(g.wtype, ctx, wt);
@@ -8978,13 +8981,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				}
 			} else if (s.type === 'var_decl' && !(s.kind === 'var' && (s.ambient || moduleId === '.'))) {
 				for (const d of s.declarations) {
-					if (typeof d.name !== 'string' || !d.init)
+					// An uninitialized `let x: T;` is a module binding too: a slot with nothing to evaluate (`ensureLazyGlobal`).
+					if (typeof d.name !== 'string' || (!d.init && s.ambient))
 						continue;
 					moduleBindings.set(d, { d, name: d.name, home: moduleId });
-					if (s.kind === 'const' && !d.typeAnnotation && (d.init.type === 'arrow' || d.init.type === 'function')) {
+					if (s.kind === 'const' && !d.typeAnnotation && (d.init?.type === 'arrow' || d.init?.type === 'function')) {
 						if (moduleId === '.')
 							promotedConsts.add(d.name);
-					} else if (moduleId === '.') {
+					} else if (moduleId === '.' && d.init) {
 						// Registered eagerly: once a global, its position in `ast.body` stops mattering.
 						const eager = eagerGlobal(d.init, d.typeAnnotation);
 						if (eager) {
@@ -9117,10 +9121,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					if (typeof d.name === 'string' && (promotedConsts.has(d.name) || (d.init && isAliasInit(d.init, ctx.scope))))
 						continue;
 					// The lazy-global wrapper caches the value into the slot every function reads: evaluating it here too would run it twice.
-					const lazy = typeof d.name === 'string' && d.init ? lazyGlobalFor(d.name, ctx) : undefined;
-					if (lazy)
+					// An uninitialized one has nothing to run.
+					const lazy = typeof d.name === 'string' ? lazyGlobalFor(d.name, ctx) : undefined;
+					if (lazy && d.init)
 						ctx.emit(I.call(lazy.wrapper.funcIndex), I.drop);
-					else
+					else if (!lazy)
 						emitStmt({ ...st, declarations: [d] }, ctx);
 				}
 				return;
