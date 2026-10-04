@@ -2317,8 +2317,10 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 					// does, at the lowest priority: an argument's own context then sees it (`compose(filter(x => ...))`). A GENERIC context is heard after
 					// the arguments, as its lifted parameters must meet those the generic function arguments lift (`compose(unbox, unlist)`).
 					const resultFirst	= !lifting || !isGenericFunction(expected ?? T.ANY, scope);
-					const inferFromResult = () => inference && expected && sig!.returnType
-						&& inference.inferReturn(sig!.returnType, lifting ? liftGeneric(expected, scope, lifted, liftScope) : expected);
+					const inferFromResult = () => {
+						if (inference && expected && sig!.returnType)
+							inference.inferReturn(sig!.returnType, lifting ? liftGeneric(expected, scope, lifted, liftScope) : expected);
+					};
 					if (resultFirst)
 						inferFromResult();
 					const preArgTs = e.arguments.map((a, i) => {
