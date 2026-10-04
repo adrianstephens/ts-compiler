@@ -610,8 +610,14 @@ let aheadLog: (() => void)[] | undefined;
 function written<O extends object>(o: O, key: keyof O & string) {
 	if (!aheadLog)
 		return;
-	const prior = Object.getOwnPropertyDescriptor(o, key);
-	aheadLog.push(() => prior ? Object.defineProperty(o, key, prior) : Reflect.deleteProperty(o, key));
+	// What the key held, or that it held nothing: the node's own data properties are all a speculative walk writes.
+	const had = key in o, prior = o[key];
+	aheadLog.push(() => {
+		if (had)
+			o[key] = prior;
+		else
+			delete o[key];
+	});
 }
 function ahead<R>(f: () => R): R {
 	const outer = aheadLog;
