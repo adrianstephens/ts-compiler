@@ -1714,6 +1714,13 @@ async function main() {
 			main:	`import { K as Q } from './a'; import * as A from './a'; import { g } from './b'; export function importedConst(): number { return Q[1] + A.K[2] + g(); }`,
 		}, 'main');
 		check("importedConst() (a const through imports)", importedConst(), 6);
+		// `instanceof` against a class named through a namespace import (checker.ts's `ref.declScope instanceof T.Scope`).
+		const { nsInstanceof } = await compileMulti({
+			lib:	`export class Scope { constructor(public n: number) {} } export class Other { m = 1; }`,
+			main:	`import * as T from './lib'; function isScope(x: unknown): number { return x instanceof T.Scope ? x.n : 0; }
+				export function nsInstanceof(): number { return isScope(new T.Scope(7)) * 10 + isScope(new T.Other()); }`,
+		}, 'main');
+		check("nsInstanceof() (instanceof NS.Class)", nsInstanceof(), 70);
 	}
 
 	{

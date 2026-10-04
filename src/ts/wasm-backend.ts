@@ -6146,21 +6146,23 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					// A `ref.test` against the non-nullable struct, so `null instanceof C` is false. One rec group for every struct is what lets it tell
 					// structurally identical sibling classes apart.
 					case 'instanceof': {
-						if (right.type !== 'identifier')
-							throw "'instanceof' is only supported against a plain class name";
+						// A class named directly or through a namespace import (`x instanceof T.Scope`).
+						const target = classRefTarget(right, ctx.scope) ?? (right.type === 'identifier' ? { name: right.name, scope: ctx.scope } : undefined);
+						if (!target)
+							throw "'instanceof' is only supported against a class name";
 						const leftWtype = wtypeOf(left, ctx);
 						if (!leftWtype || typeof leftWtype === 'string')
 							throw "'instanceof' needs an object-typed left-hand value";
 						// Each instantiation of a generic class is its own struct, and `instanceof C` is true for all of them: no one instantiation is built.
-						const decl = classDeclOf(right.name, ctx.scope);
+						const decl = classDeclOf(target.name, target.scope);
 						if (decl?.type === 'class_decl' && decl.typeParams?.length) {
 							emitAs(left, ctx, W.REF_ANY_NULLABLE);
-							ctx.emit(I.call(ensureInstanceTest(right.name, stmtHomeModule.get(decl)).funcIndex));
+							ctx.emit(I.call(ensureInstanceTest(target.name, stmtHomeModule.get(decl)).funcIndex));
 							return 'i32';
 						}
-						const cls = ensureClass(right.name, undefined, ctx.scope);
+						const cls = ensureClass(target.name, undefined, target.scope);
 						if (!cls)
-							throw `'instanceof' against unknown class '${right.name}'`;
+							throw `'instanceof' against unknown class '${target.name}'`;
 						emitAs(left, ctx, leftWtype);
 						ctx.emit(I.ref.test(cls.typeIndex));
 						return 'i32';
