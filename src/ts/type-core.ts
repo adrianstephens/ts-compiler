@@ -2906,12 +2906,13 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 					recurse(paramT.element, el, depth - 1);
 			}
 		} else if (paramT.type === 'ref' && paramT.typeArgs) {
-			// A generic alias unfolded one level (`paramT.name` is declared in `declScope`, not `scope`).
-			const entry		= declScope.type(paramT.name);
+			// A generic alias unfolded one level (`paramT.name` is declared in `declScope`, not `scope`; `sync.TypeT` through its namespace).
+			const entry		= (([ns, n]) => ns?.type(n))(declScopeOf(paramT, declScope).qualified(paramT.name));
 			const unfold	= () => instantiateEntry(entry!, paramT.typeArgs);
-			// The same declaration however spelled (`Bus<T>` inside its namespace, `Bacon.Bus<number>` outside it).
+			// The same declaration however spelled (`Bus<T>` inside its namespace, `Bacon.Bus<number>` outside it), or reached (an import or re-export
+			// holds its own entry for it, over the one declared body).
 			const sameDecl	= (t: Type): t is TS.RefType => t.type === 'ref' && (t.name === paramT.name
-				|| !!entry && (([ns, n]) => ns?.type(n) === entry)(declScopeOf(t, scope).qualified(t.name)));
+				|| !!entry && (([ns, n]) => ns?.type(n)?.type === entry.type)(declScopeOf(t, scope).qualified(t.name)));
 			const sameName	= sameDecl(argT);
 			// Array-like to array-like is element to element, covariantly, as TS infers it: through the methods, callback parameters would add CONTRAVARIANT
 			// candidates (`ReadonlyArray<T>` from a `(string | number)[]`).

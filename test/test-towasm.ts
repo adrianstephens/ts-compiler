@@ -5304,6 +5304,17 @@ async function main() {
 	}
 
 	{
+		// A generic's result infers through an alias reached by another spelling: `index` re-exports `sync`'s `TT`, which `lib` writes `sync.TT<T>`.
+		const { reexportedAlias } = await compileMulti({
+			sync:	`export interface RT<T> { get(): T } export type TT<T> = RT<T> & { k: number };`,
+			lib:	`import * as sync from './sync'; export function F<T>(f: (v?: T) => T): sync.TT<T> { return { get: () => f(), k: 1 }; }`,
+			index:	`export * from './sync'; export * from './lib';`,
+			main:	`import * as bin from './index'; export function reexportedAlias(): number { const b: bin.TT<number[]> = bin.F(v => v ?? [5]); return b.get()[0] * 10 + b.k; }`,
+		}, 'main');
+		check('a result context infers through a re-exported alias spelled through its namespace', reexportedAlias(), 51);
+	}
+
+	{
 		// A class and another module's same-named interface (core.ts's `Predicate` class, ts-parser.ts's `Predicate` interface):
 		// the class sat under the bare key, which only a SHAPE was guarded against, so the interface's literal was built as the class.
 		const { classThenInterface } = await compileMulti({
