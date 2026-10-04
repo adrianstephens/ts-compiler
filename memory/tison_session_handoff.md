@@ -94,6 +94,12 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
 - Proof a refactor changes no behaviour: **a WAT A/B over the towasm suite** (`suite-wat-diff.py before.out after.out` names the tests whose
   printed WAT changed; `test-watdiff.py before.out after.out <test>` shows one) -- stronger than difftest agreeing. A snippet runs with
   `towasm-run.ts file.ts export...` (reads dist/).
+- **A checker change needs a self-hosting gate too**: `SNAP=<packages root|snapshot> errcount.ts <surveyed files>` counts checker errors under
+  the survey's sibling-source resolution and the wasm lib. The corpus A/B (TS's lib, single files) and test-checker cannot see a lazily
+  inferred IMPORT read during a trial (db47972: walker.ts 1 -> 13 errors, both instruments green). Probes, all `SNAP`-aware where they load
+  modules: `probe-ctx.ts file [lines]` (expected/checked per call/new/arrow/array, `KINDS=`), `probe-obj.ts file [lines]` (object literals'
+  flow/expected/checked), `probe-call.ts file` (each call's resolved overload). In wasm-backend/codegen code a stack needs
+  `new globalThis.Error().stack`: codegen.ts's own `Error` class shadows the global and has no stack.
 - The checker never reports an unknown name for TYPES; for values TS2304 is behind `Scope.unknownNames` ([[tison_unknown_name_diagnostic]]).
 
 ## Self-hosting survey baseline (2026-10-04)
