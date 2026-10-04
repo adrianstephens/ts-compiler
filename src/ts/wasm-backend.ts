@@ -5133,7 +5133,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const envBase		= types.envBase();
 		const isHeld		= (name: string) => name === 'this' && !!thisHolder;
 		const capturedNames = [...free].filter(name => isHeld(name) || ctx.resolvesName(name));
-		const fields		= capturedNames.length ? new Map<string, { index: number; wtype: W.Type; holderInner?: W.Type }>() : undefined;
+		// Each capture's TS type is read NOW, in the scope the literal is written in: its body compiles later, once that block's names are gone.
+		const fields		= capturedNames.length ? new Map<string, { index: number; wtype: W.Type; holderInner?: W.Type; tsType?: Type }>() : undefined;
 		let envTypeIndex	= envBase;
 		if (fields) {
 			// `rawWtype`, not `resolvedWtype`: a forward-holder is captured as the SHARED holder, so a later write through it stays visible;
@@ -5141,7 +5142,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			envTypeIndex = types.add({ final: true, supertypes: [envBase], type: { kind: 'struct', fields: capturedNames.map((name, i) => {
 				const wt = isHeld(name) ? thisHolder!.holder.wtype : ctx.rawWtype(name)!;
 				const holderInner = isHeld(name) ? thisHolder!.holder.holderInner : ctx.closureEnv?.fields.get(name)?.holderInner ?? ctx.lookup(name)?.holderInner;
-				fields.set(name, { index: i, wtype: wt, holderInner });
+				fields.set(name, { index: i, wtype: wt, holderInner, tsType: isHeld(name) ? thisHolder!.tsType : ctx.scope.value(name) });
 				return { type: toValType(wt), mut: true };
 			}) } });
 		}
@@ -5179,7 +5180,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				fnCtx.emit(I.local.set(fnCtx.declareValue(e.name!, closureWtype(sig), selfType).index));
 			}
 			for (const name of capturedNames) {
-				const tsType = isHeld(name) ? thisHolder!.tsType : ctx.scope.value(name);
+				const tsType = fields!.get(name)!.tsType;
 				if (tsType)
 					fnCtx.declareCaptured(name, tsType);
 			}

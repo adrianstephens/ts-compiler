@@ -4518,6 +4518,31 @@ async function main() {
 	}
 
 	{
+		// A closure's captures are typed where it is written: its body compiles later, when a shadowed name (a switch-wide `inner`) is what
+		// the function's scope still holds (checker.ts's `typeOf`).
+		const { shadowedCapture } = await compile(`
+			class Sc { constructor(public s: string) {} }
+			function outer(k: number, flag: boolean): string {
+				switch (k) {
+					case 1: {
+						if (flag) {
+							const inner = [1, 2];
+							return [10].map(x => String(inner[0] + x))[0];
+						}
+						return 'no';
+					}
+					case 0:
+						const inner = new Sc('scope');
+						return inner.s;
+				}
+				return '';
+			}
+			export function shadowedCapture(): number { return outer(1, true).length * 10 + outer(0, false).length; }
+		`);
+		check('a capture is typed where its closure is written, not where its body compiles', shadowedCapture(), 25);
+	}
+
+	{
 		// An empty statement (a stray `;`) had no `case` in `emitStmt` at all, so it reached the `default:`
 		// throw -- js-parser.ts's own source is full of them.
 		const { strays, emptyLoopBody } = await compile(`
