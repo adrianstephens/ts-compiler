@@ -4408,6 +4408,21 @@ async function main() {
 	}
 
 	{
+		// An instantiation whose `?.` receiver is only ever `undefined` (type-core.ts's `mapSigTypes` on a `typeParams: undefined` sig) calls nothing.
+		const { nullishRecv } = await compile(`
+			interface Sig { params: number[]; typeParams?: { name: string; c?: number }[] }
+			function mapSig<S extends Sig>(sig: S, f: (t: number) => number): S {
+				return { ...sig, params: sig.params.map(f), typeParams: sig.typeParams?.map(p => ({ ...p, c: p.c && f(p.c) })) };
+			}
+			export function nullishRecv(): number {
+				const r = mapSig({ params: [1, 2], typeParams: undefined }, t => t * 10);
+				return r.params[1] + (r.typeParams === undefined ? 1 : 0);
+			}
+		`);
+		check('a ?. call on an always-nullish receiver short-circuits', nullishRecv(), 21);
+	}
+
+	{
 		// A key typed as literals (checker.ts's `break`/`continue` target) reads the properties it names, not `any`.
 		const { literalKeys } = await compile(`
 			interface Target { labels: string[]; breaks: number[]; continues: number[] }

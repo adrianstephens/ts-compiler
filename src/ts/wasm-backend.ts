@@ -4141,7 +4141,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		| { kind: 'union'; owners: ClassInfo[]; name: string; recv: CallRecv }
 		| { kind: 'dynamic'; name: string; recv: CallRecv }
 		| { kind: 'closure'; wtype: W.ClosureType; optional: boolean }
-		| { kind: 'anyValue' };
+		| { kind: 'anyValue' }
+		| { kind: 'unreached'; recv: Expr };
 
 	function classifyCall(e: CallNode, ctx: FunctionContext, want?: W.Type): Callee {
 		const callee = e.callee;
@@ -4175,6 +4176,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (callee.type === 'member' && !ctx.isNamespaceValue(callee)) {
 			const { object: obj, property: name } = callee;
 			const optional = isOptionalChainLink(callee);
+			// A receiver that is only ever nullish (`S`'s `typeParams: undefined`) short-circuits every time: no method is ever called.
+			if (optional && T.unionMembers(ctx.narrowedTypeOf(obj), ctx.scope).every(m => T.isNullish(m, ctx.scope)))
+				return { kind: 'unreached', recv: obj };
 			if (optional) {
 				const w = wtypeOf(obj, ctx);
 				if (!w || typeof w === 'string')
@@ -4301,6 +4305,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				}
 				return emitGuardedCall(e.callee, c.wtype, closureSigOf(c.wtype).result, want, push => (push(c.wtype), call()), ctx);
 			}
+			case 'unreached':
+				return emitGuardedCall(c.recv, W.REF_ANY, W.REF_ANY, want, () => (ctx.emit(I.unreachable), W.REF_ANY), ctx);
 			case 'anyValue': {
 				emitAs(e.callee, ctx, W.REF_ANY);
 				const info = ensureAnyCallDispatch(emitDynamicArgs(e.arguments, ctx), want ?? W.REF_ANY);
