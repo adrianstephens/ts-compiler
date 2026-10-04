@@ -83,7 +83,8 @@ export function typeId(t: Type, scoped = false): string {
 	if (known !== undefined)
 		return known;
 	const scopeId = (sc: Scope) => scopeIds.get(sc) ?? (scopeIds.set(sc, nextScopeId), nextScopeId++);
-	const part = (v: unknown): string => typeof v === 'bigint' ? `${v}n` : typeof v !== 'object' || v === null ? JSON.stringify(v) ?? 'u'
+	// A string is length-prefixed, so no content can read as structure.
+	const part = (v: unknown): string => typeof v === 'bigint' ? `${v}n` : typeof v === 'string' ? `${v.length}"${v}` : typeof v !== 'object' || v === null ? String(v)
 		: Array.isArray(v) ? `[${v.map(part).join(',')}]`
 		: v instanceof Scope ? (scoped ? `$${scopeId(v)}` : '')
 		: typeof (v as { type?: unknown }).type === 'string' ? `#${typeId(v as Type, scoped)}`
