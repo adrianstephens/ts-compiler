@@ -4435,6 +4435,30 @@ async function main() {
 	}
 
 	{
+		// Callbacks the checker's own code passes: a no-rest closure where a rest is offered (checker.ts's `MUTED: Err`), an unannotated rest
+		// bound from its context, a closure to a parameter typed by its default, and `joinFlow`'s spread over an inferred-predicate filter.
+		const { tagCallbacks, defaultTypedParam, filteredSpread } = await compile(`
+			type Tag = (strings: TemplateStringsArray, ...values: unknown[]) => void;
+			type Err = (sev: number) => Tag;
+			const MUTED: Err = () => () => {};
+			let n = 0;
+			const LOUD: Err = s => (strs, ...vals) => { n += s + vals.length; };
+			export function tagCallbacks(): number { MUTED(1)\`a\${1}b\`; LOUD(10)\`x\${1}y\${2}z\`; return n; }
+			function count(k: number, skip = (_i: number) => false): number { let c = 0; for (let i = 0; i < k; i++) if (!skip(i)) c++; return c; }
+			export function defaultTypedParam(): number { return count(5, i => i % 2 === 0) * 10 + count(3); }
+			class Sc { constructor(public ns: string[]) {} outer(base: Sc): Set<string> { return new Set(this.ns); } }
+			function join(base: Sc, outs: (Sc | undefined)[]): number {
+				const live = outs.filter(o => !!o);
+				return new Set(live.flatMap(o => o === base ? [] : [...o.outer(base)])).size;
+			}
+			export function filteredSpread(): number { const b = new Sc([]); return join(b, [b, new Sc(['x', 'y']), undefined, new Sc(['y', 'z'])]); }
+		`);
+		check("a no-rest closure fills a rest slot; an unannotated rest binds from its context", tagCallbacks(), 12);
+		check('a closure passed to a parameter typed by its default', defaultTypedParam(), 23);
+		check("a spread over an inferred-predicate filter's element (checker.ts's joinFlow)", filteredSpread(), 3);
+	}
+
+	{
 		// An empty statement (a stray `;`) had no `case` in `emitStmt` at all, so it reached the `default:`
 		// throw -- js-parser.ts's own source is full of them.
 		const { strays, emptyLoopBody } = await compile(`

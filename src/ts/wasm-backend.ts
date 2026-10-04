@@ -3476,7 +3476,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			if ((gotSig.params.length <= wantSig.params.length || gotSig.params.slice(wantSig.params.length).every((p, i) => {
 				const d = gotSig.defaults?.[wantSig.params.length + i];
 				return (!!d && isReemittableDefault(d)) || W.isNullable(p);
-			})) && !!gotSig.hasRest === !!wantSig.hasRest
+			// A callback with no rest ignores a rest the slot passes (`() => {}` as a tagged-template function), reading only fixed positions.
+			})) && (!!gotSig.hasRest === !!wantSig.hasRest || (!gotSig.hasRest && gotSig.params.length < wantSig.params.length))
 				&& gotSig.params.slice(0, wantSig.params.length).every(paramFits)) {
 				const orig = ctx.temp(`$origClosure$${ctx.tempCounter++}`, got);
 				ctx.emit(I.local.set(orig));
@@ -4073,9 +4074,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		let changed = false;
 		const params = declared.map((p, i) => {
 			const arg = args[i];
-			// A literal is built AS the parameter's type (its context), unless an array literal meets a type holding no array storage (an `Iterable`);
-			// an index-signature parameter is a dynamic object read by key. Neither is a struct to specialize for.
-			if (!arg || arg.type === 'spread' || arg.type === 'object' || !p.typeAnnotation || indexSignatureValueType(T.resolve(global, p.typeAnnotation)))
+			// A literal, a function literal too, is built AS the parameter's type (its context), unless an array literal meets a type holding no array
+			// storage (an `Iterable`); an index-signature parameter is a dynamic object read by key. Neither is a struct to specialize for.
+			if (!arg || arg.type === 'spread' || arg.type === 'object' || arg.type === 'arrow' || arg.type === 'function' || !p.typeAnnotation
+				|| indexSignatureValueType(T.resolve(global, p.typeAnnotation)))
 				return p;
 			const want = typeOf(p.typeAnnotation);
 			if (arg.type === 'array' && storageKindOf(want))
@@ -5085,11 +5087,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				throw `closure parameter '${describeBinding(restBound[0].key)}' needs an explicit number/boolean/object type`;
 			params.push({ key: '#rest', wtype: wantSig!.params[fixedCount], tsType: TS.ArrayType(restType.tsType) });
 		}
-		if (e.rest?.typeAnnotation) {
-			const wt = restParamWtype(e.rest.typeAnnotation);
+		// An unannotated rest is the callee's rest array, when it starts where the callee's does.
+		if (e.rest) {
+			const fromWant	= !e.rest.typeAnnotation && wantSig?.hasRest && e.params.length === fixedCount ? wantSig.resolvedParams?.[fixedCount] : undefined;
+			const wt		= e.rest.typeAnnotation ? restParamWtype(e.rest.typeAnnotation) : fromWant?.wtype;
 			if (!wt || wt === 'void')
 				throw "a closure's rest parameter needs an explicit array type";
-			params.push({key: e.rest.key, wtype: wt, tsType: e.rest.typeAnnotation });
+			params.push({ key: e.rest.key, wtype: wt, tsType: e.rest.typeAnnotation ?? fromWant!.tsType });
 		}
 
 		const free = closureFree(e);
