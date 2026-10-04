@@ -2098,13 +2098,13 @@ function valueKeyed(t: Type, scope: Scope): boolean {
 	return collectMembers(t, scope).some(p => (p.type === 'property' || p.type === 'method') && typeof p.key === 'object' && !memberKey(p.key)?.startsWith('[Symbol.'));
 }
 
-export function sealed(t: Type, scope: Scope, depth = 6): boolean {
+export function sealed(t: Type, scope: Scope, depth = 6, functions = false): boolean {
 	if (depth < 0) {
 		scope.hitDepthLimit('sealed');
 		return false;
 	}
 	t = resolveMembers(t, scope);
-	return t.type === 'object' || (t.type === 'intersection' && t.types.every(p => sealed(p, scope, depth - 1)));
+	return t.type === 'object' || (functions && t.type === 'function') || (t.type === 'intersection' && t.types.every(p => sealed(p, scope, depth - 1, functions)));
 }
 
 // ===================================================================
@@ -2723,7 +2723,8 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 					// An optional property also accepts undefined. A missing required one is an error even when its type admits
 					// `undefined` (TS: "Property is missing") -- absence only counts against a sealed source.
 					return got ? recurse(got, hasMod(m, 'optional') ? TS.UnionType([want, UNDEFINED]) : want, depth - 1)
-						: hasMod(m, 'optional') || !sealed(src, scope) || (typeof m.key === 'object' && valueKeyed(src, scope));
+						// A function part is sealed here, as the function rule above holds it; member access keeps it open for expandos, which go unmodelled.
+						: hasMod(m, 'optional') || !sealed(src, scope, 6, true) || (typeof m.key === 'object' && valueKeyed(src, scope));
 				});
 			return false;
 		}
