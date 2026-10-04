@@ -4408,6 +4408,30 @@ async function main() {
 	}
 
 	{
+		// A method overridden on one instance (transform.ts's `global.hitDepthLimit = fn => ...`): a closure slot on the declaring class, tried first.
+		const { instanceOverride } = await compile(`
+			class Scope {
+				constructor(readonly parent?: Scope) {}
+				hit(fn: string): void { this.parent?.hit(fn); }
+				count(): number { return 1; }
+			}
+			class Sub extends Scope { count(): number { return 2; } }
+			type Alias = Scope;
+			function install(s: Alias, f: (fn: string) => void) { s.hit = f; }
+			export function instanceOverride(): number {
+				let n = 0;
+				const g = new Scope();
+				install(g, fn => { n += fn.length; });
+				const child = new Sub(new Scope(g));
+				child.hit('abc');
+				new Scope().hit('zz');
+				return n * 10 + child.count();
+			}
+		`);
+		check('a method overridden on an instance', instanceOverride(), 32);
+	}
+
+	{
 		// A bare `new Map()` is TS's `Map<any, any>`, built at its contextual instantiation (type-core.ts's `this.aliases ??= new Map()`).
 		const { bareMap } = await compile(`
 			class S { private aliases?: Map<string, number>; add(k: string, v: number) { (this.aliases ??= new Map()).set(k, v); return this.aliases.get(k) ?? 0; } }

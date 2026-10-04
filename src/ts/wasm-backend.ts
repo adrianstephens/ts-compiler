@@ -1406,12 +1406,29 @@ function collectExpandoFields(
 ) {
 	const accessorKeys = new Map<string, Set<string>>();
 	const pendingExtensions = new Map<string, string[] | 'dynamic'>();
+	// Methods a write overrides on an instance (`global.hitDepthLimit = fn => ...`), keyed by the class DECLARING each, whose instances get the slot.
+	const methodOverrides = new Map<string, Set<string>>();
+	const methodOwner = (ref: TS.RefType, key: string, scope: Scope): string | undefined => {
+		const [ns, leaf]	= T.declScopeOf(ref, scope).qualified(ref.name);
+		const decl			= LIB_DECL_MAP.get(leaf) ?? ns?.decl(leaf);
+		if (decl?.type !== 'class_decl')
+			return undefined;
+		if (decl.body.some(m => m.type === 'method' && m.key === key))
+			return leaf + moduleTag(stmtHomeModule.get(decl));
+		const base = superClassRef(decl.superClass);
+		return base && methodOwner(base, key, (decl as { scope?: Scope }).scope ?? ns ?? scope);
+	};
 
 	// Every member of a union gets the slot: the write lands on whichever it is at run time. A generic instantiation shares its shape's struct (bare name);
 	// an array is `Array`'s; a structural shape is keyed by member names (`shapeKey`, so a named shape and its anonymous twin agree); a class by name.
+	// A local alias of a class (`type Scope = T.Scope`) names that class.
+	const unalias = (ref: TS.RefType, scope: Scope, depth = 8): TS.RefType => {
+		const entry = T.isClassRef(ref, scope) || depth <= 0 ? undefined : scope.type(ref.name);
+		return entry?.type.type === 'ref' && !entry.typeParams?.length ? unalias(entry.type, scope, depth - 1) : ref;
+	};
 	const noteType = (raw: Type, key: string | undefined, scope: Scope, accessor = false) => {
 		for (const member of T.unionMembers(raw, scope)) {
-			const part = member.type === 'array' || member.type === 'tuple' ? TS.RefType('Array') : member;
+			const part = member.type === 'array' || member.type === 'tuple' ? TS.RefType('Array') : member.type === 'ref' ? unalias(member, scope) : member;
 			if (part.type === 'ref' && (T.isAny(part) || scope.type(part.name)?.isTypeParam))
 				continue;
 			const isClass	= part.type === 'ref' && (T.isClassRef(part, scope) || LIB_DECL_MAP.get(part.name)?.type === 'class_decl');
@@ -1419,6 +1436,11 @@ function collectExpandoFields(
 			const name		= shape ? shape.members.length ? shapeKey(shape.members) : undefined : part.type === 'ref' ? classIdentity(stmtHomeModule, part, scope) : undefined;
 			if (!name)
 				continue;
+			const overridden = isClass && part.type === 'ref' && key !== undefined ? methodOwner(part, key, scope) : undefined;
+			if (overridden) {
+				(methodOverrides.get(overridden) ?? methodOverrides.set(overridden, new Set()).get(overridden)!).add(key!);
+				continue;
+			}
 			if (accessor && key !== undefined)
 				(accessorKeys.get(name) ?? accessorKeys.set(name, new Set()).get(name)!).add(key);
 			const prior = pendingExtensions.get(name);
@@ -1690,7 +1712,7 @@ function collectExpandoFields(
 		noteType(checkerTypeOf(e, s.scope), key, s.scope);
 	}
 
-	return { accessorKeys, pendingExtensions };
+	return { accessorKeys, pendingExtensions, methodOverrides };
 }
 
 function homeKey(homeModule: string, name: string) {
@@ -2712,11 +2734,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				return closureWtype({ params, result, hasRest, defaults, resolvedParams: parts.resolvedParams, restElem: parts.restElem });
 			}
 		}
-		if (t.type === 'ref') {
-			const cls = ensureClassRef(t);
-			if (cls)
-				return cls.thisType;
-		}
+		// A class, named directly or through an alias (`type Alias = Scope`).
+		for (const ref of new Set([t, resolved]))
+			if (ref.type === 'ref') {
+				const cls = ensureClassRef(ref);
+				if (cls)
+					return cls.thisType;
+			}
 		// `ensureClass` never resolves a dotted ref (`TS.TypeParam`), and an interface `extends`ing another resolves to an intersection: both are
 		// flattened to the shape `ownerFor` sees.
 		const flat = resolved.type === 'object' ? resolved : resolved.type === 'intersection' ? T.resolveObjectType(resolved, global) : undefined;
@@ -4411,8 +4435,30 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				console.error('MDBG', name, 'owner', owner.name, new Error().stack!.split('\n').slice(2, 8).join('\n'));
 			throw `unknown method '${name}' on ${owner.name}`;
 		}
-		emitCallArgs(name, method.params, method.defaults, !!method.hasRest, args, ctx, method.resolvedParams);
-		ctx.emit(I.call(method.funcIndex));
+		const direct = () => {
+			emitCallArgs(name, method.params, method.defaults, !!method.hasRest, args, ctx, method.resolvedParams);
+			ctx.emit(I.call(method.funcIndex));
+		};
+		const own = bypassVirtual ? undefined : owner.fieldIndex.get(`#own:${name}`);
+		if (own === undefined) {
+			direct();
+			return method.result;
+		}
+		// This instance's own override when its slot is set, else the method.
+		const slot = owner.fields[own].wtype, closure = closurePart(slot)!;
+		const recv = ctx.temp(`$own$recv$${ctx.tempCounter++}`, owner.thisWtype!), fn = ctx.temp(`$own$fn$${ctx.tempCounter++}`, slot);
+		ctx.emit(I.local.tee(recv), I.struct.get(owner.typeIndex, own), I.local.tee(fn), I.ref.is_null);
+		ctx.emitIf(method.result === 'void' ? undefined : toValType(method.result), () => {
+			ctx.emit(I.local.get(recv));
+			direct();
+		}, () => {
+			ctx.emit(I.local.get(fn), I.ref.as_non_null);
+			const got = emitClosureCall(closure, sourceArgs(name, closure, args, ctx), ctx);
+			if (method.result === 'void' && got !== 'void')
+				ctx.emit(I.drop);
+			else if (method.result !== 'void')
+				coerceTop(got, ctx, method.result);
+		});
 		return method.result;
 	}
 
@@ -4746,6 +4792,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					store: write ? storeByCall(wtype, value => emitCallOn(cls!, set, [value], ctx)) : undefined };
 			}
 
+			const ownIdx = cls?.fieldIndex.get(`#own:${prop}`);
+			if (cls && ownIdx !== undefined && write) {
+				const wtype = cls.fields[ownIdx].wtype;
+				return { wtype, operands: [receiver(cls.thisWtype!)], load: () => void emitFieldRead(cls, ownIdx, ctx), store: () => emitFieldWrite(cls, ownIdx, wtype, ctx) };
+			}
+			if (ownIdx !== undefined)
+				throw `reading '${prop}' as a value is not supported where an instance may override it -- call it instead`;
 			const fieldIdx = cls?.fieldIndex.get(prop);
 			if (cls && fieldIdx === undefined && cls.methodDecls.has(prop) && !write)
 				return { wtype: typeOf(T.resolve(ctx.scope, ctx.narrowedTypeOf(target)))!, operands: [], load: () => void emitMethodValue(target, cls, ctx) };
@@ -7475,6 +7528,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					info.fields.push({ name: slot, wtype, optional: true });
 				}
 		}
+		// A method some instance overrides: a closure slot, `null` until written, which a call tries first (`emitMethodCall`).
+		for (const key of methodOverrides.get(name) ?? [])
+			addField(info, `#own:${key}`, T.lookupMember(info.thisTsType, key, info.declScope ?? libGlobal), true);
 		const spec = pendingExtensions.get(name);
 		if (!spec)
 			return;
@@ -9022,7 +9078,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	};
 	// A slot holding more than one array storage (`collectOpenShapes`) is stored as `any`, and so is what is read from it.
 	const openedAs = (d: Slot, t: Type) => openSlots.has(d) ? OPEN_SLOT : t;
-	const { accessorKeys, pendingExtensions } = collectExpandoFields(stmtHomeModule, moduleBodies);
+	const { accessorKeys, pendingExtensions, methodOverrides } = collectExpandoFields(stmtHomeModule, moduleBodies);
 
 
 	// Only functions are seeded across every module; class and scalar promotion below stays entry-only.
