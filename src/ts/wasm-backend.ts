@@ -4384,12 +4384,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	function emitMethodCall(owner: ClassInfo, name: string, call: CallSite, ctx: FunctionContext, bypassVirtual?: boolean): W.Type {
 		const args		= argsOf(call);
 		const typeArgs	= typeArgsOf(call);
-		const inline	= inlineFor(owner, name, call, ctx);
-		if (inline) {
-			if (args.some(a => a.type === 'spread'))
-				throw 'spread call arguments are not supported';
+		// A spread fills no fixed-arity `__asm` body: only a rest overload (`Math.max(...values)`) takes it.
+		const inline	= args.some(a => a.type === 'spread') ? undefined : inlineFor(owner, name, call, ctx);
+		if (inline)
 			return emitInline(name, inline(args.map(a => operandInfo(a, ctx)), ctx, typeArgs), args, ctx);
-		}
 
 		const method = methodFor(owner, name, call, ctx, bypassVirtual || !!typeArgs);
 		if (!method) {
@@ -6250,7 +6248,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			case 'arrow':
 			case 'function': {
 				const target = W.isRef(want) ? classes.get(want.ref) : undefined;
-				return target?.callable ? emitCallableObject(target, e, [], ctx) : emitClosureLiteral(e, ctx, false, want);
+				if (target?.callable)
+					return emitCallableObject(target, e, [], ctx);
+				// Into an erased slot (`Record<string, F>`'s values) it is built as the slot's own function type, which a read casts back to:
+				// a fixed parameter against its rest (`op => ...` as a `(...op: number[]) => number`) binds from the rest array then.
+				// Not a context naming a polymorphic `this` (a lib callback's `array: this`), which only a known receiver lays out.
+				const slot	= !want || W.isAny(want) ? contextOf(e) : undefined;
+				const slotW	= slot && !T.containsKind(slot, 'this') ? typeOf(slot) : undefined;
+				return emitClosureLiteral(e, ctx, false, W.isClosure(slotW) ? slotW : want);
 			}
 
 			default:
@@ -8118,7 +8123,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const chosen	= namedBody(bodied, resolvedCall(owner, name, call, ctx), `${owner.name}.${name ?? 'constructor'}`);
 		const args		= argsOf(call);
 		const dynamic	= args.map((a, i) => T.isAny(ctx.narrowedTypeOf(a)) ? i : -1).filter(i => i >= 0);
-		if (!dynamic.length)
+		// A spread's count is unknown, so positions say nothing: the checker's resolution stands (`Math.max(...ops)` takes the rest overload).
+		if (!dynamic.length || args.some(a => a.type === 'spread'))
 			return chosen;
 		const paramAt	= (d: MethodMember, i: number) => T.paramTypeAt(T.FixSig(d, T.ANY), i, ctx.scope);
 		const fitting	= bodied.filter(d => d.params.length >= args.length);

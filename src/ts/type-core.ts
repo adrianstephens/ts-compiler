@@ -897,7 +897,7 @@ function mentionsNames(t: Type, names: ReadonlyMap<string, unknown>): boolean {
 }
 
 // Whether a node of `kind` occurs anywhere in `t`.
-function containsKind(t: Type, kind: Type['type']): boolean {
+export function containsKind(t: Type, kind: Type['type']): boolean {
 	return walkerB(undefined, undefined, searchOnce((x: Type, process: (x: Type) => boolean) => x.type === kind || process(x))).type(t);
 }
 

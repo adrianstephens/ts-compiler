@@ -4504,6 +4504,20 @@ async function main() {
 	}
 
 	{
+		// Function literals stored into a `Record` of a rest-taking function type (walker.ts's `foldableMaths`): each is built as that type, a fixed
+		// parameter bound from the rest array; a spread call reaches `Math.max`'s rest overload, not its two-operand `__asm` one.
+		const { restRecord } = await compile(`
+			const maths: Record<string, (...op: number[]) => number> = {
+				abs:	op => Math.abs(op),
+				max:	(...ops) => Math.max(...ops),
+				pow:	(a, b) => Math.pow(a, b),
+			};
+			export function restRecord(): number { return maths['abs'](-3) + maths['max'](1, 7, 2) * 10 + maths['pow'](2, 3) * 100; }
+		`);
+		check('function literals in a Record of a rest-taking type; a spread call takes the rest overload', restRecord(), 873);
+	}
+
+	{
 		// An empty statement (a stray `;`) had no `case` in `emitStmt` at all, so it reached the `default:`
 		// throw -- js-parser.ts's own source is full of them.
 		const { strays, emptyLoopBody } = await compile(`
