@@ -360,6 +360,7 @@ function refreshParams(sig: TS.CallSig, decl: JS.CallSig<any>) {
 // While inferring it reads as absent; a recursive call's reader falls back to `any`, as TS types such a recursion.
 function lazyReturnType(sig: TS.CallSig, decl: { returnType?: Type }, scope: Scope, infer: () => void, fold = (t: Type) => t) {
 	let resolving = false;
+	(selfUndoing.get(sig) ?? selfUndoing.set(sig, new Set()).get(sig)!).add('returnType');
 	Object.defineProperty(sig, 'returnType', {
 		configurable: true,
 		enumerable: true,
@@ -375,7 +376,9 @@ function lazyReturnType(sig: TS.CallSig, decl: { returnType?: Type }, scope: Sco
 		set(value: Type | undefined) {
 			if (value)
 				T.stampScope(value = fold(value), scope);
-			written(sig, 'returnType');
+			// Undone by reinstalling the accessor: an inference a speculative walk made must not outlive it.
+			selfUndoing.get(sig)!.delete('returnType');
+			aheadLog?.push(() => lazyReturnType(sig, decl, scope, infer, fold));
 			written(decl, 'returnType');
 			Object.defineProperty(sig, 'returnType', { value, writable: true, configurable: true, enumerable: true });
 			decl.returnType = value;
@@ -607,8 +610,10 @@ function trial<R>(f: () => R): R {
 // A declaration typed ahead of its statement is walked while earlier ones are still placeholders, so nothing that walk writes onto the
 // AST may stay: each write's prior property is restored after it.
 let aheadLog: (() => void)[] | undefined;
+// Keys held by an accessor that records its own undo (`lazyReturnType`): `written` leaves them to it, since reading one would run it.
+const selfUndoing = new WeakMap<object, Set<string>>();
 function written<O extends object>(o: O, key: keyof O & string) {
-	if (!aheadLog)
+	if (!aheadLog || selfUndoing.get(o)?.has(key))
 		return;
 	// What the key held, or that it held nothing: the node's own data properties are all a speculative walk writes.
 	const had = key in o, prior = o[key];
