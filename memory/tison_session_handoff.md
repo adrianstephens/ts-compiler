@@ -102,19 +102,19 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
   `new globalThis.Error().stack`: codegen.ts's own `Error` class shadows the global and has no stack.
 - The checker never reports an unknown name for TYPES; for values TS2304 is behind `Scope.unknownNames` ([[tison_unknown_name_diagnostic]]).
 
-## Self-hosting survey baseline (2026-10-04)
+## Self-hosting survey baseline (2026-10-04, second run)
 
-Full survey, snapshot `compiler@d8641ea` (clean tree): 146/420 top-level declarations compile in isolation, 344 failures from
-92 causes; `wasm-backend.ts`'s worker CRASHED (562s, likely the 2 GB heap), not measured. Since then (all committed):
-`WeakRef` in the lib (was the top cause, 84 blocks, `resolve`'s `resolveCacheById?.[i]?.deref()`), and checker inference fixes
-that took walker.ts's survey checker errors 40 -> 1. Under the survey's sibling-source resolution (`SNAP=<snapshot> errcount.ts`),
-checker errors equal the session base (07b036e) everywhere but binary-libs/wasm.ts (+2, its generic instruction builders; see
-[[tison-checker-inference]]). **Work queue** (rows from the survey, re-probe before trusting): `typeId`'s symbol-keyed memo
-(`(t as Record<symbol, ...>)[memo]` + `Object.defineProperty(t, memo, ...)`, 23 rows + now `resolve`'s next blocker -- needs
-symbol-keyed expandos on every shape a `Type` can be: per-object `#ext` keyed by `PropertyKey`, since the lib `Map` is a linear
-scan and a global side table would make every lookup O(n); a layout decision, put to the user); closure conversion
-`() => void` -> `(Array<any>, Array<any>) => void` (53, checker.ts); `unknown field 'f64'` (27, codegen.ts); unary `-` (25,
-ts-parser.ts); `comparing to null needs a nullable object` (13, js-parser.ts).
+Survey on snapshot `compiler@cc3edca`: checker.ts 89/90 compile (was 0/89); wasm-backend.ts's worker still CRASHES (2 GB heap).
+Fixed since, all committed and probed: `boxed`/`refinedMember` dispatch with no implementer in the program -> `unreachable` (53+7,
+type-core.ts); `Number(any)` ToNumber + `RegExp.toString` (5, walker.ts); unary `-`/`~` on `number | bigint` + boxed bigint
+`===` (25, ts-parser.ts); `x === null` on a never-null representation (13, js-parser.ts); `{}` in a `Record | {}` context
+(tison core.ts:312); `never`-typed param (6, transform.ts); call/construct members in structural assignability (ReadType ->
+codegen.ts 13 -> 1 checker errors, wasm.ts 7 -> 1). **Open, put to the user (design decisions):** (1) binary-libs' instruction
+builder `I` (`TreeBuilder` + `Split`/`Nest`/`UnionToIntersection` types, built by dynamic writes): `I.f64` is `any` -- codegen.ts's
+27 rows; (2) a method overridden on one instance (transform.ts:698 `global.hitDepthLimit = fn => ...`): needs a closure slot per
+overridden method; (3) `new Map()` is `Map<any, any>` in TS's lib (first overload), ours infers from context because `Map` lays
+out by `K`/`V` -- type-core.ts:3373's 2 self-host checker errors. Also open: local `class_decl` in a function, async function
+expressions (transform.ts). Re-run the survey before trusting rows.
 **Checker queue (found 2026-10-04, left):** a declaration's initializer is checked WIDENED, so `const r: 'a' = 'b'` is only a
 GAP (lax "widened source" rule). Checking it precisely (tried, corpus ERROR +24) exposes tison's flow ranges of `number` slots
 compared as literals: `var x = 1` reads as `1`, so `f(x)` with `f(p: E)` already errs on ARGUMENTS. Fix needs flow ranges told
