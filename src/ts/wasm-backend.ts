@@ -4407,6 +4407,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			return undefined;
 		if (builtins.has(name) || moduleAsmBuiltins.has(homeKey(home, name)) || funcs.has(name))
 			return { kind: 'function', name, home };
+		if (isLibObject(name, ctx.scope))
+			return { kind: 'closure', wtype: closureWtype(objectValueSig), optional: false };
 		// A class is callable: its constructor is the conversion (`String(x)`).
 		const cls = ensureClass(name, e.typeArgs, ctx.scope);
 		return cls ? { kind: 'construct', cls, label: name, lowered: true } : { kind: 'function', name, home };
@@ -5501,7 +5503,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			? { name: e.name, scope: ctx.scope } : undefined);
 	}
 
-	// Each class held as a value, by its env's tag: an empty `envBase` subtype per class, which the constructing code ignores.
+	// Each class held as a value, by its env's tag: an empty `identityEnv` subtype per class, which the constructing code ignores. An instantiation
+	// is its own class, as its statics are (`staticGlobal`; the lib's `Uint8Array` and `Uint32Array` are two of `TypedArray`).
 	const classValueTags	= new Map<ClassInfo, number>();
 	const classValueFuncs	= new Map<string, FuncInfo>();
 	function emitClassValue(cls: ClassInfo, want: W.Type | undefined, ctx: FunctionContext, e?: Expr): W.Type {
@@ -5511,7 +5514,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const takes		= (d: MethodMember) => !!wanted && wanted.params.length <= d.params.length
 			&& d.params.every((p, i) => i < wanted.params.length ? !p.typeAnnotation || T.isAssignable(wanted.params[i].typeAnnotation ?? T.ANY, p.typeAnnotation, ctx.scope, cls.declScope ?? libGlobal)
 				: hasMod(p, 'optional') || !!p.default);
-		const decl	= decls.length > 1 ? decls.find(takes) : decls[0];
+		// With nothing asking for another, the first: one closure carries one signature.
+		const decl	= decls.length > 1 && wanted ? decls.find(takes) : decls[0];
 		if (!decl)
 			throw `class '${cls.name}' as a value: none of its ${decls.length} constructors takes what its context passes`;
 		const ctor	= ensureCtorDecl(cls, decl);
@@ -5587,13 +5591,45 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			return coerceTop(emitExpr(Literal(cls.decl.name ?? ''), dctx), dctx, result);
 		if (name !== 'prototype')
 			return void emitAs(Identifier('undefined'), dctx, result);
-		const proto = ensureClass('DynamicObject', [T.ANY])!, obj = dctx.temp(`$proto$${dctx.tempCounter++}`, proto.thisWtype!);
-		const ctor	= ensureCtor(proto, [], dctx);
-		emitCallArgs(`${proto.name}'s constructor`, ctor.params, ctor.defaults, !!ctor.hasRest, [], dctx, ctor.resolvedParams);
-		dctx.emit(I.call(ctor.funcIndex), I.local.set(obj), I.local.get(obj));
+		const proto = emitNewDynamicObject(dctx), obj = dctx.temp(`$proto$${dctx.tempCounter++}`, proto.thisWtype!);
+		dctx.emit(I.local.set(obj), I.local.get(obj));
 		emitCallOn(proto, 'set', [stringArg(dctx, 'constructor'), localArg(dctx, recv, W.REF_ANY)], dctx);
 		dctx.emit(I.drop, I.local.get(obj));
 		coerceTop(proto.thisWtype!, dctx, result);
+	}
+	// A new empty `DynamicObject<any>` on the stack, a plain `{}`.
+	function emitNewDynamicObject(dctx: FunctionContext): ClassInfo {
+		const cls	= ensureClass('DynamicObject', [T.ANY])!;
+		const ctor	= ensureCtor(cls, [], dctx);
+		emitCallArgs(`${cls.name}'s constructor`, ctor.params, ctor.defaults, !!ctor.hasRest, [], dctx, ctor.resolvedParams);
+		dctx.emit(I.call(ctor.funcIndex));
+		return cls;
+	}
+
+	// The lib's `Object` as a value (`x.constructor === Object`), not one of its intrinsics: a function, `Object(v)` being `v`, or a new `{}` for
+	// a nullish `v`. One identity, as a declared function's.
+	const objectValueSig: FuncSig = { params: [W.REF_ANY_NULLABLE], result: W.REF_ANY_NULLABLE, hasRest: false, defaults: [Identifier('undefined')] };
+	const isLibObject = (name: string, scope: Scope) => name === 'Object' && isLibName(name, scope);
+	function emitObjectValue(ctx: FunctionContext): W.Type {
+		const sig = objectValueSig;
+		const { funcTypeIndex, structTypeIndex } = ensureClosureType(sig);
+		let info = classValueFuncs.get('<Object>');
+		if (!info) {
+			const { funcIndex, typeIndex } = types.funcAt(funcTypeIndex);
+			const made: FuncInfo = info = { ...sig, funcIndex, typeIndex };
+			classValueFuncs.set('<Object>', made);
+			closureLiterals.push(made);
+			worklist.push(() => {
+				const wctx = new FunctionContext('<Object>', new Scope(libGlobal), plainReturn(sig.result), undefined);
+				wctx.declareLocal('#envParam', { typeIndex: types.envBase(), nullable: false });
+				const v = wctx.declareLocal('$v', W.REF_ANY_NULLABLE).index;
+				wctx.emit(I.local.get(v), I.ref.is_null);
+				wctx.emitIf(toValType(sig.result), () => coerceTop(emitNewDynamicObject(wctx).thisWtype!, wctx, sig.result), () => wctx.emit(I.local.get(v)));
+				made.body = wctx.toFuncBody(2, toValType);
+			});
+		}
+		ctx.emit(I.ref.func(info.funcIndex), I.global.get(identityGlobal('Object', types.identityEnv())), I.i32.const(1), ...newClosure(structTypeIndex));
+		return closureWtype(sig);
 	}
 
 	function ensureFunctionValueWrapper(name: string, decl: FunctionDecl, homeModule = '.', want?: W.Type, typeArgs?: Type[]): { info: FuncInfo; structTypeIndex: number } {
@@ -5984,6 +6020,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const classValue = e.type === 'identifier' ? classValueOf(e, ctx) : undefined;
 				if (classValue)
 					return emitClassValue(classValue, want, ctx, e);
+				// Like `OBJECT_INTRINSICS`, by name: the lib declares `Object` (`declare var`) with no implementation of its own.
+				if (isLibObject(name, ctx.scope))
+					return emitObjectValue(ctx);
 				// CommonJS's per-module names (`checker.bindModuleNames`): compile-time constants, as a bundler substitutes them.
 				if (name === '__dirname' || name === '__filename') {
 					const file = moduleFilename(ctx.homeModule);
@@ -9191,7 +9230,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const sig = cls.getterNames?.has(name) ? methodSig(cls, accessorKey('get', name), dctx) : undefined;
 				return sig ? [{ heap, emit: () => emitBoxed(cls, name, emitMethodCall(cls, accessorKey('get', name), [], dctx), dctx, result) }] : [];
 			};
-			const arms = [...dynamicObjectArms(cls => coerceTop(emitCallOn(cls, 'get', [stringArg(dctx, name)], dctx), dctx, result)), ...distinctHeaps(dynamicReceivers(true).flatMap(readOf))];
+			const arms = name === 'constructor' ? constructorArms(dctx, result)
+				: [...dynamicObjectArms(cls => coerceTop(emitCallOn(cls, 'get', [stringArg(dctx, name)], dctx), dctx, result)), ...distinctHeaps(dynamicReceivers(true).flatMap(readOf))];
 			// Gated like the arrays: with no closure type, no function value can be in an `any` slot.
 			const closureField = CLOSURE_FIELDS.get(name);
 			if (closureField !== undefined && closureTypes.size) {
@@ -9207,6 +9247,28 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			emitTypeCascade(dctx, recv, arms, () => dctx.emit(I.local.get(recv), I.ref.is_null,
 				I.if(toValType(result), [I.unreachable], [I.ref.null(heapTypeIndexOf(result))])), result);
 		});
+	}
+
+	// `x.constructor`: an instance's class, deepest first as a subclass passes its base's `ref.test` too; a plain object's (a shape's, or a dynamic
+	// object's without its own entry) `Object`. Every dynamic object's prototype is `Object.prototype`.
+	function constructorArms(dctx: FunctionContext, result: W.Type) {
+		const objectValue = () => coerceTop(emitObjectValue(dctx), dctx, result);
+		const structs = distinctHeaps(dynamicReceivers(false).filter(({ cls }) => cls.typeIndex !== -1).sort((a, b) => depthOf(b.cls) - depthOf(a.cls)));
+		return [
+			...dynamicObjectArms(cls => {
+				const own = dctx.temp(`$ctor$${dctx.tempCounter++}`, result);
+				coerceTop(emitCallOn(cls, 'get', [stringArg(dctx, 'constructor')], dctx), dctx, result);
+				dctx.emit(I.local.tee(own), I.ref.is_null);
+				dctx.emitIf(toValType(result), objectValue, () => dctx.emit(I.local.get(own)));
+			}),
+			...structs.map(({ heap, cls }) => ({ heap, emit: () => {
+				dctx.emit(I.drop);
+				if ((cls.methodDecls.get('constructor') ?? []).some(d => d.body))
+					coerceTop(emitClassValue(cls, undefined, dctx), dctx, result);
+				else
+					objectValue();
+			} })),
+		];
 	}
 
 	// `x.name = v` on a union or `any`: over the struct-backed owners only, the value boxed as an expando holds it. A receiver matching nothing traps:

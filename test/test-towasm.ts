@@ -2654,6 +2654,25 @@ async function main() {
 	}
 
 	{
+		const { ctorOf, objectValue } = await compile(`
+			class A { x = 1; }
+			class B extends A { y = 2; }
+			export function ctorOf(): number {
+				const a: any = new A(), b: any = new B(), o: any = { z: 1 }, d: any = {};
+				return (a.constructor === A ? 1 : 0) + (b.constructor === B ? 10 : 0) + (b.constructor === A ? 100 : 0)
+					+ (o.constructor === Object ? 1000 : 0) + (d.constructor === Object ? 10000 : 0) + (a.constructor === Object ? 100000 : 0);
+			}
+			export function objectValue(): number {
+				const o: any = {}, O: any = Object;
+				o.k = 3;
+				return (Object(o).k as number) + (O(undefined) !== undefined ? 10 : 0) + (O === Object ? 100 : 0);
+			}
+		`);
+		check("x.constructor is its class, or Object for a plain object", ctorOf(), 11011);
+		check("Object as a value: one function, Object(v) is v or a new {}", objectValue(), 113);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {

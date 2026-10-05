@@ -180,6 +180,7 @@ interface Object {
 	propertyIsEnumerable(v: PropertyKey): boolean;
 }
 declare var Object: {
+	(value?: any): any;
 	// TS's own overloads (lib.es2017.object): the generic one preserves the value type, which needs
 	// inference through an index signature (`inferTypeArgs`' own `index` case).
 	entries<T>(o: { [s: string]: T } | ArrayLike<T>): [string, T][];
