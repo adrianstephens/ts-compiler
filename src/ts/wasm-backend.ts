@@ -41,9 +41,8 @@ import * as WAT from '../wasm/wat-parser';
 //      'Promise' is followed
 //    - 'finally(f)' waiting on a promise 'f' returns ('f' is typed '() => void', its result unread)
 //    - a generic async or generator function
-//    - an async function or generator nested inside another closure, capturing that enclosing
-//      function's own free variables (its own params/locals are captured into its frame fine --
-//      only capturing an *outer* function's variables is unsupported)
+//    - a generator nested inside another closure, capturing that enclosing function's own free
+//      variables (an async one captures them into its frame)
 //  - Classes:
 //    - a method call on a value 'instanceof' narrowed to a generic class whose instantiations differ
 //      in layout (a stored 'T'): the narrowed 'C<any>' is not the struct of a 'C<number>'
@@ -736,7 +735,9 @@ const writtenLiteral = (e: Expr) => e.type === 'literal' ? [e.value] : undefined
 // A value's member as a candidate shape's field sees it: whether the field takes it, and the literals it may be.
 interface ShapeProp { fits: (declared: Type) => boolean; literals?: readonly unknown[] }
 
-interface LocalField { index: number; wtype: W.Type; tsType: Type }
+interface LocalField { index: number; wtype: W.Type; tsType: Type; holderInner?: W.Type }
+// A name an async closure captures, as its env struct holds it (`emitClosureLiteral`): copied into its frame.
+interface Capture { name: string; index: number; wtype: W.Type; holderInner?: W.Type; tsType?: Type }
 
 // ===================================================================
 //  AST queries -- names, free variables, and expression shape
@@ -5258,14 +5259,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// Builds the `{code, env}` closure struct for an `arrow`/`function` expression or a nested `function_decl`, leaving it on the stack. `allowSelfCall`
 	// (a declaration) lets calls to its own name be a direct `call` (`ctx.selfCall`): the struct cannot be a field of itself, so it cannot be captured.
 	function emitClosureLiteral(
-		e: TS.CallSig & {type: string, name?: string, modifiers?: string[], body?: Stmt[] | Expr },
+		e: TS.CallSig & {type: string, name?: string, modifiers?: string[], body?: JS.Stmt<Type>[] | Expr },
 		ctx: FunctionContext,
 		allowSelfCall: boolean,
 		want?: W.Type,
 		thisHolder?: { holder: W.Local; tsType: Type },
 	): W.Type {
-		if (hasMod(e, 'async'))
-			throw 'an async arrow/function expression is not supported';
 		if (hasMod(e, 'generator'))
 			throw 'a generator function expression is not supported';
 		// A closure literal in a non-entry module's body may have unstamped annotations; `ctx.scope` is where it was written, and stamping skips what is tagged.
@@ -5380,6 +5379,30 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			}) } });
 		}
 
+		// `struct.new` takes `[code, env]` in order. Each capture is read raw (`rawSlot`): a forward-holder is captured as the holder itself.
+		const build = (funcIndex: number, structTypeIndex: number, sig: FuncSig): W.Type => {
+			ctx.emit(I.ref.func(funcIndex));
+			for (const name of capturedNames) {
+				if (isHeld(name))
+					ctx.emit(I.local.get(thisHolder!.holder.index));
+				else if (name === 'this' && !ctx.closureEnv?.fields.get(name)?.holderInner)
+					emitExpr({ type: 'this' }, ctx);
+				else
+					ctx.rawSlot(name);
+			}
+			ctx.emit(fields ? I.struct.new(envTypeIndex) : I.struct.new_default(envBase));
+			ctx.emit(I.i32.const(jsLength(e.params)), ...newClosure(structTypeIndex));
+			return closureWtype(sig);
+		};
+		// An async closure is a resumable one (`compileAsyncFunc`) whose frame holds what it captures, copied from its env as it starts.
+		if (hasMod(e, 'async')) {
+			const label	= `${e.name ?? '<async closure>'} in ${ctx.name}`;
+			const decl: FunctionDecl = { type: 'function_decl', name: label, params: e.params, rest: e.rest, typeParams: e.typeParams, returnType: e.returnType,
+				body: Array.isArray(e.body) ? e.body : e.body !== undefined ? [JS.Return(e.body)] : [] };
+			const entry	= compileAsyncFunc(label, decl, ctx.homeModule, { captures: capturedNames.map(name => ({ name, ...fields!.get(name)! })), envTypeIndex });
+			return build(entry.funcIndex, ensureClosureType(entry).structTypeIndex, entry);
+		}
+
 		const sig: FuncSig = { params: params.map(p => p.wtype), result, hasRest: !!e.rest || !!restBound.length, defaults: ownParams.map((p, i) => params[i].calleeDefault || (!p.default && hasMod(p, 'optional')) ? Identifier('undefined') : p.default), resolvedParams: params };
 		const { funcTypeIndex, structTypeIndex } = ensureClosureType(sig);
 		const { funcIndex, typeIndex }	= types.funcAt(funcTypeIndex);
@@ -5432,19 +5455,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			info.body = fnCtx.toFuncBody(1 + params.length, toValType);
 		}, e, ctx.homeModule, `${e.name ?? '<closure>'} in ${ctx.name}`));
 
-		// `struct.new` takes `[code, env]` in order. Each capture is read raw (`rawSlot`): a forward-holder is captured as the holder itself.
-		ctx.emit(I.ref.func(funcIndex));
-		for (const name of capturedNames) {
-			if (isHeld(name))
-				ctx.emit(I.local.get(thisHolder!.holder.index));
-			else if (name === 'this' && !ctx.closureEnv?.fields.get(name)?.holderInner)
-				emitExpr({ type: 'this' }, ctx);
-			else
-				ctx.rawSlot(name);
-		}
-		ctx.emit(fields ? I.struct.new(envTypeIndex) : I.struct.new_default(envBase));
-		ctx.emit(I.i32.const(jsLength(e.params)), ...newClosure(structTypeIndex));
-		return closureWtype(sig);
+		return build(funcIndex, structTypeIndex, sig);
 	}
 
 	// A named function used as a VALUE: a top-level function has no `env` param, so its `funcIndex` cannot fill a closure's `code` field
@@ -7465,7 +7476,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 	// The frame's field map: one per param, then one per hoisted local; the state and any extra field are each caller's.
-	function buildFrameFields(decl: FunctionDecl, params: ResolvedParam[]) {
+	function buildFrameFields(decl: FunctionDecl, params: ResolvedParam[], captures: Capture[] = []) {
 		const hoisted		= collectHoistedLocals(decl.body!);
 		const localFields	= new Map<string, LocalField>();
 		const frameFields: wasm.FieldType[] = [{ type: 'i32', mut: true }];
@@ -7487,13 +7498,20 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			localFields.set(localName, { index: frameFields.length, wtype: wt, tsType });
 			frameFields.push({ type: toValType(wt), mut: true });
 		}
+		// What an async closure captures lives in its frame too, unless a local of its own shadows the name.
+		for (const c of captures) {
+			if (localFields.has(c.name))
+				continue;
+			localFields.set(c.name, { index: frameFields.length, wtype: c.wtype, tsType: c.tsType ?? T.ANY, holderInner: c.holderInner });
+			frameFields.push({ type: toValType(c.wtype), mut: true });
+		}
 		return { localFields, frameFields };
 	}
 
 	// The frame a resumable function keeps between calls: its state, then every local the body declares (params first), then any
 	// field the driver needs (`extra`, at `extraAt`). Hoisted locals take the type `case 'var_decl'` would give them, via the same widenings.
-	function resumableFrame(decl: FunctionDecl, params: ResolvedParam[], extra: wasm.FieldType[] = []) {
-		const { localFields, frameFields } = buildFrameFields(decl, params);
+	function resumableFrame(decl: FunctionDecl, params: ResolvedParam[], extra: wasm.FieldType[] = [], captures: Capture[] = []) {
+		const { localFields, frameFields } = buildFrameFields(decl, params, captures);
 		const extraAt		= frameFields.push(...extra) - extra.length;
 		// `envBase` as supertype: the frame is stored as a closure's env, whose declared param type is `(ref $envBase)`.
 		const typeIndex		= types.add({ final: true, supertypes: [types.envBase()], type: { kind: 'struct', fields: frameFields } });
@@ -7538,13 +7556,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// The frame's leading field values, in declaration order: the entry state, a param's own value, every other hoisted local its
 	// default. A real `struct.new` needs them all up front -- a non-nullable object-typed field (a `Promise<T>` param) has no default.
-	function emitFrameInit(ctx: FunctionContext, params: ResolvedParam[], frame: ResumableFrame): void {
+	function emitFrameInit(ctx: FunctionContext, params: ResolvedParam[], frame: ResumableFrame, capture?: (name: string) => boolean): void {
 		const paramNames = new Set(params.map(p => p.key as string));
 		ctx.emit(I.i32.const(frame.machine.entryId));
 		for (const [localName, field] of frame.localFields) {
 			if (paramNames.has(localName))
 				ctx.emit(I.local.get(ctx.lookup(localName)!.index));
-			else
+			else if (!capture?.(localName))
 				ctx.emitDefaultValue(field.wtype, types, toValType);
 		}
 	}
@@ -7650,7 +7668,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// An `async function` shares the generator's frame and dispatch but runs at once, synchronously, up to its first `await`, which registers its resume
 	// through `then()`. A rejection resumes it throwing the reason; whatever escapes the body rejects the result.
-	function compileAsyncFunc(name: string, decl: FunctionDecl, homeModule = '.'): FuncInfo {
+	// `closure`: an async arrow or function expression's captures, in its env struct; its entry is then the closure's code, building the frame.
+	function compileAsyncFunc(name: string, decl: FunctionDecl, homeModule = '.', closure?: { captures: Capture[]; envTypeIndex: number }): FuncInfo {
 		if (decl.typeParams?.length)
 			throw `generic async function '${name}' is not supported`;
 		const params = resolveResumableParams(decl);
@@ -7669,7 +7688,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const newPromise	= (t: Type, ctx: FunctionContext) => ctx.emit(I.call(instantiateFunc('__asyncResult', LIB_DECL_MAP.get('__asyncResult') as FunctionDecl, new Map([['T', t]])).funcIndex));
 
 		// Two hidden fields after the locals: the function's own result Promise, and whether this resume delivers a rejection.
-		const frame			= resumableFrame(decl, params, [{ type: toValType(promiseWtype), mut: true }, { type: 'i32', mut: true }]);
+		const frame			= resumableFrame(decl, params, [{ type: toValType(promiseWtype), mut: true }, { type: 'i32', mut: true }], closure?.captures);
 		const resultPromise	= frame.extraAt, threw = frame.extraAt + 1;
 		const { funcIndex: stepFuncIndex, typeIndex: stepFuncTypeIndex } = types.func(
 			[{ type: { ref: frame.typeIndex, nullable: false }, id: 'frame' }, { type: toValType(W.REF_ANY_NULLABLE), id: 'sent' }], []);
@@ -7797,15 +7816,36 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			stepInfo.body = fnCtx.toFuncBody(2, toValType);
 		}, name, homeModule));
 
-		return compileResumableOuter(name, homeModule, params, promiseWtype, ctx => {
+		const start = (ctx: FunctionContext, capture?: (name: string) => boolean) => {
 			const promiseLocal = ctx.declareLocal('#resultPromise', promiseWtype);
 			newPromise(rt.typeArgs![0], ctx);
 			ctx.emit(I.local.set(promiseLocal.index));
-			emitFrameInit(ctx, params, frame);
+			emitFrameInit(ctx, params, frame, capture);
 			ctx.emit(I.local.get(promiseLocal.index), I.i32.const(0), I.struct.new(frame.typeIndex));
 			// Run the body at once, up to its first suspension, as JS does; the entry segment never reads `#sent`.
 			ctx.emit(I.ref.null('any'), I.call(stepFuncIndex), I.local.get(promiseLocal.index), I.return);
-		});
+		};
+		if (!closure)
+			return compileResumableOuter(name, homeModule, params, promiseWtype, start);
+		// A closure's code: its env (the captures, as any closure's) first, then its parameters; each capture is copied into the new frame.
+		const sig: FuncSig = { params: params.map(p => p.wtype), result: promiseWtype, hasRest: false, resolvedParams: params };
+		const { funcIndex, typeIndex } = types.funcAt(ensureClosureType(sig).funcTypeIndex);
+		const info: FuncInfo = { ...sig, funcIndex, typeIndex };
+		closureLiterals.push(info);
+		worklist.push(W.withCatch(() => {
+			const ctx		= new FunctionContext(name, new Scope(moduleScopeOf(homeModule) ?? libGlobal), plainReturn(promiseWtype), undefined, homeModule);
+			const envParam	= ctx.declareLocal('#envParam', { typeIndex: types.envBase(), nullable: false });
+			ctx.declareParams(params).forEach(lowering(ctx).emit);
+			const byName	= new Map(closure.captures.map(c => [c.name, c]));
+			start(ctx, name => {
+				const c = byName.get(name);
+				if (c)
+					ctx.emit(I.local.get(envParam.index), I.ref.cast(closure.envTypeIndex), I.struct.get(closure.envTypeIndex, c.index));
+				return !!c;
+			});
+			info.body = ctx.toFuncBody(1 + params.length, toValType);
+		}, name, homeModule));
+		return info;
 	}
 
 

@@ -4736,6 +4736,22 @@ async function main() {
 		`);
 		check('a member read on an object asserted any', assertedAny(), 49);
 		check('an empty literal asserted to a phantom shape', emptyAsserted(), 13);
+		// binary's `RemainingRepeat`: an async function nested in a closure, capturing the enclosing function's variables (a shared, mutated one too).
+		const { asyncClosure, result } = await compile(`
+			let log = 0;
+			function run(): Promise<number> {
+				const base = 10;
+				let count = 0;
+				const step = async (n: number): Promise<number> => { count += n; await Promise.resolve(0); count += n; return base + count; };
+				async function twice(): Promise<number> { const a = await step(1); const b = await step(2); return a + b; }
+				return twice();
+			}
+			export function asyncClosure(): number { run().then(v => { log = v; }); return 0; }
+			export function result(): number { return log; }
+		`);
+		asyncClosure();
+		check('an async closure capturing its enclosing function', result(), 28);
+
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };
