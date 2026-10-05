@@ -501,6 +501,7 @@ interface ArrayBuffer {
 }
 declare var ArrayBuffer: {
 	new (byteLength: number): ArrayBuffer;
+	isView(arg: any): arg is ArrayBufferView;
 };
 // TS's is `ArrayBuffer | SharedArrayBuffer`; this lib has no SharedArrayBuffer.
 declare type ArrayBufferLike = ArrayBuffer;

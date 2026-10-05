@@ -6527,9 +6527,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						return 'i32';
 					}
 				}
-				const rightInfo = operandInfo(right, ctx);
-
-
 				switch (operator) {
 					// `a && b`, `a || b` and `a ?? b` yield an OPERAND, not a boolean (`0.5 && 7` is `7`); `emitTruthy` keeps the boolean form for a condition.
 					case '&&':
@@ -6690,7 +6687,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					}
 					//fall through
 					default: {
-						const leftInfo	= operandInfo(left, ctx);
+						// Here only: `instanceof`'s right operand is a class name, whose value's representation would lay out its class at `any`.
+						const leftInfo	= operandInfo(left, ctx), rightInfo = operandInfo(right, ctx);
 						const method	= BINARY_OP_NAMES[operator as keyof typeof BINARY_OP_NAMES];
 						const equality	= method === 'eq' || method === 'ne';
 						const identity	= (w: W.Type, test: () => void): W.Type => {

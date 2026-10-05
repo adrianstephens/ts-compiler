@@ -44,6 +44,11 @@ export class ArrayBuffer {
 	constructor(byteLength: i32) {
 		return __asm<[i32], RawArray<u8>>('array.new_default $this')(byteLength) as unknown as ArrayBuffer;
 	}
+
+	// A view of a buffer: a typed array of any element type, or a `DataView`.
+	static isView(arg: any): arg is ArrayBufferView {
+		return arg instanceof TypedArray || arg instanceof DataView;
+	}
 }
 
 export class TypedArray<T extends number | bigint> {

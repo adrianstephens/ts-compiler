@@ -2869,6 +2869,16 @@ async function main() {
 	}
 
 	{
+		const { isView } = await compile(`
+			export function isView(): number {
+				const b = new ArrayBuffer(8), u = new Uint8Array(b), d = new DataView(b), x: any = [1];
+				return (ArrayBuffer.isView(u) ? 1 : 0) + (ArrayBuffer.isView(d) ? 10 : 0) + (ArrayBuffer.isView(b) ? 100 : 0) + (ArrayBuffer.isView(x) ? 1000 : 0) + (ArrayBuffer.isView(new Uint32Array(2)) ? 10000 : 0);
+			}
+		`);
+		check("ArrayBuffer.isView: any typed array or a DataView", isView(), 10011);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
