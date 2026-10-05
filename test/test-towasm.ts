@@ -2589,6 +2589,16 @@ async function main() {
 	}
 
 	{
+		const { primLeft } = await compile(`
+			class P { x = 1; }
+			function after<V>(v: V, then: () => number): number { return v instanceof P ? 7 : then(); }
+			function nothing(): void {}
+			export function primLeft(): number { return after(nothing(), () => 3) + after(5, () => 20) + after(new P(), () => 0); }
+		`);
+		check("instanceof with a scalar or void left is false", primLeft(), 30);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {

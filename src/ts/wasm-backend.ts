@@ -6454,8 +6454,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						if (!target)
 							throw "'instanceof' is only supported against a class name";
 						const leftWtype = wtypeOf(left, ctx);
-						if (!leftWtype || typeof leftWtype === 'string')
-							throw "'instanceof' needs an object-typed left-hand value";
+						if (!leftWtype)
+							throw "'instanceof' needs a representable left-hand value";
+						// A scalar or void left (`v: V` with `V = void`) is no object, so no instance.
+						if (typeof leftWtype === 'string') {
+							emitDiscarded(left, ctx);
+							ctx.emit(I.i32.const(0));
+							return 'i32';
+						}
 						// Each instantiation of a generic class is its own struct, and `instanceof C` is true for all of them: no one instantiation is built.
 						const decl = classDeclOf(target.name, target.scope);
 						if (decl?.type === 'class_decl' && decl.typeParams?.length) {
