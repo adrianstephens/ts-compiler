@@ -2599,6 +2599,20 @@ async function main() {
 	}
 
 	{
+		const { deadRest } = await compile(`
+			class P { x = 1; get() { return this.x; } }
+			function after<V>(v: V, then: () => number): number {
+				if (!(v instanceof P))
+					return then();
+				return v.get();
+			}
+			function nothing(): void {}
+			export function deadRest(): number { return after(nothing(), () => 3) + after(5, () => 20) + after(new P(), () => 0); }
+		`);
+		check("an instanceof guard a primitive settles leaves the rest of its block dead for that instantiation", deadRest(), 24);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {

@@ -382,7 +382,7 @@ class FunctionContext extends W.FunctionContext {
 		return this.isNamespaceQualifier(e.object) && this.scope.namespace(e.object.name)?.decl(e.property)?.type === 'var_decl';
 	}
 
-	// A type guard call (`x is P`, not `asserts`) its argument's type settles: `true` when every value of that type is a `P`,
+	// A type guard (a call to `x is P`, not `asserts`; `instanceof`) its argument's type settles: `true` when every value of that type is a `P`,
 	// `false` when none can be, `undefined` when only the value can tell. Decided by the checker's own comparability.
 	staticGuard(test: Expr): boolean | undefined {
 		if (test.type === 'unary' && test.operator === '!') {
@@ -393,6 +393,8 @@ class FunctionContext extends W.FunctionContext {
 			const and = test.operator === '&&', l = this.staticGuard(test.left), r = this.staticGuard(test.right);
 			return l === !and || r === !and ? !and : l === and && r === and ? and : undefined;
 		}
+		if (test.type === 'binary' && test.operator === 'instanceof')
+			return T.isPrimitiveOnly(this.narrowedTypeOf(test.left), this.scope) ? false : undefined;
 		if (test.type !== 'call')
 			return undefined;
 		// The signature the checker resolved the call to: the callee's type may hold several (an interface's member beside a class's static).
@@ -6760,6 +6762,26 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				continue;
 			}
 			emitStmt(st, ctx);
+			if (exits(st, ctx))
+				return;
+		}
+	}
+
+	// Control never runs past `s` (a guard `staticGuard` settles counts as decided): what follows it is dead, and may not compile for this instantiation.
+	function exits(s: Stmt, ctx: FunctionContext): boolean {
+		switch (s.type) {
+			case 'return': case 'throw': case 'break': case 'continue':
+				return true;
+			case 'block':
+				return s.body.some(st => exits(st, ctx));
+			case 'if': {
+				const known = ctx.staticGuard(s.test), alternate = s.alternate;
+				return known === undefined
+					? exits(s.consequent, ctx) && !!alternate && exits(alternate, ctx)
+					: known ? exits(s.consequent, ctx) : !!alternate && exits(alternate, ctx);
+			}
+			default:
+				return false;
 		}
 	}
 

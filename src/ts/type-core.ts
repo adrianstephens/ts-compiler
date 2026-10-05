@@ -1253,6 +1253,14 @@ function domainOf(r: Type, scope: Scope): Domain {
 	}
 }
 
+// No value of `t` is an object: every member is of a primitive domain, so `instanceof` is false of it.
+export function isPrimitiveOnly(t: Type, scope: Scope): boolean {
+	return unionMembers(t, scope).every(m => {
+		const d = domainOf(resolve(scope, m), scope);
+		return d !== undefined && d !== 'structural' && d !== 'object';
+	});
+}
+
 type Unit = string | number | bigint | boolean;
 const unitOf = (r: Type): Unit | undefined => r.type === 'literal' && !Array.isArray(r.value) && r.value !== null ? r.value
 	: r.type === 'range' && r.min !== undefined && r.min === r.max ? r.min : undefined;
