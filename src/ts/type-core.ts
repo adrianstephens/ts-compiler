@@ -3359,6 +3359,7 @@ export class Scope {
 
 	// `false` on a program's scope: `strictNullChecks` off, so `null`/`undefined` belong to every type. Unset inherits; the root is strict.
 	nullChecks?: boolean;
+	implicitAnyChecks?: boolean;
 	// `true` reports a name that names nothing (TS2304), value or type. Off by default: a file checked without its imports loaded
 	// names things it cannot see. Unset inherits.
 	unknownNames?: boolean;
@@ -3384,6 +3385,7 @@ export class Scope {
 	enclosingFunction(): Scope['functionKind']		{ return this.functionKind ?? this.parent?.enclosingFunction(); }
 	varScope(): Scope								{ return this.varBoundary || !this.parent ? this : this.parent.varScope(); }
 	strictNullChecks(): boolean						{ return this.nullChecks ?? this.parent?.strictNullChecks() ?? true; }
+	noImplicitAny(): boolean						{ return this.implicitAnyChecks ?? this.parent?.noImplicitAny() ?? true; }
 	reportsUnknownNames(): boolean					{ return this.unknownNames ?? this.parent?.reportsUnknownNames() ?? false; }
 
 	hitDepthLimit(fn: string): void					{ this.parent?.hitDepthLimit(fn); }

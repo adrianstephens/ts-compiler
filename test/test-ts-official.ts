@@ -8,7 +8,7 @@ import { ModuleLoader } from '../dist/ts/module-loader';
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { TS_REPO, readSource, splitTestFile, expectsErrorsSet, expectsErrors, usesUnsupportedSyntax, testOptions } from './ts-corpus';
+import { TS_REPO, readSource, splitTestFile, expectsErrorsSet, expectsErrors, usesUnsupportedSyntax, applyTestOptions } from './ts-corpus';
 
 const parser = TS.make();
 JSX.add();
@@ -37,7 +37,7 @@ async function testFile(filename: string) {
 	const source = readSource(await fs.readFile(filename));
 	const bucket = expectsErrors(errset, filename) ? 'expectErr' : 'clean';
 	// Program-wide, lib included, as in tsc -- set on the shared root, since files are checked one at a time.
-	(await lib).nullChecks = testOptions(source).strictNullChecks;
+	applyTestOptions(await lib, source);
 
 	for (const virtual of splitTestFile(source, filename)) {
 		if (!/\.tsx?$/.test(virtual.name) || virtual.name.endsWith('.d.ts'))

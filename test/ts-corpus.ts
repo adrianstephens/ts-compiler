@@ -50,11 +50,17 @@ export function splitTestFile(source: string, defaultName: string) {
 }
 
 // A test's compiler options, as `// @name: value` directives (a comma list names config variants; the first is taken).
-// `strictNullChecks` follows `@strict` unless set itself; the harness default, like tsc's, is off.
-export function testOptions(source: string): { strictNullChecks: boolean } {
+// `strictNullChecks` and `noImplicitAny` follow `@strict` unless set themselves; the harness default, like tsc's, is off.
+export function testOptions(source: string): { strictNullChecks: boolean; noImplicitAny: boolean } {
 	const opts = new Map([...source.matchAll(/^\/\/[ \t]*@(\w+)[ \t]*:[ \t]*([^\r\n,]*)/gm)].map(m => [m[1].toLowerCase(), m[2].trim().toLowerCase()]));
 	const flag = (name: string) => opts.has(name) ? opts.get(name) === 'true' : undefined;
-	return { strictNullChecks: flag('strictnullchecks') ?? flag('strict') ?? false };
+	return { strictNullChecks: flag('strictnullchecks') ?? flag('strict') ?? false, noImplicitAny: flag('noimplicitany') ?? flag('strict') ?? false };
+}
+// A test's options, set on the program's root scope (lib included), as tsc applies them program-wide.
+export function applyTestOptions(scope: { nullChecks?: boolean; implicitAnyChecks?: boolean }, source: string): void {
+	const o = testOptions(source);
+	scope.nullChecks		= o.strictNullChecks;
+	scope.implicitAnyChecks	= o.noImplicitAny;
 }
 
 export const isSource = (name: string) => /\.tsx?$/.test(name) && !name.endsWith('.d.ts');

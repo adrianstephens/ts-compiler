@@ -130,8 +130,20 @@ function resolveFnMember(t: Type, scope: Scope): TS.CallSig | undefined {
 			if (f)
 				return f;
 		}
+		return undefined;
 	}
-	return undefined;
+	// TS's getIntersectedSignatures (under noImplicitAny): several call signatures (`F & G`, overloads) contextually type as one, each
+	// parameter the union of theirs and the result their intersection; a generic or rest one gives no context.
+	const sigs = T.signaturesOf(r, 'call', scope);
+	if (sigs.length === 1)
+		return sigs[0];
+	if (sigs.length < 2 || !scope.noImplicitAny() || sigs.some(sig => sig.typeParams?.length || sig.rest))
+		return undefined;
+	return sigs.reduce((a, b) => {
+		const [long, short] = a.params.length >= b.params.length ? [a, b] : [b, a];
+		const params = long.params.map((p, i) => ({ ...p, typeAnnotation: T.combineTypes([p.typeAnnotation ?? T.ANY, short.params[i]?.typeAnnotation ?? T.UNKNOWN]) }));
+		return T.withScope(TS.FunctionType(JS.Params(params), TS.IntersectionType([a.returnType ?? T.VOID, b.returnType ?? T.VOID])), scope);
+	});
 }
 
 // TS's const context, standing in for the contextual type `inner`: a literal keeps its literal type, and an array literal is a tuple, readonly
@@ -2736,7 +2748,10 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 					return T.freeze(recurse(e.expression, constContext(expected)));
 				// The check pass types the operand so it carries a stamp (`(m as any).kind` reads `m`). Not against `anno`, which would drive a generic call's
 				// inference from the assertion (`xs.flatMap(...) as C[]`).
-				if (stamp) {
+				// A function operand takes `anno` as its context, as in TS (`(s => ...) as get<R>` types `s`): no inference rides on it.
+				if (isContextSensitive(e.expression)) {
+					recurse(e.expression, anno);
+				} else if (stamp) {
 					recurse(e.expression);
 					// What the operand is BUILT as, though not typed against: `{ type: 'array', ... } as Expr` names the union member.
 					stampContext(e.expression, anno, scope);
