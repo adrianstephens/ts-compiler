@@ -4619,6 +4619,17 @@ async function main() {
 			export function sleb(): number { return Number(get({ i: 0 })); }
 		`);
 		check('a machine-int bigint stepped in a loop', sleb(), 624485);
+		// binary-libs' `Invert(TAG_TABLE)`: a remapped mapped type keyed by `number` is an index signature, held as the dynamic object `fromEntries` builds.
+		const { inv } = await compile(`
+			const NUM = { i32: -1, i64: -2 };
+			const STORE = { i8: -8 } as const;
+			const TAG = { ...NUM, ...STORE } as const;
+			type Invert<T> = { [K in keyof T as T[K] & PropertyKey]: K };
+			function Invert<T>(x: T) { return Object.fromEntries(Object.entries(x as any).map(([k, v]) => [v, k])) as Invert<T>; }
+			const INV = Invert(TAG);
+			export function inv(): number { const v: number = -8; const name = INV[v as keyof typeof INV]; return name === 'i8' ? 1 : 0; }
+		`);
+		check('an inverted table read by a number key', inv(), 1);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };

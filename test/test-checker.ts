@@ -232,6 +232,7 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 	// TS's read of a tuple position: an optional element, or a union member too short for it, reads `undefined` too (towasm's
 	// bounds-checked read relies on it); a position a rest spread covers reads the spread's element, with no error.
 	['a union of tuples read past a shorter member is possibly undefined', 'function f(...args: [number] | [number, number]) { const q: number = args[1]; }', ['is not assignable']],
+	['a remapped key that is no literal is an index signature', 'type Invert<T> = { [K in keyof T as T[K] & PropertyKey]: K }; declare const I: Invert<{ a: number; b: number }>; const z: number = I[1];', ['is not assignable']],
 	['several call signatures contextually type a parameter as their union', 'class A { a = 1 } class B { b = 2 } type G = ((s: A) => number) & ((s: B) => string); const g: G = s => { const t: number = s; return 1 as any; };', ['is not assignable']],
 	['a callable interface contextually types a parameter', 'class A { a = 1 } interface C { (s: A): number } const k: C = s => { const t: number = s; return 1; };', ['is not assignable']],
 	['an asserted function takes the assertion as its context', 'class A { a = 1 } const h = (s => { const t: number = s; return 1; }) as (s: A) => number;', ['is not assignable']],

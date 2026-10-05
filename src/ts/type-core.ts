@@ -1457,18 +1457,29 @@ export function resolve(scope: Scope, t: Type, depth = 10, stopAtRef = false): T
 				const keys			= literalKeys(constraint);
 				if (keys) {
 					if (t.nameType) {
-						// An `as` clause: each key's OUTPUT name is `nameType` with that key substituted, which may rename it or drop it (`never`); a key that pins
-						// to no literal leaves the whole mapped type opaque.
-						const entries: TS.TypeMember[] = [];
+						// An `as` clause, as TS's resolveMappedTypeMembers: each key's OUTPUT name is `nameType` with that key substituted. A literal name is a
+						// property, a `string`/`number`/`symbol` one an index signature, `never` none; values meeting at one name union. Any other name: opaque.
+						const props = new Map<string, { values: Type[]; key: string | number }>(), indexes = new Map<string, { param: Type; values: Type[] }>();
 						for (const key of keys) {
-							const named = resolve(scope, substituteType(t.nameType, new Map([[t.keyName, Literal(key)]])), depth - 1);
-							if (named.type === 'ref' && named.name === 'never')
-								continue;
-							if (!isLiteral(named, 'string') && !isLiteral(named, 'number'))
-								return t;
-							entries.push(TS.TypeProperty(String(named.value), valueAtKey(t, Literal(key), scope), modifiersFor(key)));
+							const value = valueAtKey(t, Literal(key), scope);
+							for (const named of unionMembers(resolve(scope, substituteType(t.nameType, new Map([[t.keyName, Literal(key)]])), depth - 1), scope)) {
+								if (named.type === 'ref' && named.name === 'never')
+									continue;
+								if (isLiteral(named, 'string') || isLiteral(named, 'number')) {
+									const at = props.get(String(named.value)) ?? props.set(String(named.value), { values: [], key }).get(String(named.value))!;
+									at.values.push(value);
+								} else if (isKeyable(named)) {
+									const at = indexes.get(typeId(named)) ?? indexes.set(typeId(named), { param: named, values: [] }).get(typeId(named))!;
+									at.values.push(value);
+								} else {
+									return t;
+								}
+							}
 						}
-						return resolve(scope, TS.ObjectType(entries), depth - 1, stopAtRef);
+						return resolve(scope, TS.ObjectType([
+							...[...props].map(([name, p]) => TS.TypeProperty(name, combineTypes(p.values), modifiersFor(p.key))),
+							...[...indexes.values()].map(i => TS.TypeIndex('key', i.param, combineTypes(i.values), t.modifiers)),
+						]), depth - 1, stopAtRef);
 					}
 
 					return resolve(scope, TS.ObjectType(keys.map(property)), depth - 1, stopAtRef);
