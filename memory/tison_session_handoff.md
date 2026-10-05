@@ -23,17 +23,19 @@ runs ~2 workers here -- slower, but the machine stays usable. Ask before a full 
 ## State at 2026-10-05 (session end)
 
 Survey at `11aa1d6` gave 399/421; since then the binary-libs wasm.ts work, probed with `probe-decl.ts binary-libs/src/wasm.ts
-insertFactory` (instruments resolve `@isopodlabs/binary` to SOURCE via `assistant/sibling-paths.ts`). Fixed this session: member-less
-subclasses lost inherited members (`resolveMembers`); `instanceof` on a scalar/void left; a primitive-settled `instanceof` guard kills
-the rest of its block (`staticGuard` + `exits`); mapped-type apparent type over an array constraint; `super()` omitting optionals;
-boxed optional closure params; **function/class value IDENTITY** (user chose "identity first": one identity env per declaration,
-`Types.identityEnv`/`viewEnv`, `ensureClosureIdentity` in `===`); `x.constructor` on any + `Object` as a value; literals never laid
-out as a class. `Object.setPrototypeOf` in binary's `merge`: the user had the SOURCE changed (the re-classing line removed from binary) -- the gap vs
-JS stays OPEN, recorded in [[tison_workaround_inventory]] section D; restore the line once dynamic objects have prototype links.
-Known gaps found: a generic instantiation is its own class (statics per instantiation, so `G<number>` vs `G<string>` constructors
-differ); a literal with a method into a class-typed slot (`object literal for 'A' has unknown property`); `unknown + unknown` is
-accepted (checked `any`, a missed error); method values
-(`obj.m`) have no identity. Re-run the survey before trusting rows.
+insertFactory` (instruments resolve `@isopodlabs/binary` to SOURCE via `assistant/sibling-paths.ts`). Fixed 2026-10-05, among others:
+member-less subclasses; primitive-settled `instanceof` guards (`staticGuard` + `exits`); **function/class value IDENTITY** (user's
+choice: one identity env per declaration, `Types.identityEnv`/`viewEnv`, `ensureClosureIdentity` in `===`); `x.constructor`, `Object`
+as a value; `arr.map(Number)`; spread overload arity (TS2556); lib TextEncoder/TextDecoder, codePointAt, at, padStart/padEnd; strings
+iterate by code point; `Semantics.iterationOf` (Iterable<T> inference); primitives sealed through their boxed interface (TS2339).
+binary's `merge` lost its `setPrototypeOf` at the USER's call -- gap OPEN, see [[tison_workaround_inventory]] D.
+**Next blocker**: `Awaited<ReadType<any>>` in `after<...>` ("a function type has an unsupported return type") -- the deferred
+`any extends PromiseLike<infer R>` conditional (Checker queue below; a collapse was tried and reverted). Also a checker error at
+wasm.ts:459 (`sync.TypeT<LooseInstr[] | undefined>` vs `bin.TypeT<LooseInstr[]>`), unverified vs tsc.
+Known gaps found: a generic instantiation is its own class (statics per instantiation); a literal with a method into a class-typed
+slot (`object literal for 'A' has unknown property`); `unknown + unknown` accepted; method values (`obj.m`) have no identity;
+`[].values().next().value` types `number | TResult` (a leaked type parameter); wasm lib has no `localeCompare` (wasm-backend.ts:1931,
+needs collation). Re-run the survey before trusting rows.
 
 ## The direction since 2026-09-21 (the user's) and what it settled
 
@@ -87,11 +89,12 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
 
 ## Gates baseline (2026-10-06)
 
-corpus A/B vs `07b036e`: ERROR +25 (was +13), GAP 185 (+1 on 2026-10-05: classSideInheritance1.ts:13, a real TS2576). The +11 from index-signature checking (`b6996e0`) are 10 errors tsc ITSELF
-reports (the corpus's tsc-clean classification is stale for them -- always re-run real tsc on a new corpus error, matching by
-line-1 as well, since our positions are the NEXT token's) + 1 false positive left: reverseMappedTupleContext.ts:47 (reverse-mapped
-inference through a nested homomorphic mapped type falls back to the constraint). difftest 2232/2234. Self-check errcount:
-checker/type-core/codegen 0, wasm.ts 2, wasm-backend.ts 8. **test-towasm reads `dist`: `npm run build` before it** (lib files too).
+corpus A/B vs `07b036e`: ERROR +37, GAP 182 (2026-10-05). Classify new errors with `assistant/classify-new.sh` (real tsc at the line
+or the one before, with the file's own `@option`s). False positives left: reverseMappedTupleContext.ts:47, genericContextualTypes1.ts:34/36,
+typeParameterUsedAsTypeParameterConstraint4.ts:50 (all predate 2026-10-05's commits; reverseMapped: reverse-mapped inference
+through a nested homomorphic mapped type falls back to the constraint). The corpus's tsc-clean classification is stale for many
+files, hence the instrument. difftest 2232/2234. Self-check errcount: checker/type-core/codegen 0, wasm.ts 1, wasm-backend.ts 8
+(`self-errors.sh` also lists wasm-backend.ts:1931 `localeCompare`). **test-towasm reads `dist`: `npm run build` before it** (lib files too).
 User decisions all DONE (builder types + dynamic-object `I`; `#own:` override slots; `new Map()` contextual; class values = constructor
 closures with a per-class env tag, statics read by tag).
 **Checker queue (left):** declarations checked WIDENED (`const r: 'a' = 'b'` GAPs; flow ranges vs literals); `unique symbol`; a call on
