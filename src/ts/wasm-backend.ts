@@ -797,7 +797,7 @@ function ownBoundNames(names: string[], body: Stmt[] | Expr, selfName?: string):
 	return bound;
 }
 
-type Closure = { params: JS.Param<Type>[]; rest?: JS.Rest<Type>; body?: Stmt[] | Expr; name?: string };
+type Closure = { type?: string; params: JS.Param<Type>[]; rest?: JS.Rest<Type>; body?: Stmt[] | Expr; name?: string };
 
 // The names `body` reads that `bound` does not cover, `this` included, in first-use order. A nested closure contributes
 // what it reads from outside itself; an object literal's method reads its own `this`.
@@ -828,6 +828,24 @@ function freeIn(body: Stmt[] | Expr, bound: ReadonlySet<string> = new Set()): Se
 	return free;
 }
 
+// Whether a closure nested in `body` (an arrow, a function, a method) reads `name` from outside itself.
+function nestedReads(body: Stmt[] | Expr, name: string): boolean {
+	let found = false;
+	walkerB(
+		(s, process) => s.type === 'function_decl' ? (found ||= closureFree(s).has(name), false) : process(s),
+		(e, process) => {
+			if (e.type === 'arrow' || e.type === 'function')
+				return (found ||= closureFree(e).has(name), false);
+			if (e.type === 'object')
+				for (const p of e.properties)
+					if (p.type !== 'spread' && p.type !== 'field')
+						found ||= closureFree(p).has(name);
+			return process(e);
+		}
+	).body(body);
+	return found;
+}
+
 // What a closure reads from outside itself: its body's free names and its parameter defaults' (a default runs in the callee).
 const closureFrees = new WeakMap<Closure, Set<string>>();
 function closureFree(fn: Closure): Set<string> {
@@ -837,6 +855,9 @@ function closureFree(fn: Closure): Set<string> {
 		const bound	= ownBoundNames(paramNames(fn.params, fn.rest), body, fn.name);
 		free		= new Set([body, ...fn.params.flatMap(p => p.default ? [p.default] : [])].flatMap(b => [...freeIn(b, bound)]));
 		closureFrees.set(fn, free);
+		// A function declaration read from a closure nested in it (not a direct self-call, which `selfCall` makes) is its enclosing scope's binding.
+		if (fn.type === 'function_decl' && fn.name && nestedReads(body, fn.name))
+			free.add(fn.name);
 	}
 	return free;
 }
@@ -7174,6 +7195,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				// A bodyless declaration is one signature of a local overload group: only the bodied implementation is compiled.
 				if (!s.body)
 					return;
+				// One that reads its own name from a nested closure captures it: its holder first, filled once the closure exists.
+				if (closureFree(s).has(s.name) && !ctx.resolvesName(s.name))
+					ensureForwardHolder(ctx, s.name);
 				// A sibling created earlier already captured this name's forward holder (`ensureForwardHolder`): fill that.
 				if (ctx.lookup(s.name)?.holderInner) {
 					ctx.inScope(() => {

@@ -2879,6 +2879,20 @@ async function main() {
 	}
 
 	{
+		// A nested function read from closures nested in itself (an object literal's method, an arrow) is its enclosing scope's binding.
+		const { f: selfRef } = await compile(`
+			function factory(k: number) {
+				function make(n: number): { n: number; next(): number; again: () => number } {
+					return { n, next() { return n > 3 ? n : make(n + 1).next(); }, again: () => make(n + k).n };
+				}
+				return make;
+			}
+			export function f() { const m = factory(10)(1); return m.next() * 100 + m.again(); }
+		`);
+		check("a nested function read from its own nested closures", selfRef(), 411);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
