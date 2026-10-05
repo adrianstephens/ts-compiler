@@ -269,6 +269,8 @@ export function typeofName(t: Type, scope?: Scope): string | undefined {
 		case 'ref': {
 			if (SIMPLE_TYPES.has(r.name))
 				return r.name;
+			if (r.name === 'unique symbol')
+				return 'symbol';
 			if (r.name === 'void' || r.name === 'null')
 				return r.name === 'void' ? 'undefined' : 'object';
 			// A ref left by `resolve` names a real class: `typeof` asks about STRUCTURE, so its members are asked for, guarded so an unexpandable ref

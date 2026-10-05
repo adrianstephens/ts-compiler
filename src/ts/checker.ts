@@ -2207,6 +2207,12 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 				// A key typed as string literals (`o[k ? 'a' : 'b']`, a `const` key) reads each property it names, as TS's `T[K]`.
 				const named	= T.unionMembers(indexT, scope).map(m => T.literalString(m));
 				const keys	= named.length && named.every((k): k is string => k !== undefined) ? named : undefined;
+				// A symbol key reads the member a computed key of its path declares (`array[Symbol.iterator]`), never an element: a `unique symbol`'s
+				// identity is not modeled, so the path names it, as `memberKey` keys the declaration. Declared members only; a `symbol` index signature below.
+				const symbolKey		= T.typeofName(indexT, scope) === 'symbol' ? T.memberKey({ computed: e.index }) : undefined;
+				const symbolMember	= symbolKey && T.lookupMember(objT, symbolKey, scope, 10, true);
+				if (symbolMember)
+					return T.optional(symbolMember, absent);
 				if (objT.type === 'array')
 					return T.optional(objT.element, absent);
 				// A union of tuples and arrays reads each member's position (TS's getIndexedAccessType); a member too short or optional there reads `undefined`.

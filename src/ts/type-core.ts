@@ -2055,10 +2055,10 @@ export function lookupMember(t: Type, prop: string, scope: Scope, depth = 10, sk
 				// Both fallbacks run only when no member is named `prop`; skipped per intersection part, so one part's index signature cannot shadow another's member.
 				if (skipObjectFallback)
 					return undefined;
-				// `Object.prototype`'s members come after the index signature, so a type's own override (`toString(x?)`) wins. A NUMERIC index signature
-				// covers only a numeric-looking key (`'byteLength'` is no element of `[i: number]: u8`), and wins over a string one, as TS requires.
-				return indexSignatureFor(t.members, prop, scope)
-					?? scope.semantics.apparentMember(prop, t.members.some(m => m.type === 'call' || m.type === 'construct'), scope);
+				// The apparent members (`Object.prototype`'s) before an index signature, as TS's getPropertyOfType: `r.hasOwnProperty` on a `Record<string, V>`
+				// is the method. A NUMERIC index signature covers only a numeric-looking key (`'byteLength'` is no element of `[i: number]: u8`), and wins over a string one.
+				return scope.semantics.apparentMember(prop, t.members.some(m => m.type === 'call' || m.type === 'construct'), scope)
+					?? indexSignatureFor(t.members, prop, scope);
 			}
 			case 'function':
 			case 'constructor':
@@ -2070,17 +2070,20 @@ export function lookupMember(t: Type, prop: string, scope: Scope, depth = 10, sk
 					if (m)
 						matches.push(m);
 				}
-				// No part declares `prop` as a member: an index signature on any part covers the key, as in TS, before `Object.prototype`.
+				// No part declares `prop` as a member: `Object.prototype`'s, then an index signature on any part covers the key, as in TS.
 				if (!matches.length) {
 					if (skipObjectFallback)
 						return undefined;
+					const apparent = scope.semantics.apparentMember(prop, false, scope);
+					if (apparent)
+						return apparent;
 					for (const part of [...t.types].reverse()) {
 						const r = resolveOwn(part, scope);
 						const idx = r.type === 'object' ? indexSignatureFor(r.members, prop, scope) : undefined;
 						if (idx)
 							return idx;
 					}
-					return scope.semantics.apparentMember(prop, false, scope);
+					return undefined;
 				}
 				if (matches.length === 1)
 					return matches[0];

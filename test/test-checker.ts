@@ -486,6 +486,11 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		function* gen() { yield 1; }
 		const a: boolean = h('abc'), b: boolean = h([1, 2]), c: boolean = h(new Set(['x'])), d: boolean = h(gen());`,
 		[NOT_ASSIGNABLE('string', 'boolean'), NOT_ASSIGNABLE('number', 'boolean'), NOT_ASSIGNABLE('string', 'boolean'), NOT_ASSIGNABLE('number', 'boolean')]],
+	['Object.prototype\'s members before an index signature; a symbol key reads its member, not an element', `
+		declare const r: Record<string, string>;
+		declare const array: number[];
+		const b: string = r.hasOwnProperty('x'), c: string = r.toString(), d: number = r.other, e: boolean = array[Symbol.iterator];`,
+		[NOT_ASSIGNABLE('boolean', 'string'), NOT_ASSIGNABLE('string', 'number'), "is not assignable to type 'boolean'"]],
 ];
 
 (async () => {
