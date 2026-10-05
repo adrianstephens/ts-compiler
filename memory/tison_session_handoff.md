@@ -4,7 +4,7 @@ description: LIVE cold-start state for the wasm-backend self-hosting work -- whe
 metadata:
   node_type: memory
   type: project
-  modified: 2026-10-06
+  modified: 2026-10-05
 ---
 
 **Read this first, then [[tison_towasm_self_hosting_plan]] (distilled: instruments, traps, design invariants) only for a specific
@@ -20,15 +20,19 @@ wasm-backend.ts slice 0 peak above the 2 GB default and report CRASHED otherwise
 16 GB Mac to a halt (2026-10-01)**: the scheduler now costs every job at >= half the heap cap (V8's garbage ceiling), so 6144
 runs ~2 workers here -- slower, but the machine stays usable. Ask before a full run; `SURVEY_JOBS` caps it further.
 
-## State at 2026-10-06
+## State at 2026-10-05 (session end)
 
-Survey at `11aa1d6` gave 399/421; since then the binary-libs wasm.ts work: the instruments now resolve the bare `@isopodlabs/binary`
-to SOURCE (`assistant/sibling-paths.ts`, shared by every probe), which exposed the real binary gaps, fixed one by one (abstract
-classes; imported superclasses; class values; static fields as lazy globals; JSON lib; Awaited lib; symbol-keyed fields; index
-signatures; union of generic signatures; template-resolution fallback for generic instances; ...). Next: wasm.ts `insertFactory`/
-`WasmModule` probes stop at `RemainingRepeat<...>` "closure parameter 'v' needs an explicit number/boolean/object type";
-`binary-libs/assistant/tt.ts` (`bin.as(UINT8, ...)`) stops at `Awaited<ReadType<any>>` (the deferred any+infer conditional above).
-Re-run the survey before trusting rows.
+Survey at `11aa1d6` gave 399/421; since then the binary-libs wasm.ts work, probed with `probe-decl.ts binary-libs/src/wasm.ts
+insertFactory` (instruments resolve `@isopodlabs/binary` to SOURCE via `assistant/sibling-paths.ts`). Fixed this session: member-less
+subclasses lost inherited members (`resolveMembers`); `instanceof` on a scalar/void left; a primitive-settled `instanceof` guard kills
+the rest of its block (`staticGuard` + `exits`); mapped-type apparent type over an array constraint; `super()` omitting optionals;
+boxed optional closure params; **function/class value IDENTITY** (user chose "identity first": one identity env per declaration,
+`Types.identityEnv`/`viewEnv`, `ensureClosureIdentity` in `===`); `x.constructor` on any + `Object` as a value; literals never laid
+out as a class. **Now blocked on `Object.setPrototypeOf` in binary's `merge` (common.ts:469)** -- re-classing an object needs a
+prototype link on dynamic objects and methods callable with a dynamic `this`: a design question PUT TO THE USER (see Waiting).
+Known gaps found: a generic instantiation is its own class (statics per instantiation, so `G<number>` vs `G<string>` constructors
+differ); `arr.map(Number)` (a class value called, not constructed); a literal with a method into a class-typed slot; method values
+(`obj.m`) have no identity. Re-run the survey before trusting rows.
 
 ## The direction since 2026-09-21 (the user's) and what it settled
 
@@ -82,7 +86,7 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
 
 ## Gates baseline (2026-10-06)
 
-corpus A/B vs `07b036e`: ERROR +24 (was +13), GAP 195. The +11 from index-signature checking (`b6996e0`) are 10 errors tsc ITSELF
+corpus A/B vs `07b036e`: ERROR +25 (was +13), GAP 194 (+1 on 2026-10-05: classSideInheritance1.ts:13, a real TS2576). The +11 from index-signature checking (`b6996e0`) are 10 errors tsc ITSELF
 reports (the corpus's tsc-clean classification is stale for them -- always re-run real tsc on a new corpus error, matching by
 line-1 as well, since our positions are the NEXT token's) + 1 false positive left: reverseMappedTupleContext.ts:47 (reverse-mapped
 inference through a nested homomorphic mapped type falls back to the constraint). difftest 2232/2234. Self-check errcount:
@@ -126,6 +130,9 @@ corpus cases where an erased placeholder stood for a type parameter, so it was r
    `?` rows are static fields typed by initializer, an instrument blind spot. The "Missing" section is runtime coverage.
 
 ## Waiting on the user
+
+**`Object.setPrototypeOf` (2026-10-05).** binary's `merge(obj, value)` re-classes `obj` as `value`'s class. Options: a mutable prototype
+link on `DynamicObject` with prototype-chain dispatch (methods compiled for a dynamic `this`), or the user changes `merge`.
 
 **String cheap representation.** Done: each literal is materialized once. The data segment is PASSIVE (copy-only), so a bare `u32` offset
 cannot be a string. Options put to the user: (1) offset+length packed in an `i64` (`.length` a shift, materialize on char access);
