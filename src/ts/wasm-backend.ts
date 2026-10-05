@@ -1013,7 +1013,15 @@ const VERIFY_OPEN_SHAPES	= !!process.env.DBG_VERIFYSHAPES;
 function callOf(e: CallNode, scope: Scope): CheckedCall | undefined {
 	if (!checkedCallOf(e))
 		checkerTypeOf(e, scope);
-	return checkedCallOf(e);
+	return checkedCallOf(e) ?? templateCall(e);
+}
+// A generic body's instance is re-checked at its type arguments, which can be stricter than its template, the only form TS checks (`Object.entries`
+// of a concrete `{}` is `unknown`, of `T extends object` `any`): a call the instance cannot resolve takes its template's resolution, mapped.
+const instanceTemplate = new WeakMap<object, { node: object; map: Map<string, Type> }>();
+function templateCall(e: object): CheckedCall | undefined {
+	const t = instanceTemplate.get(e);
+	const c = t && (checkedCallOf(t.node as Expr) ?? templateCall(t.node));
+	return c && { ...c, typeArgs: c.typeArgs && new Map([...c.typeArgs].map(([k, v]) => [k, T.substituteType(v, t!.map)])) };
 }
 
 // A generic class instance's members are copies (`substituteClassTypeParam`); a signature's `origin` may name a copy or the template.
@@ -1755,10 +1763,11 @@ function substituteClassTypeParam(decl: JS.ClassDecl<Type>, map: Map<string, Typ
 
 // Applies a whole set of type-param substitutions in one walk.
 function substituteTypeParams(map: Map<string, Type>): Walker {
+	const linked = <N extends object>(from: N, to: N) => (instanceTemplate.set(to, { node: from, map }), to);
 	return walker(
 		// The checker's stamps are the TEMPLATE's, where `T` is opaque: an instance is re-checked (`instantiateDecl`, `ensureClass`), stamping afresh.
 		(s, process) => unstamped(process(s)),
-		(e, process) => unstamped(process(e)),
+		(e, process) => linked(e, unstamped(process(e))),
 		// `substituteType`, not a ref swap: it normalizes what substitution leaves (`A | B` at `never` is `A`).
 		t => T.substituteType(t, map),
 		undefined,

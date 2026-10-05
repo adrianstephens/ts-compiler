@@ -4702,6 +4702,24 @@ async function main() {
 			export function unionGeneric(): number { return h(new A()) + k(new A()); }
 		`);
 		check('a call through a union of generic methods', unionGeneric(), 2);
+		// binary's `read`: an overloaded generic recursing inside closures. An instance re-checked at concrete types can be stricter than its template,
+		// the only form TS checks (`Object.entries` of a concrete `{}` is `unknown`): a call it cannot resolve takes the template's resolution.
+		const { genericInstance } = await compile(`
+			type MaybePromise<T> = T | Promise<T>;
+			function after<V, R>(v: V, then: (value: Awaited<V>) => R): R { return then(v as Awaited<V>); }
+			interface Rd { get(s: number): number }
+			function isReader(x: any): x is Rd { return typeof x.get === 'function'; }
+			function read<T extends Rd | object>(s: number, spec: T): number;
+			function read<T extends Rd | object>(s: string, spec: T): Promise<number>;
+			function read<T extends Rd | object>(s: number | string, spec: T): MaybePromise<number>;
+			function read<T extends Rd | object>(s: any, spec: T): MaybePromise<number> {
+				if (isReader(spec))
+					return spec.get(s);
+				return after(Object.entries(spec).reduce((acc: any, [k, t]) => after(acc, () => after(read(s, t), value => acc + value)), 0), x => x);
+			}
+			export function genericInstance(): number { return read(1, { a: { get: (s: number) => s + 1 }, b: { get: (s: number) => 10 } }) as number; }
+		`);
+		check('a generic instance\'s call resolved through its template', genericInstance(), 12);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };
