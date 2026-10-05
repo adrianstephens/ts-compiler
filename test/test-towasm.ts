@@ -4727,11 +4727,15 @@ async function main() {
 		`);
 		check('a closure taking machine ints in a slot passing numbers', scalarParams(), 4);
 		// binary's `Switch`: \`(switches as any).default\` reads a key the type lacks; \`{} as X\` with no buildable layout is an empty dynamic object.
-		const { assertedAny } = await compile(`
+		const { assertedAny, emptyAsserted } = await compile(`
 			function look<T extends Record<string, number>>(switches: T, x: string): number { return switches[x] ?? (switches as any).default ?? -1; }
 			export function assertedAny(): number { return look({ a: 1 }, 'b') + look({ a: 1, default: 5 } as any, 'q') * 10; }
+			interface Phantom<T> { merge: T; correlated: true }
+			function empty<T>(): Phantom<T> { return {} as Phantom<T>; }
+			export function emptyAsserted(): number { const e: any = empty<number>(); e.k = 3; return e.k + (e.merge === undefined ? 10 : 0); }
 		`);
 		check('a member read on an object asserted any', assertedAny(), 49);
+		check('an empty literal asserted to a phantom shape', emptyAsserted(), 13);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };

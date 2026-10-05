@@ -3371,8 +3371,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		// Each member of a union context (`spec.rules ?? {}`: `Record<string, R> | {}`) a string-keyed record, or for an empty literal one with no layout.
 		const parts		= context ? T.unionMembers(T.nonNullable(context, ctx.scope), ctx.scope).map(m => T.resolve(global, m)) : [];
 		const values	= parts.flatMap(m => indexSignatureValueType(m) ?? []);
-		const value		= values.length && parts.every(m => indexSignatureValueType(m) || (!e.properties.length && namesNoLayout(m))) ? T.combineTypes(values)
-			: !e.properties.length && parts.every(namesNoLayout) ? T.ANY : undefined;
+		// An empty literal is an empty object whatever it is asserted to be (`{} as CorrelatedMerge<R>`): one whose context builds no layout is dynamic.
+		const noLayout	= (m: Type) => namesNoLayout(m) || (w => !w || W.isAny(w))(typeOf(m));
+		const value		= values.length && parts.every(m => indexSignatureValueType(m) || (!e.properties.length && noLayout(m))) ? T.combineTypes(values)
+			: !e.properties.length && parts.every(noLayout) ? T.ANY : undefined;
 		return value ? ensureClass('DynamicObject', [value]) : undefined;
 	}
 	const namesNoLayout = (t: Type) => T.isAny(t) || t.type === 'ref' && t.name === 'object' || t.type === 'object' && !t.members.length;
