@@ -7991,7 +7991,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				checkHoisted([decl], new Scope(home ?? libGlobal));
 			}
 			info = new ClassInfo(key, -1, decl, thisTsType);
-			info.declScope		= declScope;
+			// Its OWN module's scope, where its superclass and field types are named, not the scope that first referred to it.
+			info.declScope		= home ?? declScope;
 			info.homeModule		= homeModule;
 			classes.set(key, info);
 			// Known by its declaration, as a shape is: another module's same-named interface (`Predicate`) must not take this class.
@@ -9277,6 +9278,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					userGenericClassDecls.set(s.name, s);
 				} else {
 					const info = new ClassInfo(s.name, -1, s, TS.RefType(s.name));
+					info.declScope	= global;
+					info.homeModule	= '.';
 					classes.set(s.name, info);
 					const entry = moduleScopeOf('.')?.type(s.name);
 					if (entry)

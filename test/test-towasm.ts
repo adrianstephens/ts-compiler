@@ -4558,6 +4558,15 @@ async function main() {
 		`);
 		check('an abstract method dispatches to its overrides', abstractMethod(), 93);
 		check('an abstract base class with parameter properties', abstractBase(), 5);
+		// A class's superclass is named in its OWN module: `Mid` reaches `Base` through an import `main` never makes.
+		const { importedBase } = await compileMulti({
+			base:	`export abstract class Base { constructor(protected readonly o: number, protected p = 0) {} tell() { return this.p - this.o; } }`,
+			mid:	`import { Base } from './base'; export class Mid extends Base { constructor() { super(1, 3); } }`,
+			main:	`import { Mid } from './mid'; import { Base } from './base';
+				class Top extends Base { constructor() { super(2, 9); } }
+				export function importedBase(): number { return new Mid().tell() * 10 + new Top().tell(); }`,
+		}, 'main');
+		check('a superclass imported from another module', importedBase(), 27);
 	}
 
 	{
