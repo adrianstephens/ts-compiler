@@ -6240,6 +6240,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						() => neg ? ctx.emit(I.f64.neg) : (f64ToInt32(ctx), ctx.emit(I.i32(-1), I.i32.xor, I.f64.convert_i32_s)));
 					return info.wtype;
 				}
+				// `+x` on anything else (`string | number`, an object) is ToNumber, which is `Number(x)`.
+				if (e.operator === '+')
+					return emitExpr(lowering(ctx).check(JS.Call(Identifier('Number'), [e.operand])), ctx, want);
 				throw `unsupported unary operator '${e.operator}'`;
 			}
 

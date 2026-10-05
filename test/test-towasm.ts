@@ -4639,6 +4639,11 @@ async function main() {
 			export function sym(): number { const c = Const(7); return c.get(0) + (constOf(c) === 7 ? 10 : 0) + (constOf({ get: 1 }) === undefined ? 100 : 0); }
 		`);
 		check('a symbol-keyed property', sym(), 117);
+		const { up } = await compile(`
+			function toN(x: number | string): number { return +x; }
+			export function up(): number { return toN('12') + toN(3) * 100 + (toN('x') !== toN('x') ? 1000 : 0) + (+true) * 10000; }
+		`);
+		check('unary + on a string or number union is ToNumber', up(), 11312);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };
