@@ -9606,7 +9606,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// Whether a `got` value converts to `want` physically. `any` on either side boxes or casts; two structs only upcast; closures by the wrapper's own rule.
 	function fits(got: W.Type, want: W.Type): boolean {
 		const kind			= (w: W.Type) => typeof w === 'string' ? 'scalar' : 'closure' in w ? 'closure' : 'arr' in w ? `arr:${w.arr}` : 'ref';
-		const closureFits	= (g: FuncSig, p: FuncSig): boolean => g.params.length <= p.params.length && !!g.hasRest === !!p.hasRest && g.params.every((x, i) => fits(p.params[i], x));
+		// Results too, as the wrapper converts one: a `void` slot discards any, a `void` callback gives `undefined` (only a nullable or `any` slot's).
+		const resultFits	= (g: W.Type, p: W.Type) => p === 'void' || (g === 'void' ? W.isNullable(p) || W.isAny(p) : fits(g, p));
+		const closureFits	= (g: FuncSig, p: FuncSig): boolean => g.params.length <= p.params.length && !!g.hasRest === !!p.hasRest && g.params.every((x, i) => fits(p.params[i], x))
+			&& resultFits(g.result, p.result);
 		return got !== 'void' && want !== 'void' && (W.typeEq(got, want) || W.isAny(got) || W.isAny(want)
 			|| (kind(got) === kind(want) && (kind(got) === 'scalar' || kind(got).startsWith('arr')
 				|| (W.isClosure(got) && W.isClosure(want) && closureFits(got.closure, want.closure))

@@ -2976,6 +2976,16 @@ async function main() {
 	}
 
 	{
+		const { closureResultFit } = await compile(`
+			const find = (p: (x: number, i: number, a: any) => boolean) => p(4, 1, null) ? 1 : 0;
+			const later = async (x: any, y: any) => 5;
+			const fns: any[] = [(cb: any) => 7, find];
+			export function closureResultFit() { return (fns[0](later) as number) + (fns[1]((x: number) => x > 3) as number) * 10; }
+		`);
+		check("a closure argument fits a closure parameter only if its result converts too", closureResultFit(), 17);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
