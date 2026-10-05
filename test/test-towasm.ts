@@ -4582,6 +4582,11 @@ async function main() {
 			export function keyedElement(): number { const a: any = [5, 6]; const s: any = 'xy'; return a['1'] + (s['0'] === 'x' ? 10 : 0) + (a['01'] === undefined ? 100 : 0); }
 		`);
 		check('an array index key reads the element through any', keyedElement(), 116);
+		const { narrowedCall } = await compile(`
+			class H { constructor(readonly f?: (n: number) => number) {} run(): number { return this.f ? this.f.call(this, 2) : -1; } }
+			export function narrowedCall(): number { return new H(n => n * 3).run() + new H().run() * 10; }
+		`);
+		check('.call on a field narrowed to non-null', narrowedCall(), -4);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };

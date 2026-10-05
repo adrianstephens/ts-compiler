@@ -5528,7 +5528,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// `f.call(t, ...args)`: `f` with `t` as its `this` -- a method value's `envThis` refilled -- then called as `f(...args)`.
 	function emitFunctionCallMethod(fn: Expr, [thisArg, ...args]: Expr[], ctx: FunctionContext, want?: W.Type): W.Type {
-		const w			= emitExpr(fn, ctx);
+		// As narrowed: `if (this.f) this.f.call(...)` calls a field stored nullable.
+		const narrowed	= typeOf(ctx.narrowedTypeOf(fn));
+		const w			= W.isClosure(narrowed) ? emitAs(fn, ctx, narrowed) : emitExpr(fn, ctx);
 		const closure	= W.isClosure(w) && !w.nullable;
 		if (!closure && !W.isAny(w))
 			throw `'.call' needs a function value, got '${W.typeKey(w)}'`;
