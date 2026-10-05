@@ -726,11 +726,25 @@ function rewriteOnce<X extends object, P, R>(on: (x: X, process: P, recurse: R) 
 
 // `t` (a written cast's type) with each `typeof` naming a function's local replaced by that local's type: an inferred return built from it
 // outlives the names (`group`'s `as (keyof typeof inv)[]`), and a query would hide from substitution the type parameters it mentions.
-export function expandLocalQueries(t: Type, scope: Scope): Type {
-	const local = (s: Scope | undefined): boolean => !!s && (!!s.functionKind || local(s.parent));
+// So is a type alias declared in a function body (`type R = ...` in `Optional`): its body, in which the function's own type parameters are still
+// names, so the caller's instantiation reaches them, as TS instantiates a local type with the outer mapper.
+export function expandLocalQueries(t: Type, scope: Scope, seen = new Set<TypeEntry>()): Type {
+	const local		= (s: Scope | undefined): boolean => !!s && (!!s.functionKind || local(s.parent));
+	const alias		= (name: string, sc: Scope) => (d => (e => d && local(d) && e && !e.isTypeParam && !seen.has(e) ? { d, e } : undefined)(d?.type(name)))(sc.typeDeclaring(name));
 	return walker(undefined, undefined, rewriteOnce((x: Type, process: <T extends Type>(x: T) => T) => {
-		if (!refNames(x).has(QUERY))
+		const names = refNames(x);
+		if (!names.has(QUERY) && ![...names].some(n => n !== INDEXED && alias(n, scope)))
 			return x;
+		if (x.type === 'ref') {
+			const sc = declScopeOf(x, scope), a = alias(x.name, sc);
+			if (!a)
+				return process(x);
+			// Its other names resolve where it was declared; the function's type parameters stay free for the caller's substitution.
+			const params	= new Set([...refNames(a.e.type)].filter(n => a.d.type(n)?.isTypeParam));
+			const stamped	= stampScope(a.e.type, a.d, params);
+			const body		= a.e.typeParams?.length ? substituteType(stamped, new Map(a.e.typeParams.map((p, i) => [p.name, x.typeArgs?.[i] ?? p.default ?? ANY]))) : stamped;
+			return expandLocalQueries(body, a.d, new Set([...seen, a.e]));
+		}
 		if (x.type !== 'typeof')
 			return process(x);
 		const sc = declScopeOf(x, scope);
@@ -3434,6 +3448,7 @@ export class Scope {
 	namespace(name: string): Scope | undefined		{ return this.namespaces?.get(name) ?? this.parent?.namespace(name); }
 	decl(name: string): TS.Stmt | undefined	{ return this.decls?.get(name) ?? this.parent?.decl(name); }
 	declaring(name: string): Scope | undefined	{ return this.values.has(name) || this.lazyValues?.has(name) || this.namespaces?.has(name) ? this : this.parent?.declaring(name); }
+	typeDeclaring(name: string): Scope | undefined	{ return this.types.has(name) ? this : this.parent?.typeDeclaring(name); }
 
 	// A resolved structural type that is EXACTLY some declared type's registered shape (`infer R` bound to a class's instance type with no name
 	// attached), matched by reference up the chain of each scope's own type map.
