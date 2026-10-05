@@ -4676,6 +4676,15 @@ async function main() {
 			export function fnIntersection(): number { return o.g(3); }
 		`);
 		check('an intersection of function types is one closure', fnIntersection(), 3);
+		// binary's `as`: inside a generic instance's closure the predicate's narrowing is not stamped; \`new\` on the union takes its constructible members.
+		const { unionNew } = await compile(`
+			type adapter<T, D> = (new (x: T) => D) | ((x: T) => D);
+			function isCtor<T, D>(m: adapter<T, D>): m is new (x: T) => D { return m.prototype?.constructor.name; }
+			function mk<D>(m: adapter<number, D>): D { const make = isCtor(m) ? (x: number) => new m(x) : (x: number) => m(x); return make(4); }
+			class K { constructor(readonly v: number) {} }
+			export function unionNew(): number { return mk(K).v * 10 + mk(x => ({ v: x + 1 })).v; }
+		`);
+		check('new on a union of a class and a function', unionNew(), 45);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };

@@ -4270,8 +4270,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const cls		= target && ensureClass(target.name, newTypeArgs(target.name, e.typeArgs, e, ctx, want), target.scope);
 			if (cls)
 				return { kind: 'construct', cls, label: target.name, lowered: false };
-			// A class held as a value: its constructing closure.
-			const wtype = constructorWtype(ctx.narrowedTypeOf(callee));
+			// A class held as a value: its constructing closure. Of a union (`adapter`: a class or a function), the members `new` can construct.
+			const calleeT	= ctx.narrowedTypeOf(callee);
+			const wtype		= constructorWtype(calleeT)
+				?? (cs => cs.length ? sigsWtype(cs) : undefined)(T.unionMembers(calleeT, ctx.scope).flatMap(m => T.constructSignatures(m, global)));
 			if (!wtype)
 				throw `'new' is only supported for a known class`;
 			return { kind: 'closure', wtype, optional: false };
