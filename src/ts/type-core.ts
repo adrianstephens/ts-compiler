@@ -1032,7 +1032,7 @@ export function isClassRef(t: Type, scope: Scope): boolean {
 	if (t.type !== 'ref' || INTRINSIC_TYPES.has(t.name))
 		return false;
 	const [ns, name] = declScopeOf(t, scope).qualified(t.name);
-	return ns?.decl(name)?.type === 'class_decl';
+	return !!ns?.classDecl(name);
 }
 
 // Whether `t` derives from a genuinely uninstantiated type parameter (none registered in `scope`); `indexed_access` asks its inner positions.
@@ -3446,6 +3446,13 @@ export class Scope {
 	hasSources(): boolean							{ return !!this.sources || !!this.parent?.hasSources(); }
 	namespace(name: string): Scope | undefined		{ return this.namespaces?.get(name) ?? this.parent?.namespace(name); }
 	decl(name: string): TS.Stmt | undefined	{ return this.decls?.get(name) ?? this.parent?.decl(name); }
+	// The declaration that comes with the name's nearest binding, never one further out that binding hides (an interface over a lib class).
+	boundDecl(name: string): TS.Stmt | undefined		{ return this.decls?.get(name) ?? (this.values.has(name) || this.types.has(name) ? undefined : this.parent?.boundDecl(name)); }
+	// The class `name` names as a TYPE here: a nearer scope's type of that name that is no class (an imported interface) shadows a class further out.
+	classDecl(name: string): TS.Class | undefined {
+		const d = this.decls?.get(name);
+		return d?.type === 'class_decl' ? d : this.types.has(name) ? undefined : this.parent?.classDecl(name);
+	}
 	declaring(name: string): Scope | undefined	{ return this.values.has(name) || this.lazyValues?.has(name) || this.namespaces?.has(name) ? this : this.parent?.declaring(name); }
 	typeDeclaring(name: string): Scope | undefined	{ return this.types.has(name) ? this : this.parent?.typeDeclaring(name); }
 
@@ -3613,7 +3620,7 @@ export class Scope {
 			const ns = from.namespace(local);
 			if (ns)
 				this.addNamespace(pub, ns);
-			const d = from.decl(local);
+			const d = from.boundDecl(local);
 			if (d)
 				this.addDecl(pub, d);
 			const dr = from.declarator(local);

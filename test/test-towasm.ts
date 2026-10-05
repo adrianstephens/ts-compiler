@@ -4660,6 +4660,15 @@ async function main() {
 			export function u8(): number { const b = new ArrayBuffer(8); return view(b, 8) + view(b, 2, Uint32Array) * 100; }
 		`);
 		check('a typed-array class as a value', u8(), 2481);
+		// binary's own `TypedArray` interface, imported: it shadows the lib's class of that name as a type, while `Uint8Array` still means the lib's.
+		const { shadowedLib } = await compileMulti({
+			lib2:	`export interface TypedArray<R = any> { readonly length: number; [n: number]: R }
+				export type put<T> = ((s: number, v: T) => number) & ((s: string, v: T) => number);`,
+			main:	`import { TypedArray, put } from './lib2';
+				const p = ((s: number | string, v) => v.length + v[0]) as put<TypedArray>;
+				export function shadowedLib(): number { return p(0, new Uint8Array([3, 4])) * 10 + p(1, [5, 6]); }`,
+		}, 'main');
+		check('an imported interface shadows a lib class of its name', shadowedLib(), 57);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };

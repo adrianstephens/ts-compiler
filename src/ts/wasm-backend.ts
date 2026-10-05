@@ -4260,7 +4260,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const callee = e.callee;
 		if (e.type === 'new') {
 			// A plain identifier naming a lib class (`Map`) has no `Scope.decl` for `classRefTarget` to follow.
-			const target	= classRefTarget(callee, ctx.scope) ?? (callee.type === 'identifier' && !ctx.resolvesName(callee.name) ? { name: callee.name, scope: ctx.scope } : undefined);
+			const target	= classTargetOf(callee, ctx);
 			const cls		= target && ensureClass(target.name, newTypeArgs(target.name, e.typeArgs, e, ctx, want), target.scope);
 			if (cls)
 				return { kind: 'construct', cls, label: target.name, lowered: false };
@@ -5416,10 +5416,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// (`(env, ...params)`). One shared zero-capture trampoline per function forwards to it.
 	// A class named in a value position (not `new C`, `C.x` or `instanceof C`): the class it names.
 	function classValueOf(e: Expr & { type: 'identifier' }, ctx: FunctionContext): ClassInfo | undefined {
-		// A lib class, by its declaration or a lib alias to one (`Uint8Array` is `TypedArray<u8>`).
-		const target = classRefTarget(e, ctx.scope) ?? (!ctx.resolvesName(e.name) && (LIB_DECL_MAP.get(e.name)?.type === 'class_decl' || resolveClassAlias(e.name))
-			? { name: e.name, scope: ctx.scope } : undefined);
+		const target = classTargetOf(e, ctx);
 		return target && ensureClass(target.name, undefined, target.scope);
+	}
+	// The class an expression names: a declared one, or a lib class by its declaration or a lib alias to one (`Uint8Array` is `TypedArray<u8>`),
+	// unless a local shadows the name. The lib's own `var Uint8Array` is that class, so a value of the name does not shadow it.
+	function classTargetOf(e: Expr, ctx: FunctionContext): { name: string; scope: Scope } | undefined {
+		return classRefTarget(e, ctx.scope) ?? (e.type === 'identifier' && !ctx.lookup(e.name) && isLibName(e.name, ctx.scope) && (LIB_DECL_MAP.get(e.name)?.type === 'class_decl' || resolveClassAlias(e.name))
+			? { name: e.name, scope: ctx.scope } : undefined);
 	}
 
 	// Each class held as a value, by its env's tag: an empty `envBase` subtype per class, which the constructing code ignores.
@@ -7772,7 +7776,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// A bare type-alias name (`declare type Uint8Array = TypedArray<u8>`) to its generic target, instantiated the ordinary way (`ensureClass`).
 	function resolveClassAlias(name: string): { name: string; typeArgs: Type[] } | undefined {
-		const target = libGlobal.type(name)?.type;
+		const target = libRoot.type(name)?.type;
 		return target?.type === 'ref' && target.typeArgs?.length && LIB_DECL_MAP.get(target.name)?.type === 'class_decl'
 			? { name: target.name, typeArgs: target.typeArgs }
 			: undefined;
@@ -8139,7 +8143,16 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		return layoutTwin(info, key);
 	}
 
-	const classDeclOf = (name: string, declScope?: Scope) => LIB_DECL_MAP.get(name) ?? userGenericClassDecls.get(name) ?? declScope?.decl(name);
+	// As the reference's own scope sees `name`: a module's own type of that name (binary's imported `TypedArray` interface) shadows the lib's class.
+	// An unstamped reference is the entry module's. `libRoot`: the lib's own scope, where no module's type can shadow its classes.
+	const libRoot		= (s => { while (s.parent) s = s.parent; return s; })(global);
+	const isLibName		= (name: string, declScope: Scope = global) => declScope.lookupType(name) === libRoot.lookupType(name);
+	const classDeclOf	= (name: string, declScope: Scope = global) => {
+		const own = declScope.decl(name);
+		if (own && own !== libRoot.decl(name))
+			return own;
+		return !isLibName(name, declScope) ? undefined : own ?? LIB_DECL_MAP.get(name) ?? userGenericClassDecls.get(name);
+	};
 
 	// Resolves fields and the struct type eagerly, but only collects method/ctor decls: each is built by `ensureMethod`/`ensureCtor` on demand.
 	function ensureClass(name: string, typeArgs?: Type[], declScope?: Scope): ClassInfo | undefined {
@@ -8165,9 +8178,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			if (decl?.type !== 'class_decl') {
 				// `resolveClassAlias` covers only a lib alias to a real class; a generic interface or alias goes to `ensureObjectShape`.
 				if (!typeArgs?.length) {
-					const alias = resolveClassAlias(name);
+					// A lib alias names the LIB's class, whatever the referring module calls its own types; one the module shadows is not it.
+					const alias = isLibName(name, declScope) ? resolveClassAlias(name) : undefined;
 					if (alias)
-						return ensureClass(alias.name, alias.typeArgs, declScope);
+						return ensureClass(alias.name, alias.typeArgs, libRoot);
 				}
 				// Before the structural fallback, which would cache a method-less stand-in for a class aliased by a const under this name.
 				// `?? global`: a bare ref often carries no `declScope`, and the alias is a top-level declaration.
