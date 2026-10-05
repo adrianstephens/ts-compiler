@@ -45,6 +45,11 @@ export function stringTemplate(strings: string[], ...values: any[]): string {
 	return result;
 }
 
+function* codePoints(s: String): Generator<string, void, unknown> {
+	for (let i = 0; i < s.length; i += s._codePointLength(i))
+		yield s._codePointString(i);
+}
+
 export class String {
 	get length(): u32 { return __asm<[], u32>('array.len')(); }
 
@@ -110,6 +115,30 @@ export class String {
 
 	// Out of range is `''`, not a trap -- so this cannot be the bare `array.get_u`/`array.new_fixed` pair
 	// it used to be. `charCodeAt` stays raw: every caller in this file guards its own index.
+	charAt(pos: i32): string {
+		return pos < 0 || pos >= this.length ? '' : String.fromCharCode(this.charCodeAt(pos));
+	}
+	// A surrogate pair's code point, else the code unit itself (a lone surrogate too); out of range, `undefined`.
+	codePointAt(pos: i32): number | undefined {
+		if (pos < 0 || pos >= this.length)
+			return undefined;
+		const c = this.charCodeAt(pos);
+		const d = c >= 0xd800 && c <= 0xdbff && pos + 1 < this.length ? this.charCodeAt(pos + 1) : 0;
+		return d >= 0xdc00 && d <= 0xdfff ? 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00) : c;
+	}
+	// The code units the code point at `i` spans: 2 for a surrogate pair, else 1.
+	_codePointLength(i: i32): i32 {
+		const c = this.charCodeAt(i);
+		return c >= 0xd800 && c <= 0xdbff && i + 1 < this.length && (this.charCodeAt(i + 1) & 0xfc00) === 0xdc00 ? 2 : 1;
+	}
+	// The code point at `i` as a string, one element of iterating this one.
+	_codePointString(i: i32): string {
+		return this.substring(i, i + this._codePointLength(i));
+	}
+	// By code point, as JS iterates a string: a surrogate pair is one element.
+	[Symbol.iterator](): Generator<string, void, unknown> {
+		return codePoints(this);
+	}
 	// The array index this string names (`"12"`, not `"012"`), as JS's CanonicalNumericIndexString below 2^32 - 1; else -1.
 	_arrayIndex(): number {
 		const n = this.length;
@@ -123,9 +152,6 @@ export class String {
 			v = v * 10 + d;
 		}
 		return v < 4294967295 ? v : -1;
-	}
-	charAt(pos: i32): string {
-		return pos < 0 || pos >= this.length ? '' : String.fromCharCode(this.charCodeAt(pos));
 	}
 	// `s[i]`. Was its own asm pair that read with `array.get` (illegal on a packed `i16` array -- V8
 	// rejected the whole module) and then wrote through `$this`, i.e. into the receiver rather than the

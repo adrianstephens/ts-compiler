@@ -2721,6 +2721,18 @@ async function main() {
 	}
 
 	{
+		const { cpAt, cpIter } = await compile(`
+			export function cpAt(): number {
+				const s = 'a\u{1f600}\ud800';
+				return (s.codePointAt(0) ?? 0) + (s.codePointAt(1) ?? 0) * 10 + (s.codePointAt(2) ?? 0) * 1000000 + (s.codePointAt(3) ?? 0) + (s.codePointAt(4) === undefined ? 7 : 0);
+			}
+			export function cpIter(): number { let n = 0; for (const c of 'a\u{1f600}b') n = n * 10 + c.length; return n * 10 + [...'a\u{1f600}\ud800b'].length; }
+		`);
+		check("codePointAt: a pair's code point, a lone surrogate's unit, undefined past the end", cpAt(), 56833340520);
+		check("a string iterates by code point: for...of and spread", cpIter(), 1214);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {

@@ -508,8 +508,8 @@ export function drainIterator(iterator: TS.Expr, it: T.IterationTypes, scope: Sc
 }
 
 // `for (v of xs) body` as plain loops: by the iteration protocol where codegen iterates by it (`it`: what iterating yields), else by
-// position. `temp` names a fresh hidden binding.
-export function lowerForOf(s: ForOf, it: T.IterationTypes | undefined, scope: Scope, temp: (role: string) => string): Stmt {
+// position, a string's (`byCodePoint`) a code point at a time as its iterator yields. `temp` names a fresh hidden binding.
+export function lowerForOf(s: ForOf, it: T.IterationTypes | undefined, scope: Scope, temp: (role: string) => string, byCodePoint = false): Stmt {
 	if (s.init.type !== 'var_decl' || s.init.declarations.length !== 1)
 		throw "'for...of' loop variable must be a single declaration";
 	const v		= s.init.declarations[0], kind = s.init.kind;
@@ -524,9 +524,11 @@ export function lowerForOf(s: ForOf, it: T.IterationTypes | undefined, scope: Sc
 		);
 	}
 	const arr = use(temp('arr')), i = use(temp('i'));
+	const step = byCodePoint ? Assign<TS.Expr, never>(i(), JS.JSBinary('+', i(), JS.Call(JS.Member(arr(), '_codePointLength'), [i()]))) : JS.JSUnary('++', i());
 	return JS.Block<Stmt>(
 		JS.VarDecl('const', JS.Var(arr().name, s.right)),
-		JS.For(JS.VarDecl('let', JS.Var(i().name, Literal(0))), JS.JSBinary('<', i(), JS.Member(arr(), 'length')), JS.JSUnary('++', i()), bind(JS.Index(arr(), i()))),
+		JS.For(JS.VarDecl('let', JS.Var(i().name, Literal(0))), JS.JSBinary('<', i(), JS.Member(arr(), 'length')), step,
+			bind(byCodePoint ? JS.Call(JS.Member(arr(), '_codePointString'), [i()]) : JS.Index(arr(), i()))),
 	);
 }
 

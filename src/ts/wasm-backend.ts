@@ -7025,7 +7025,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					case  'of': {
 						// An array is read by position; anything else with `[Symbol.iterator]()` by the protocol, as JS iterates every iterable.
 						const n			= ctx.tempCounter++;
-						const lowered	= lowerForOf(s, iteratesByProtocol(s.right, ctx), ctx.scope, role => `#for${n}$${role}`);
+						// A string by position too, stepping a code point at a time: what its iterator yields, without one.
+						const string	= T.typeofName(ctx.narrowedTypeOf(s.right), ctx.scope) === 'string';
+						const lowered	= lowerForOf(s, string ? undefined : iteratesByProtocol(s.right, ctx), ctx.scope, role => `#for${n}$${role}`, string);
 						checkSynthesized([lowered], new Scope((s as { scope?: Scope }).scope ?? ctx.scope));
 						emitStmt(lowered, ctx);
 						return;
