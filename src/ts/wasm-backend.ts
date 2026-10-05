@@ -5,7 +5,7 @@ import * as JS from './js-parser';
 import * as T from './type-utils';
 import * as W from '../wasm/codegen';
 import { Literal, Identifier, Binary, Assign, hasMod, Module as CModule } from '@isopodlabs/tison/ast';
-import { checkHoisted, checkImported, superClassRef, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, restampFlow, checkedTypeOf, expectedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr, checkMethodInstance } from './checker';
+import { type Contextual, checkHoisted, checkImported, superClassRef, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, restampFlow, checkedTypeOf, expectedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr, checkMethodInstance } from './checker';
 import { Walker, walker, walkerB } from './walker';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
 import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
@@ -1769,6 +1769,14 @@ function substituteTypeParams(map: Map<string, Type>): Walker {
 // stamps its types ON the node, so two instances sharing one would each read the other's.
 function unstamped<N extends object>(built: N): N {
 	const { scope, checkedType, checkedCall, flowSlot, expectedType, ...rest } = built as N & { scope?: unknown; checkedType?: unknown; checkedCall?: unknown; flowSlot?: unknown; expectedType?: unknown };
+	// A closure's parameter types (and type parameters) its TEMPLATE context wrote: the instance's own context writes them anew.
+	const fn = rest as { params?: (JS.Param<Type> & Contextual)[]; typeParams?: unknown } & Contextual;
+	if (fn.params?.some(p => p.contextual))
+		fn.params = fn.params.map(({ typeAnnotation, contextual, ...p }) => contextual ? p : { ...p, typeAnnotation });
+	if (fn.contextual) {
+		delete fn.typeParams;
+		delete fn.contextual;
+	}
 	// A declarator is no node of its own: its binding's hull (`flowType`) is the template's too.
 	const decl = rest as { type?: unknown; declarations?: JS.Var<Type>[] };
 	if (decl.type === 'var_decl')

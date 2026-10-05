@@ -281,6 +281,9 @@ function candidateFits(c: TS.CallSig, args: Expr[], scope: Scope, typeArgs?: Typ
 
 // Contextual parameter typing: fills an unannotated callback's params from `expected`'s, mutating the AST before its body is checked.
 // Returns the contextual signature, whose RETURN type the body needs too (`xs.map(x => [a, b])` against `[K, V][]`).
+// What `applyContextualParams` wrote is its context's, not source: an instance of a generic body (codegen's `substituteTypeParams`) drops it and re-derives.
+export type Contextual = { contextual?: true };
+
 function applyContextualParams(fn: { params: JS.Param<Type>[]; typeParams?: TS.TypeParam[] }, expected: Type | undefined, scope: Scope) {
 	const params	= fn.params;
 	// TS's isAritySmaller: a signature with fewer parameters than the callback REQUIRES gives it no context at all -- an overload
@@ -302,13 +305,17 @@ function applyContextualParams(fn: { params: JS.Param<Type>[]; typeParams?: TS.T
 		const adopt = !!sig.typeParams?.length && !fn.typeParams?.length && params.some(p => !p.typeAnnotation);
 		if (adopt) {
 			written(fn, 'typeParams');
+			written(fn as Contextual, 'contextual');
 			fn.typeParams = sig.typeParams;
+			(fn as Contextual).contextual = true;
 		}
 		// Stamped where it is written: a name the context spells unqualified (`put<TypedArray>`) is this module's, wherever the type is read later.
 		params.forEach((p, j) => {
 			if (!p.typeAnnotation) {
 				written(p, 'typeAnnotation');
+				written(p as Contextual, 'contextual');
 				p.typeAnnotation = (t => t && T.stampScope(t, scope))(contextual(sig.params[j]) ?? restElem);
+				(p as Contextual).contextual = true;
 			}
 		});
 	}
@@ -2764,8 +2771,8 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 					return T.freeze(recurse(e.expression, constContext(expected)));
 				// The check pass types the operand so it carries a stamp (`(m as any).kind` reads `m`). Not against `anno`, which would drive a generic call's
 				// inference from the assertion (`xs.flatMap(...) as C[]`).
-				// A function operand takes `anno` as its context, as in TS (`(s => ...) as get<R>` types `s`): no inference rides on it.
-				if (isContextSensitive(e.expression)) {
+				// A function or literal operand takes `anno` as its context, as in TS (`(s => ...) as get<R>`, `{ get: s => t } as TypeT<T>`): no inference rides on it.
+				if (isContextSensitive(e.expression) || e.expression.type === 'object' || e.expression.type === 'array') {
 					recurse(e.expression, anno);
 				} else if (stamp) {
 					recurse(e.expression);
