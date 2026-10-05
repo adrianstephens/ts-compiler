@@ -28,10 +28,12 @@ member-less subclasses; primitive-settled `instanceof` guards (`staticGuard` + `
 choice: one identity env per declaration, `Types.identityEnv`/`viewEnv`, `ensureClosureIdentity` in `===`); `x.constructor`, `Object`
 as a value; `arr.map(Number)`; spread overload arity (TS2556); lib TextEncoder/TextDecoder, codePointAt, at, padStart/padEnd; strings
 iterate by code point; `Semantics.iterationOf` (Iterable<T> inference); primitives sealed through their boxed interface (TS2339).
-binary's `merge` lost its `setPrototypeOf` at the USER's call -- gap OPEN, see [[tison_workaround_inventory]] D.
-**Next blocker**: `Awaited<ReadType<any>>` in `after<...>` ("a function type has an unsupported return type") -- the deferred
-`any extends PromiseLike<infer R>` conditional (Checker queue below; a collapse was tried and reverted). Also a checker error at
-wasm.ts:459 (`sync.TypeT<LooseInstr[] | undefined>` vs `bin.TypeT<LooseInstr[]>`), unverified vs tsc.
+binary's `merge` now returns the class instance in the record's place (no `setPrototypeOf`; class instances hold undeclared keys in `#ext`)
+-- see [[tison_workaround_inventory]] D.
+Fixed since: the overload-trial undo (wasm.ts:459 FP), deferred conditionals represented by their branches. **Next blocker**:
+binary's `typedArray.as` instantiates the lib's `TypedArray<any>` (elemSize switch has no `$ref` arm) -- binary's own
+`TypedArrayConstructor<any>` returns binary's `TypedArray` INTERFACE, apparently resolved to the lib class. Probe with
+`SNAP=<snapshot> probe-decl.ts <snapshot>/binary-libs/src/wasm.ts insertFactory` (snapshot = committed sources).
 Known gaps found: a generic instantiation is its own class (statics per instantiation); a literal with a method into a class-typed
 slot (`object literal for 'A' has unknown property`); `unknown + unknown` accepted; method values (`obj.m`) have no identity;
 `[].values().next().value` types `number | TResult` (a leaked type parameter); wasm lib has no `localeCompare` (wasm-backend.ts:1931,

@@ -100,16 +100,12 @@ OPEN:
   fails at codegen ("'new' is only supported for a known class") and, in a module-level const, blocks EVERY declaration in the file --
   `grep -E "^(const|let) .*new [A-Z]"` finds it in seconds (it was `WeakSet`/`SyntaxError`, 56 declarations). An ambient `declare var Map`
   would merge as an intersection whose class `constructor` part picks first -- needs an ambient-first rule for class+var merges.
-- **SOURCE CHANGED, gap left open (user's call, 2026-10-05, binary `HEAD` "merge(): copy fields only")**: binary's `merge(obj, value)`
-  (common.ts) did `Object.setPrototypeOf(obj, value.constructor.prototype)`, re-classing a plain object as `value`'s class. towasm cannot:
-  a struct's class is fixed. The line was REMOVED from binary for expedience, so binary no longer behaves as it did under node. Proper fix:
-  a mutable prototype link on `DynamicObject` (plain `{}`s), with prototype-chain dispatch for methods, `instanceof` and `.constructor`,
-  which needs class methods compiled for a dynamic `this`. Restore the line in binary once that exists. The user says the result
-  MUST inherit the class's methods; no case is known yet (binary-libs has none; maybe fonts/bitmaps/archives). A/B 2026-10-05: their tests
-  give byte-identical output with and without the line, but only testfont, test_dds and test_7z actually run (quadratic: missing export;
-  test_psd: unhandled rejection; tar/zip: missing fixtures, Windows paths). Without identity it is feasible: `merge` returns `value`
-  augmented with `obj`'s other fields, readers use `s.obj = merge(...)`, and class instances get an `#ext` map (as closures have) for
-  the undeclared fields, `C & {fields}` held as `C`. Deferred until a real case is found (user, 2026-10-05). Related, also open: a generic
+- **binary's `merge` re-classing, RESOLVED 2026-10-05.** It did `Object.setPrototypeOf(obj, value.constructor.prototype)`, and
+  binary-bitmaps' jpeg needs it: the SOF segment, a bin.Class read through a Switch, must keep its getters. User's choice (over
+  prototype links): no object identity. `merge` returns the class instance with the record's other fields, the readers keep `s.obj`
+  current, and the backend lets class instances hold undeclared keys in `#ext` (`anyStruct` when a run-time-keyed write's receiver is
+  untraceable). Test: binary-bitmaps/test/test_jpeg.ts. Left: lib class instances get no `#ext`; a record key naming a prototype
+  getter is dropped rather than shadowing it. Related, also open: a generic
   instantiation is its own class (statics per `ClassInfo`), so a user generic's instances have different `.constructor`s; method values
   (`obj.m`) have no identity; a dynamic `A.prototype` read builds a fresh object each time.
 
