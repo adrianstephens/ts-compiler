@@ -232,6 +232,7 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 	// TS's read of a tuple position: an optional element, or a union member too short for it, reads `undefined` too (towasm's
 	// bounds-checked read relies on it); a position a rest spread covers reads the spread's element, with no error.
 	['a union of tuples read past a shorter member is possibly undefined', 'function f(...args: [number] | [number, number]) { const q: number = args[1]; }', ['is not assignable']],
+	['a string indexed by a number reads its index signature', 'function g(t: string, n: number) { const a: number = t[n]; let i = 0; i++; const b: number = t[i]; }', ['is not assignable', 'is not assignable']],
 	['a type predicate returns a boolean', 'function f(x: any): x is string { return 1; } function g(x: any): x is string { return x.length; }', ['is not assignable']],
 	['a function type part seals its intersection: a member neither part declares is missing', 'declare const f: ((n: number) => void) & { load: number }; const i: { eq: string } = f;', ['is not assignable']],
 	['an optional tuple element reads as possibly undefined', 'function g(t: [number, string?]) { const r: string = t[1]; }', ['is not assignable']],

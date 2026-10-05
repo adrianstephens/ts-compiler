@@ -1892,6 +1892,11 @@ export function indexSignatureOf(t: Type, scope: Scope, depth = 6): Type | undef
 		return undefined;
 	const numeric	= (members: TS.TypeMember[]) => indexMembers(members).find(m => isNumberLike(m.paramType, scope))?.typeAnnotation;
 	const r			= resolveOwn(t, scope);
+	// A primitive is indexed through its boxed lib interface (`string`'s `String`, `readonly [index: number]: string`), as `lookupMember` reads it.
+	const primitive	= r.type === 'ref' ? r.name : r.type === 'range' ? r.base : r.type === 'literal' ? (Array.isArray(r.value) ? 'string' : typeof r.value) : undefined;
+	const boxed		= primitive && scope.semantics.boxed(primitive);
+	if (boxed)
+		return indexSignatureOf(TS.RefType(boxed), scope, depth - 1);
 	if (r.type === 'object') {
 		const own = numeric(r.members);
 		if (own)
