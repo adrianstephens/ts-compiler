@@ -2465,7 +2465,8 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 						// The last candidate that can fit needs no second pass: resolution settles on it either way.
 						if (!e.arguments.some(isContextSensitive) || !overloads!.slice(k + 1).some(fits))
 							return true;
-						const typed = trial(() => settle(c, true));
+						// Undone after: the contextual parameter types this candidate writes onto the callbacks must not become annotations for the final pass.
+						const typed = ahead(() => settle(c, true));
 						return T.argsFit(typed, typed.argTs, scope, hasSpread);
 					});
 				}

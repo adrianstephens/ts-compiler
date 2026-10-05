@@ -501,6 +501,12 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		declare function k<T>(x: { m(i: number): T }): T;
 		const r: string = k(o);`,
 		[NOT_ASSIGNABLE('boolean', 'string')]],
+	['an overload trial\'s contextual parameter types are undone before the final pass', `
+		interface TT<T> { get(s: number): T; put(s: number, v: T): void }
+		declare function Func<T>(func: (s: number, v?: T) => T): TT<T>;
+		declare function Func<T>(func: (s: number | string, v?: T) => T | Promise<T>): { get(s: string): Promise<T> };
+		const a: TT<string[]> = Func((s, v) => { if (v) return v; return ['x']; });`,
+		[]],
 ];
 
 (async () => {
