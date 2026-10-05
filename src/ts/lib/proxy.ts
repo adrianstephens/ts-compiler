@@ -4,9 +4,9 @@
 //	Proxy
 //-----------------------------------------------------------------------------
 
-// A proxy is an object of its own whose every property operation goes to its handler's trap where it has one, else to its target. Typed as its
-// target, it is held as `any`, so only the backend's `any` dispatchers reach it, each through these.
-export class Proxy<T extends object> {
+// A proxy is an object of its own whose every property operation goes to its handler's trap where it has one, else to its target. TS types
+// `new Proxy(t, h)` as `T`, which no class's instance is: the backend constructs this for it, held as `any`, reached by its `any` dispatchers.
+export class ProxyObject<T extends object> {
 	constructor(private readonly target_: T, private readonly handler_: ProxyHandler<T>) {}
 
 	_get(p: string | symbol): any {

@@ -503,7 +503,7 @@ function isAsmMethod(m: JS.Method<Type>): JS.Call<Type> | undefined {
 
 // A structural `{[k: string]: V}` type is the lib's `DynamicObject<V>`, whose `get`/`set`/`delete`/`has`/`keys` implement it.
 const isDynamicObject = (cls: ClassInfo) => cls.decl.name === 'DynamicObject' && cls.homeModule === undefined;
-const isProxy = (cls: ClassInfo) => cls.decl.name === 'Proxy' && cls.homeModule === undefined;
+const isProxy = (cls: ClassInfo) => cls.decl.name === 'ProxyObject' && cls.homeModule === undefined;
 
 // A string index signature makes a dynamic object, its declared properties beside it too (`{ op: string; [k: string]: any }`): TS holds them to
 // the index type, so they are entries like any other key.
@@ -1107,6 +1107,10 @@ function collectOpenShapes(
 		// `a = b` is `b`, and `c ? a : b` or `a ?? b` either; a `new` of the slot's own class takes the slot's type arguments, built there as a literal is.
 		if (value.type === 'assign' && !value.operator)
 			return noteSlot(slot, value.value, scope, depth, erased, id);
+		// A proxy is typed as its target (`new Proxy(t, h)` is a `T`) but is no struct of that layout: what holds one holds `any`.
+		const bare = unwrapAs(value);
+		if (bare.type === 'new' && bare.callee.type === 'identifier' && bare.callee.name === 'Proxy' && scope.declarator('Proxy') === scope.root().declarator('Proxy'))
+			return void open(id, slot, scope);
 		if (value.type === 'conditional') {
 			noteSlot(slot, value.consequent, narrow(value.test, scope, true), depth, erased, id);
 			return noteSlot(slot, value.alternate, narrow(value.test, scope, false), depth, erased, id);
@@ -4342,6 +4346,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	function classifyCall(e: CallNode, ctx: FunctionContext, want?: W.Type): Callee {
 		const callee = e.callee;
 		if (e.type === 'new') {
+			// The lib's `Proxy` (`declare var`, as TS's: `new Proxy(t, h)` is a `T`) is implemented by its `ProxyObject` class.
+			if (callee.type === 'identifier' && callee.name === 'Proxy' && !ctx.resolvesName(callee.name) && !isModuleValue(callee.name, ctx))
+				return { kind: 'construct', cls: ensureClass('ProxyObject', [T.ANY])!, label: 'Proxy', lowered: true };
 			// A plain identifier naming a lib class (`Map`) has no `Scope.decl` for `classRefTarget` to follow.
 			const target	= classTargetOf(callee, ctx);
 			const cls		= target && ensureClass(target.name, newTypeArgs(target.name, e.typeArgs, e, ctx, want), target.scope);

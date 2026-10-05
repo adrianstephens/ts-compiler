@@ -2834,6 +2834,16 @@ async function main() {
 	}
 
 	{
+		const { pxTyped } = await compile(`
+			export function pxTyped(): number {
+				const p = new Proxy({ a: 1, b: 2 }, { get(t, prop) { return prop === 'b' ? 20 : t[prop as keyof typeof t]; } });
+				return p.a + p.b;
+			}
+		`);
+		check("a Proxy typed as its target, as TS types new Proxy(t, h)", pxTyped(), 21);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
