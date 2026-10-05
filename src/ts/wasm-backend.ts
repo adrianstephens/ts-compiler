@@ -2757,6 +2757,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				// An interface extending another (binary's `TypedArray extends ArrayBufferView`) is an intersection; its members decide as an object's do.
 				if (resolved.types.some(p => (r => r.type === 'object' && numberIndexed(r))(T.resolve(global, p))))
 					return W.REF_ANY;
+				// Functions intersected (`get<T>`: a sync and an async reader) are one function with each signature, as an overloaded object type is.
+				if (resolved.types.every(p => T.resolve(global, p).type === 'function')) {
+					const closure = sigsWtype(T.signaturesOf(resolved, 'call', global));
+					if (closure)
+						return closure;
+				}
 				break;
 			}
 			case 'union': {

@@ -4669,6 +4669,13 @@ async function main() {
 				export function shadowedLib(): number { return p(0, new Uint8Array([3, 4])) * 10 + p(1, [5, 6]); }`,
 		}, 'main');
 		check('an imported interface shadows a lib class of its name', shadowedLib(), 57);
+		// binary's `get<T>`: functions intersected are one function with each signature.
+		const { fnIntersection } = await compile(`
+			type G = ((s: number) => number) & ((s: string) => number);
+			const o: { g: G } = { g: ((s: number | string) => typeof s === 'number' ? s : s.length) as G };
+			export function fnIntersection(): number { return o.g(3); }
+		`);
+		check('an intersection of function types is one closure', fnIntersection(), 3);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };
