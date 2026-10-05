@@ -3328,9 +3328,11 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 						recurse(m.typeAnnotation, t, depth - 1);
 				} else if (m.type === 'method') {
 					// Same shape as `function`/`constructor` above -- `adapter0<T,D>`-style interfaces often carry `T`/`D` only in a method's own signature.
-					const member = lookupMember(a, key, scope);
-					if (member?.type === 'function')
-						fromSignature(m, baseSignature(member));
+					// An overloaded one (a lib class's method merged with its interface's) pairs from its last signature.
+					const member	= lookupMember(a, key, scope);
+					const own		= member && signaturesOf(member, 'call', scope).at(-1);
+					if (own)
+						fromSignature(m, baseSignature(own));
 				}
 			}
 		} else if (paramT.type === 'mapped' && !paramT.nameType) {

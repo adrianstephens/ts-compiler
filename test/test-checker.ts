@@ -491,6 +491,12 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		declare const array: number[];
 		const b: string = r.hasOwnProperty('x'), c: string = r.toString(), d: number = r.other, e: boolean = array[Symbol.iterator];`,
 		[NOT_ASSIGNABLE('boolean', 'string'), NOT_ASSIGNABLE('string', 'number'), "is not assignable to type 'boolean'"]],
+	['an overloaded method argument infers from its last signature', `
+		interface O { m(x: string): number; m(x: number): boolean }
+		declare const o: O;
+		declare function k<T>(x: { m(i: number): T }): T;
+		const r: string = k(o);`,
+		[NOT_ASSIGNABLE('boolean', 'string')]],
 ];
 
 (async () => {
