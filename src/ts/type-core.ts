@@ -3172,8 +3172,14 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 			// candidates (`ReadonlyArray<T>` from a `(string | number)[]`).
 			const el = (paramT.name === 'Array' || paramT.name === 'ReadonlyArray') && paramT.typeArgs.length === 1
 				? arrayLikeElement(a) ?? (a.type === 'tuple' ? combineTypes(elementTypes(a, scope)) : undefined) : undefined;
+			// Iterating is the language's protocol: what the argument iterates as is what its iteration interface's arguments are (`Iterable<T>` from a string).
+			const iteration	= !el && !sameName ? scope.semantics.iterationOf(paramT, argT, scope) : undefined;
 			if (el) {
 				recurse(paramT.typeArgs[0], el, depth - 1);
+			} else if (iteration) {
+				recurse(iteration.target.yield, iteration.source.yield, depth - 1);
+				recurse(iteration.target.return, iteration.source.return, depth - 1);
+				flipped(() => recurse(iteration.target.next, iteration.source.next, depth - 1));
 			} else if (paramT.name === 'PromiseLike' && paramT.typeArgs.length === 1 && (argT.type === 'union' ? argT.types : [argT]).some(m => asPromiseRef(m, scope))) {
 				// `.then`'s callback may return a union only some of whose members are Promises: `awaitType` unwraps those. On `argT`, not the resolved `a`,
 				// which would have lost the `Promise<X>` ref identity.
@@ -3431,7 +3437,11 @@ export interface Semantics {
 	apparentMember(prop: string, callable: boolean, scope: Scope): Type | undefined;
 	// A member of `t` (already resolved) the language types more precisely than its lib declares; undefined defers to the lib.
 	refinedMember(t: Type, prop: string, scope: Scope, depth: number): Type | undefined;
+	// `target` one of the language's iteration interfaces (`Iterable<T>`): its iteration types, and what `source` iterates as.
+	iterationOf(target: Type, source: Type, scope: Scope): { target: IterationTypes; source: IterationTypes } | undefined;
 }
+
+export interface IterationTypes { yield: Type; return: Type; next: Type }
 
 // Where `break`/`continue` deliver their flow: a loop, a `switch`, or a labeled statement.
 export interface FlowTarget { labels: string[]; loop: boolean; breaks: Scope[]; continues: Scope[] }

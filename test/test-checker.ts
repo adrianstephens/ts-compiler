@@ -481,6 +481,11 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		const u: number[] = [1, 2], t: [number] = [1];
 		const r: string = g(...u), q: boolean = g(...t);`,
 		[NOT_ASSIGNABLE('boolean', 'string'), NOT_ASSIGNABLE('string', 'boolean')]],
+	['an Iterable<T> parameter infers T from what its argument iterates as', `
+		declare function h<T>(x: Iterable<T>): T;
+		function* gen() { yield 1; }
+		const a: boolean = h('abc'), b: boolean = h([1, 2]), c: boolean = h(new Set(['x'])), d: boolean = h(gen());`,
+		[NOT_ASSIGNABLE('string', 'boolean'), NOT_ASSIGNABLE('number', 'boolean'), NOT_ASSIGNABLE('string', 'boolean'), NOT_ASSIGNABLE('number', 'boolean')]],
 ];
 
 (async () => {

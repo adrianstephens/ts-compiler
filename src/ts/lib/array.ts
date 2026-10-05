@@ -68,6 +68,21 @@ export class Array<T> extends ArrayBase {
 	static isArray(x: any): x is any[] {
 		return x instanceof ArrayBase;
 	}
+	// TS's order (es2015.iterable's overloads merge ahead of es5's), and JS's: anything iterable, a string included, by its iterator.
+	// @ts-expect-error - tison extension: multiple implementations
+	static from<T>(iterable: Iterable<T>): T[] {
+		const result: T[] = [];
+		for (const e of iterable)
+			result.push(e);
+		return result;
+	}
+	// @ts-expect-error - tison extension: multiple implementations
+	static from<T, U>(iterable: Iterable<T>, mapfn: (v: T, k: number) => U, thisArg?: any): U[] {
+		const result: U[] = [];
+		for (const e of iterable)
+			result.push(mapfn(e, result.length));
+		return result;
+	}
 	// @ts-expect-error - tison extension: multiple implementations
 	static from<T>(arrayLike: ArrayLike<T>): T[] {
 		const n = arrayLike.length;
@@ -83,20 +98,6 @@ export class Array<T> extends ArrayBase {
 		for (let i = 0; i < n; i++)
 			r[i] = mapfn(arrayLike[i], i);
 		return r;
-	}
-	// @ts-expect-error - tison extension: multiple implementations
-	static from<T>(iterable: Iterable<T>): T[] {
-		const result: T[] = [];
-		for (const e of iterable)
-			result.push(e);
-		return result;
-	}
-	// @ts-expect-error - tison extension: multiple implementations
-	static from<T, U>(iterable: Iterable<T>, mapfn: (v: T, k: number) => U, thisArg?: any): U[] {
-		const result: U[] = [];
-		for (const e of iterable)
-			result.push(mapfn(e, result.length));
-		return result;
 	}
 	static of<T>(...items: T[]): T[] {
 		return Array.from<T>(items);

@@ -43,6 +43,8 @@ export const PY_SEMANTICS: Semantics = {
 	apparentMember:	objectMember,
 	// Nothing is typed more precisely than Python's lib declares it.
 	refinedMember:	() => undefined,
+	// Python's iteration protocol (`__iter__`) is not modeled yet.
+	iterationOf:	() => undefined,
 };
 
 // The root scope of a Python program. Its builtins (`object`, `str`, `len`...) will come from Python's lib, not yet written.

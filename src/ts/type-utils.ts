@@ -4,7 +4,7 @@ import { Literal, hasMod } from '@isopodlabs/tison/ast';
 import { Expr } from './js-parser';
 import { Type } from './ts-parser';
 import {
-	ANY, BIGINT, BOOLEAN, INTRINSIC_TYPES, NEVER, NUMBER, REGEXP, SIMPLE_TYPES, STRING, Scope, Semantics, UNDEFINED, UNKNOWN,
+	ANY, BIGINT, BOOLEAN, INTRINSIC_TYPES, IterationTypes, NEVER, NUMBER, REGEXP, SIMPLE_TYPES, STRING, Scope, Semantics, UNDEFINED, UNKNOWN,
 	arrayLikeElement, awaitType, combineTypes, elementTypes, findFunctionType, freshTypeParamName, objectMember, isAny, isBoolean, isLiteral, isNullish,
 	isRef, isString, lookupMember, ownScope, paramTypeAt, rangeIncludesZero, resolve, resolveMembers, resolveOwn, substituteThisType,
 	typeArgMap, unionMembers, widenLiterals,
@@ -147,6 +147,7 @@ export const TS_SEMANTICS: Semantics = {
 	boxed:			name => BOXED_PRIMITIVE.get(name),
 	apparentMember:	objectMember,
 	refinedMember,
+	iterationOf,
 };
 
 export function makeGlobal() {
@@ -376,7 +377,6 @@ export function logicalLeftPart(t: Type, op: string, scope: Scope): Type {
 //  The iteration protocol
 // ===================================================================
 
-export interface IterationTypes { yield: Type; return: Type; next: Type }
 
 // The global iteration types whose type arguments ARE their iteration types (TS's getIterationTypesOfIterableFast): a bundled lib may not
 // declare them through the protocol (codegen's `Generator` has only `next`). A bare Iterator is never iterated.
@@ -390,6 +390,13 @@ function globalIterationTypes(t: Type, scope: Scope, async: boolean, generatorRe
 		return undefined;
 	const [y, r, n] = [...typeArgMap(entry.typeParams, t.typeArgs, UNKNOWN).values()];
 	return { yield: y ?? UNKNOWN, return: r ?? ANY, next: n ?? ANY };
+}
+
+function iterationOf(target: Type, source: Type, scope: Scope) {
+	const async	= target.type === 'ref' && ASYNC_ITERABLES.has(target.name);
+	const own	= globalIterationTypes(target, scope, async, false);
+	const it	= own && iterationTypes(source, scope, async);
+	return it && { target: own, source: it };
 }
 
 export function iterationTypes(t: Type, scope: Scope, async = false, depth = 6, generatorReturn = false): IterationTypes | undefined {
