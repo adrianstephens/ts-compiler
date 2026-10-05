@@ -2635,6 +2635,25 @@ async function main() {
 	}
 
 	{
+		const { classIds, fnIds } = await compile(`
+			class A { x = 1; }
+			class B { x = 1; }
+			function fn(x: number) { return x; }
+			function gn(x: number) { return x; }
+			export function classIds(): number {
+				const c1: any = A, c2: any = A, c3: any = B, c4: new () => A = A;
+				return (c1 === c2 ? 1 : 0) + (c1 === c3 ? 10 : 0) + (c4 === c2 ? 100 : 0);
+			}
+			export function fnIds(): number {
+				const c1: (x: number) => number = fn, c2: any = fn, c3: any = gn, c4: (x: any) => any = fn as any;
+				return (c1 === c2 ? 1 : 0) + (c2 === c3 ? 10 : 0) + ((c4 as unknown) === c1 ? 100 : 0) + (fn !== fn ? 1000 : 0);
+			}
+		`);
+		check("a class value is one object, whatever signature it is built at", classIds(), 101);
+		check("a function value is one object, through coercion wrappers", fnIds(), 101);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {

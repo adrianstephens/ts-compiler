@@ -620,6 +620,17 @@ export class Types extends Array<wasm.SubType> {
 		return this.register({ final: false, supertypes: [], type: { kind: 'struct', fields: [] } });
 	}
 
+	// An env that IS its value's identity: one instance per function or class, shared by every closure built for it at any signature.
+	private identityEnvIndex?: number;
+	identityEnv(): number {
+		return this.identityEnvIndex ??= this.add({ final: false, supertypes: [this.envBase()], type: { kind: 'struct', fields: [] } });
+	}
+	// A coercion wrapper's env: the closure it views, whose identity it shares.
+	private viewEnvIndex?: number;
+	viewEnv(): number {
+		return this.viewEnvIndex ??= this.add({ final: false, supertypes: [this.envBase()], type: { kind: 'struct', fields: [{ type: { ref: this.closureBase(), nullable: false }, mut: false }] } });
+	}
+
 	// The prefix of every closure struct (code pointer, env, arity). Its first field is `(ref $itsFuncType)` under a covariant immutable field,
 	// so `ref.test` against it is exactly "is this a function", nominal.
 	closureBase(): number {

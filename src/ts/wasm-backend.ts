@@ -3529,6 +3529,30 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		ctx.emit(I.global.get(globals.get(name)!.index));
 	}
 
+	// The one env instance a function's or class's closures share, whatever signature each is built at: what `===` compares them by.
+	function identityGlobal(key: string, heap: number): number {
+		const name = `#identity$${key}`;
+		if (!globals.has(name))
+			globals.set(name, { wtype: { typeIndex: heap, nullable: false }, index: globals.size, mut: false, initInstrs: [I.struct.new(heap)] });
+		return globals.get(name)!.index;
+	}
+
+	// A value as `===` sees it: a closure is its identity env, through any coercion wrappers; anything else is itself.
+	function ensureClosureIdentity(): FuncInfo {
+		const key = '<closure identity>';
+		return synthesize(key, () => ({ params: [param('x', W.REF_ANY_NULLABLE)], result: W.REF_ANY_NULLABLE }), (dctx, [x], { result }) => {
+			const base	= types.closureBase(), view = types.viewEnv(), id = types.identityEnv();
+			const env	= dctx.declareLocal('$env', { typeIndex: types.envBase(), nullable: false }).index;
+			dctx.emit(I.local.get(x), I.ref.test(base));
+			dctx.emitIf(toValType(result), () => {
+				dctx.emit(I.local.get(x), I.ref.cast(base), I.struct.get(base, 1), I.local.set(env), I.local.get(env), I.ref.test(view));
+				dctx.emitIf(toValType(result),
+					() => dctx.emit(I.local.get(env), I.ref.cast(view), I.struct.get(view, 0), I.call(funcs.get(key)!.funcIndex)),
+					() => dctx.emit(I.local.get(env), I.ref.test(id), I.if(toValType(result), [I.local.get(env)], [I.local.get(x)])));
+			}, () => dctx.emit(I.local.get(x)));
+		});
+	}
+
 	// By name: `coerceTop`'s callers have only a `W.Type`'s ref name, and every class named is already resolved.
 	function isSubclassOf(subName: string, baseName: string): boolean {
 		return classes.get(baseName)?.isBaseOf(classes.get(subName)) ?? false;
@@ -5498,7 +5522,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const { funcTypeIndex, structTypeIndex } = ensureClosureType(sig);
 		let tag = classValueTags.get(cls);
 		if (tag === undefined) {
-			tag = types.add({ final: true, supertypes: [types.envBase()], type: { kind: 'struct', fields: [] } });
+			tag = types.add({ final: true, supertypes: [types.identityEnv()], type: { kind: 'struct', fields: [] } });
 			classValueTags.set(cls, tag);
 		}
 		const key = `${ctor.funcIndex}:${funcTypeIndex}`;
@@ -5525,7 +5549,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				made.body = wctx.toFuncBody(1 + args.length, toValType);
 			});
 		}
-		ctx.emit(I.ref.func(info.funcIndex), I.struct.new(tag), I.i32.const(jsLength(decl.params)), ...newClosure(structTypeIndex));
+		ctx.emit(I.ref.func(info.funcIndex), I.global.get(identityGlobal(`class:${tag}`, tag)), I.i32.const(jsLength(decl.params)), ...newClosure(structTypeIndex));
 		return closureWtype(sig);
 	}
 
@@ -5806,7 +5830,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	function emitFunctionValue(fn: { name: string; decl: FunctionDecl; module: string }, want: W.Type | undefined, ctx: FunctionContext, typeArgs?: Type[]): W.Type {
 		const { info, structTypeIndex } = ensureFunctionValueWrapper(fn.name, fn.decl, fn.module, want, typeArgs);
-		ctx.emit(I.ref.func(info.funcIndex), I.struct.new_default(types.envBase()), I.i32.const(jsLength(fn.decl.params)), ...newClosure(structTypeIndex));
+		ctx.emit(I.ref.func(info.funcIndex), I.global.get(identityGlobal(`function:${homeKey(fn.module, fn.name)}`, types.identityEnv())), I.i32.const(jsLength(fn.decl.params)), ...newClosure(structTypeIndex));
 		return closureWtype({ params: info.params, result: info.result, hasRest: info.hasRest, defaults: info.defaults });
 	}
 
@@ -5824,7 +5848,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const info: FuncInfo = { ...wantSig, funcIndex, typeIndex };
 		closureLiterals.push(info);
 		// A one-field env struct holding the original closure: the `{code, env}` pair is no `envBase` subtype, so `envBase` cannot serve.
-		const envTypeIndex = types.add({ final: true, supertypes: [types.envBase()], type: { kind: 'struct', fields: [
+		const envTypeIndex = types.add({ final: true, supertypes: [types.viewEnv()], type: { kind: 'struct', fields: [
 			{ type: toValType({ typeIndex: gotStructTypeIndex, nullable: false }), mut: false },
 		] } });
 		const result = { info, wantStructTypeIndex, envTypeIndex };
@@ -6612,6 +6636,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 							return inline.result;
 						}
 
+						if (equality && W.isClosure(leftInfo.wtype) && W.isClosure(rightInfo.wtype))
+							return identity(W.REF_ANY_NULLABLE, () => ctx.emit(I.call(ensureAnyStrictEq().funcIndex)));
 						if (equality && leftInfo.wtype && !lk && !rk)
 							return identity(leftInfo.wtype, () => ctx.emit(I.ref.eq));
 
@@ -9308,8 +9334,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					arms.push({ heap, compare: [...read(a), ...read(b), eq] });
 				}
 			}
+			const identity = (l: number) => [I.local.get(l), I.call(ensureClosureIdentity().funcIndex), I.ref.cast('eq', true)];
 			dctx.emit(...arms.reduceRight<wasm.Instr[]>((rest, arm) => [I.local.get(a), I.ref.test(arm.heap), I.local.get(b), I.ref.test(arm.heap), I.i32.and, I.if('i32', arm.compare, rest)],
-				[I.local.get(a), I.ref.cast('eq', true), I.local.get(b), I.ref.cast('eq', true), I.ref.eq]));
+				[...identity(a), ...identity(b), I.ref.eq]));
 		});
 	}
 
