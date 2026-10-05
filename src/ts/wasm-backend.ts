@@ -723,7 +723,8 @@ function arrowOrFunctionToDecl(name: string, e: JS.Arrow<Type> | JS.FunctionExpr
 // The type a short-circuiting operator (`&&`/`||`/`??`) gives both its arms: the caller's, when both it and the
 // self-inferred one are object refs -- only then does building at it rather than converting to it matter (invariance).
 function wantedShape(want: W.Type | undefined, self: W.Type): W.Type {
-	return W.isRef(want) && W.isRef(self) ? want : self;
+	const shaped = (w: W.Type | undefined) => W.isRef(w) || W.isClosure(w);
+	return shaped(want) && shaped(self) ? want! : self;
 }
 
 // A discriminant: a field declared as literals must share one of `values`; either side naming no literals admits anything.
@@ -5410,40 +5411,58 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// (`(env, ...params)`). One shared zero-capture trampoline per function forwards to it.
 	// A class named in a value position (not `new C`, `C.x` or `instanceof C`): the class it names.
 	function classValueOf(e: Expr & { type: 'identifier' }, ctx: FunctionContext): ClassInfo | undefined {
-		const target = classRefTarget(e, ctx.scope) ?? (!ctx.resolvesName(e.name) && LIB_DECL_MAP.get(e.name)?.type === 'class_decl' ? { name: e.name, scope: ctx.scope } : undefined);
+		// A lib class, by its declaration or a lib alias to one (`Uint8Array` is `TypedArray<u8>`).
+		const target = classRefTarget(e, ctx.scope) ?? (!ctx.resolvesName(e.name) && (LIB_DECL_MAP.get(e.name)?.type === 'class_decl' || resolveClassAlias(e.name))
+			? { name: e.name, scope: ctx.scope } : undefined);
 		return target && ensureClass(target.name, undefined, target.scope);
 	}
 
 	// Each class held as a value, by its env's tag: an empty `envBase` subtype per class, which the constructing code ignores.
 	const classValueTags	= new Map<ClassInfo, number>();
-	const classValueFuncs	= new Map<FuncInfo, FuncInfo>();
-	function emitClassValue(cls: ClassInfo, want: W.Type | undefined, ctx: FunctionContext): W.Type {
+	const classValueFuncs	= new Map<string, FuncInfo>();
+	function emitClassValue(cls: ClassInfo, want: W.Type | undefined, ctx: FunctionContext, e?: Expr): W.Type {
 		const decls = (cls.methodDecls.get('constructor') ?? []).filter(d => d.body);
-		const takes	= (d: MethodMember) => W.isClosure(want) && resolveParams(d, cls.declScope ?? libGlobal).every((p, i) => i >= want.closure.params.length
-			? hasMod(d.params[i], 'optional') || !!d.params[i].default : fits(want.closure.params[i], p.wtype));
+		// The overload taking what the destination's construct signature passes, as TS relates the class to it: arity, then each parameter's TS type.
+		const wanted	= (t => t && T.constructSignatures(t, ctx.scope)[0])(e && contextOf(e));
+		const takes		= (d: MethodMember) => !!wanted && wanted.params.length <= d.params.length
+			&& d.params.every((p, i) => i < wanted.params.length ? !p.typeAnnotation || T.isAssignable(wanted.params[i].typeAnnotation ?? T.ANY, p.typeAnnotation, ctx.scope, cls.declScope ?? libGlobal)
+				: hasMod(p, 'optional') || !!p.default);
 		const decl	= decls.length > 1 ? decls.find(takes) : decls[0];
 		if (!decl)
 			throw `class '${cls.name}' as a value: none of its ${decls.length} constructors takes what its context passes`;
 		const ctor	= ensureCtorDecl(cls, decl);
-		const sig: FuncSig = { params: ctor.params, result: ctor.result, hasRest: ctor.hasRest, defaults: ctor.defaults };
+		// At the wanted signature where there is one, each argument converted as a call converts it (`new Uint32Array(buf, 0, n)` from `f64`s).
+		const sig: FuncSig = W.isClosure(want) && !want.closure.hasRest && !ctor.hasRest && want.closure.params.length <= ctor.params.length
+			? { params: want.closure.params, result: want.closure.result, hasRest: false }
+			: { params: ctor.params, result: ctor.result, hasRest: ctor.hasRest, defaults: ctor.defaults };
 		const { funcTypeIndex, structTypeIndex } = ensureClosureType(sig);
 		let tag = classValueTags.get(cls);
 		if (tag === undefined) {
 			tag = types.add({ final: true, supertypes: [types.envBase()], type: { kind: 'struct', fields: [] } });
 			classValueTags.set(cls, tag);
 		}
-		let info = classValueFuncs.get(ctor);
+		const key = `${ctor.funcIndex}:${funcTypeIndex}`;
+		let info = classValueFuncs.get(key);
 		if (!info) {
 			const { funcIndex, typeIndex } = types.funcAt(funcTypeIndex);
 			const made: FuncInfo = info = { ...sig, funcIndex, typeIndex };
-			classValueFuncs.set(ctor, made);
+			classValueFuncs.set(key, made);
 			closureLiterals.push(made);
 			worklist.push(() => {
-				const wctx = new FunctionContext(`<class value>.${cls.name}`, new Scope(libGlobal), plainReturn(ctor.result), undefined);
+				const wctx = new FunctionContext(`<class value>.${cls.name}`, new Scope(libGlobal), plainReturn(sig.result), undefined);
 				wctx.declareLocal('#envParam', { typeIndex: types.envBase(), nullable: false });
-				ctor.params.forEach((p, i) => wctx.emit(I.local.get(wctx.declareLocal(`$arg$${i}`, p).index)));
+				const args = sig.params.map((p, i) => wctx.declareLocal(`$arg$${i}`, p).index);
+				ctor.params.forEach((p, i) => {
+					if (i < args.length) {
+						wctx.emit(I.local.get(args[i]));
+						coerceTop(sig.params[i], wctx, p);
+					} else {
+						emitAs(ctor.defaults?.[i] ?? Identifier('undefined'), wctx, p);
+					}
+				});
 				wctx.emit(I.call(ctor.funcIndex));
-				made.body = wctx.toFuncBody(1 + ctor.params.length, toValType);
+				coerceTop(ctor.result, wctx, sig.result);
+				made.body = wctx.toFuncBody(1 + args.length, toValType);
 			});
 		}
 		ctx.emit(I.ref.func(info.funcIndex), I.struct.new(tag), I.i32.const(jsLength(decl.params)), ...newClosure(structTypeIndex));
@@ -5880,7 +5899,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					return emitFunctionValue(fnValue, want, ctx);
 				const classValue = e.type === 'identifier' ? classValueOf(e, ctx) : undefined;
 				if (classValue)
-					return emitClassValue(classValue, want, ctx);
+					return emitClassValue(classValue, want, ctx, e);
 				// CommonJS's per-module names (`checker.bindModuleNames`): compile-time constants, as a bundler substitutes them.
 				if (name === '__dirname' || name === '__filename') {
 					const file = moduleFilename(ctx.homeModule);

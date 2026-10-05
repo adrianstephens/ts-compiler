@@ -4653,6 +4653,13 @@ async function main() {
 		`);
 		check('static fields: written, one object, inherited', staticFields(), 335);
 		check("a typed array's static BYTES_PER_ELEMENT", staticLib(), 41);
+		// binary's `Buffer(len, view = Uint8Array)`: a lib class alias as a value, its constructor overload chosen by the slot's construct signature.
+		const { u8 } = await compile(`
+			type ViewMaker<T> = (new (a: ArrayBuffer, offset: number, length: number) => T) & { BYTES_PER_ELEMENT?: number };
+			function view(buf: ArrayBuffer, len: number, maker: ViewMaker<any> = Uint8Array): number { const v = new maker(buf, 0, len); return v.length * 10 + (maker.BYTES_PER_ELEMENT ?? 0); }
+			export function u8(): number { const b = new ArrayBuffer(8); return view(b, 8) + view(b, 2, Uint32Array) * 100; }
+		`);
+		check('a typed-array class as a value', u8(), 2481);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };
