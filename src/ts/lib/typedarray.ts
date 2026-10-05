@@ -62,6 +62,8 @@ export class TypedArray<T extends number | bigint> {
 	// `$T` switch already resolves to 1/2/4/8, so a field would put a redundant word in every instance
 	// and need initialising in all six constructors, for one source of truth instead of two.
 	get BYTES_PER_ELEMENT(): number { return TypedArray.elemSize(); }
+	// The class's own, as JS has it too (`Uint32Array.BYTES_PER_ELEMENT`, and through a constructor held as a value).
+	static readonly BYTES_PER_ELEMENT = TypedArray.elemSize();
 
 	private static elemSize(): i32 { return __asm<[], i32>(`
 		(switch $T

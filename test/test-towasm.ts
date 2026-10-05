@@ -4644,6 +4644,15 @@ async function main() {
 			export function up(): number { return toN('12') + toN(3) * 100 + (toN('x') !== toN('x') ? 1000 : 0) + (+true) * 10000; }
 		`);
 		check('unary + on a string or number union is ToNumber', up(), 11312);
+		// A static field is one storage, initialized once in its class's context: writable, the same object on every read, inherited.
+		const { staticFields, staticLib } = await compile(`
+			class C { static n = 1; static bump(): number { C.n = C.n + 1; return C.n; } static m = new Map<string, number>(); }
+			class D extends C {}
+			export function staticFields(): number { C.bump(); C.bump(); C.m.set('a', 5); return C.n * 10 + (C.m.get('a') ?? 0) + D.n * 100; }
+			export function staticLib(): number { return Uint32Array.BYTES_PER_ELEMENT * 10 + Uint8Array.BYTES_PER_ELEMENT; }
+		`);
+		check('static fields: written, one object, inherited', staticFields(), 335);
+		check("a typed array's static BYTES_PER_ELEMENT", staticLib(), 41);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };

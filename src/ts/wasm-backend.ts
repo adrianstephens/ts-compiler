@@ -2392,7 +2392,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// A top-level `const X = factory(...)` has no compile-time value, and a wasm global can only start from a constant, so it is lazy: a nullable global
 	// starts `null` and a wrapper computes and caches it on first use. `d.init` compiles in `declScope`, so its names resolve in its own module.
-	function ensureLazyGlobal(name: string, homeModule: string, d: JS.Var<Type>, declScope: Scope): FuncInfo | undefined {
+	// `owner`: a static field's class, whose context its initializer runs in; `declared`: its declared type, where no scope binds `name`.
+	function ensureLazyGlobal(name: string, homeModule: string, d: JS.Var<Type>, declScope: Scope, owner?: ClassInfo, declared?: Type): FuncInfo | undefined {
 		// `const f = __asm<[...], R>('...')` DECLARES a builtin and holds no value: undefined sends the reference to `moduleAsmBuiltins`.
 		if (d.init && isAsm(d.init))
 			return undefined;
@@ -2402,7 +2403,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			return existing;
 
 		// An imported module's scope carries only its EXPORTS: a non-exported binding is typed by its initializer.
-		const checkedType = declScope.value(name) ?? (d.init && checkerTypeOf(d.init, declScope));
+		const checkedType = declared ?? declScope.value(name) ?? (d.init && checkerTypeOf(d.init, declScope));
 		// `typeOf` has no answer for a bare anonymous object shape, so it gets the struct an object literal targeting it gets.
 		const resolved = checkedType && T.resolve(global, checkedType);
 		const wt = (checkedType && typeOf(openedAs(d, checkedType)))
@@ -2416,7 +2417,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const info: FuncInfo = { params: [], result: wt, funcIndex, typeIndex };
 		lazyGlobals.set(key, info);
 		worklist.push(W.withCatch(() => {
-			const ctx = new FunctionContext(name, new Scope(declScope), plainReturn(wt), undefined, homeModule);
+			const ctx = new FunctionContext(name, new Scope(declScope), plainReturn(wt), owner, homeModule);
 			// `if (slot === null) slot = <init>; return slot!;`, hand-emitted: only `d.init` is source the checker saw. Without an initializer
 			// the slot is whatever was last assigned.
 			if (d.init) {
@@ -2469,6 +2470,28 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// `scope`: where to resolve `name` -- the reading function's own by default, or an `import * as NS`
 	// namespace's scope for an `NS.name` read, reaching the same const its qualified name does (`case 'member'`).
+	// A class's static field, up its superclass chain (`Sub.x` is `Base.x`), with the class declaring it.
+	function staticFieldOf(cls: ClassInfo, name: string): { owner: ClassInfo; f: JS.Field<Type> } | undefined {
+		for (let c: ClassInfo | undefined = cls; c; c = c.superClass) {
+			const f = c.decl.body.find((m): m is JS.Field<Type> => m.type === 'field' && m.key === name && hasMod(m, 'static'));
+			if (f)
+				return { owner: c, f };
+		}
+		return undefined;
+	}
+	// One storage per static field, initialized once, in its class's own module and context (a self-reference names this instantiation), as JS
+	// runs it at the class's definition: the same value on every read, and writable.
+	function staticGlobal(owner: ClassInfo, f: JS.Field<Type>) {
+		const key		= String(f.key), name = `${owner.name}.${key}`, home = owner.homeModule ?? LIB_MODULE;
+		const scope		= moduleScopeOf(owner.homeModule) ?? owner.declScope ?? libGlobal;
+		const declared	= f.typeAnnotation ?? (f.value && T.widenLiterals(checkerTypeOf(f.value, scope)));
+		const wrapper	= ensureLazyGlobal(name, home, JS.Var(key, f.value, declared), scope, owner, declared);
+		const slot		= lazyGlobalSlots.get(homeKey(home, name));
+		if (!wrapper || !slot)
+			throw `static field '${name}' has no representation`;
+		return { wrapper, slot, declared };
+	}
+
 	function lazyGlobalFor(name: string, ctx: FunctionContext, scope: Scope = ctx.scope) {
 		const lazyGlobal = (name: string, homeModule: string, d: JS.Var<Type>, declScope: Scope) => {
 			const wrapper	= ensureLazyGlobal(name, homeModule, d, declScope);
@@ -4849,6 +4872,16 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 		if (target.type === 'member') {
 			const prop		= target.property;
+			// A class's static field (`C.n = v`): its one storage (`staticGlobal`).
+			const staticOwner	= target.object.type === 'identifier' && !ctx.lookup(target.object.name) ? namespaceOwner(target.object.name, ctx) : undefined;
+			const staticField	= staticOwner && staticFieldOf(staticOwner, prop);
+			if (staticField) {
+				const { wrapper, slot } = staticGlobal(staticField.owner, staticField.f);
+				const wtype = wrapper.result;
+				return { wtype, operands: [],
+					load:	() => ctx.emit(I.call(wrapper.funcIndex)),
+					store:	() => { coerceTop(wtype, ctx, slot.wtype); ctx.emit(I.global.set(slot.index)); } };
+			}
 			const cls		= write ? ownerOf(target.object, ctx) : classOfForIndexing(target.object, ctx);
 			// `emitAs`: the receiver may be a boxed `anyref` (a ref-kind array element), and a struct access needs the real narrowed ref.
 			const receiver	= (wtype: W.Type) => expr(target.object, wtype);
@@ -5441,10 +5474,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 	function emitClassValueProp(cls: ClassInfo, name: string, recv: number, dctx: FunctionContext): void {
 		const result = W.REF_ANY_NULLABLE;
-		for (let c: ClassInfo | undefined = cls; c; c = c.superClass) {
-			const f = c.decl.body.find(m => m.type === 'field' && m.key === name && hasMod(m, 'static'));
-			if (f?.type === 'field' && f.value)
-				return coerceTop(emitExpr(f.value, dctx), dctx, result);
+		const field = staticFieldOf(cls, name);
+		if (field) {
+			const { wrapper, declared } = staticGlobal(field.owner, field.f);
+			dctx.emit(I.call(wrapper.funcIndex));
+			return coerceAs(declared, wrapper.result, dctx, result);
 		}
 		if (name === 'name')
 			return coerceTop(emitExpr(Literal(cls.decl.name ?? ''), dctx), dctx, result);
@@ -5864,10 +5898,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						return emitExpr(Literal(v), ctx, want);
 					const owner = namespaceOwner(e.object.name, ctx);
 					if (owner) {
-						const f = owner.decl.body.find(m => m.type === 'field' && m.key === e.property && m.modifiers?.includes('static'));
-						if (!f || f.type !== 'field' || !f.value)
+						const field = staticFieldOf(owner, e.property);
+						if (!field)
 							throw `unknown static field '${owner.name}.${e.property}'`;
-						return emitExpr(f.value, ctx);
+						const { wrapper } = staticGlobal(field.owner, field.f);
+						ctx.emit(I.call(wrapper.funcIndex));
+						return wrapper.result;
 					}
 					// `NS.x` through `import * as NS`, unless a local shadows `NS`: another module's lazy const, or a function read as a value.
 					const ns = ctx.lookup(e.object.name) ? undefined : ctx.scope.namespace(e.object.name);
