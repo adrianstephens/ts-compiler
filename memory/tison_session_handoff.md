@@ -30,10 +30,15 @@ as a value; `arr.map(Number)`; spread overload arity (TS2556); lib TextEncoder/T
 iterate by code point; `Semantics.iterationOf` (Iterable<T> inference); primitives sealed through their boxed interface (TS2339).
 binary's `merge` now returns the class instance in the record's place (no `setPrototypeOf`; class instances hold undeclared keys in `#ext`)
 -- see [[tison_workaround_inventory]] D.
-Fixed since: the overload-trial undo (wasm.ts:459 FP), deferred conditionals represented by their branches. **Next blocker**:
-binary's `typedArray.as` instantiates the lib's `TypedArray<any>` (elemSize switch has no `$ref` arm) -- binary's own
-`TypedArrayConstructor<any>` returns binary's `TypedArray` INTERFACE, apparently resolved to the lib class. Probe with
-`SNAP=<snapshot> probe-decl.ts <snapshot>/binary-libs/src/wasm.ts insertFactory` (snapshot = committed sources).
+Fixed since (2026-10-05, later): overload-trial undo; deferred conditionals by their branches; binary `merge` + class `#ext`
+(`anyStruct`); generic refs resolve in their own module; Proxy (lib `ProxyObject`, `proxyArms`, typed as its target, slot opened);
+isNaN/isFinite; sibling functions materialized out of order (nearer binding, pinned holders); nested self-reference; ArrayBuffer.isView;
+`for...of` over `any` by protocol; well-known symbol keys through `as any`; method values through `any` (bound); held-closure arms by
+kind. binary itself: DataViewTypedArray has its own typed-array methods (its Array.prototype borrowing was broken under node too).
+**Next blocker**: `Array<i32>.slice` -- `Array._raw(result)` with `result: i32[]` instantiates `_raw<number>`: inference widens the
+machine-int range `i32` to `number` (`widenLiterals`), so `Array<i32>` meets `Array<number>`. Probe with
+`SNAP=<snapshot> probe-decl.ts <snapshot>/binary-libs/src/wasm.ts insertFactory` (snapshot = committed sources; refresh it after
+committing binary).
 Known gaps found: a generic instantiation is its own class (statics per instantiation); a literal with a method into a class-typed
 slot (`object literal for 'A' has unknown property`); `unknown + unknown` accepted; method values (`obj.m`) have no identity;
 `[].values().next().value` types `number | TResult` (a leaked type parameter); wasm lib has no `localeCompare` (wasm-backend.ts:1931,
