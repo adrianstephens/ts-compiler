@@ -8005,10 +8005,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 
-	// A bare type-alias name (`declare type Uint8Array = TypedArray<u8>`) to its generic target, instantiated the ordinary way (`ensureClass`).
-	function resolveClassAlias(name: string): { name: string; typeArgs: Type[] } | undefined {
+	// A bare lib type-alias name to the lib class it names (`declare type Uint8Array = TypedArray<u8>`, `ArrayBufferLike = ArrayBuffer`),
+	// instantiated the ordinary way (`ensureClass`).
+	function resolveClassAlias(name: string): { name: string; typeArgs?: Type[] } | undefined {
 		const target = libRoot.type(name)?.type;
-		return target?.type === 'ref' && target.typeArgs?.length && LIB_DECL_MAP.get(target.name)?.type === 'class_decl'
+		return target?.type === 'ref' && target.name !== name && LIB_DECL_MAP.get(target.name)?.type === 'class_decl'
 			? { name: target.name, typeArgs: target.typeArgs }
 			: undefined;
 	}

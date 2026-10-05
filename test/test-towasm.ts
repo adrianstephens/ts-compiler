@@ -2860,6 +2860,15 @@ async function main() {
 	}
 
 	{
+		const { libAlias } = await compile(`
+			function g(...args: any[]) { const [buffer, off] = args as [ArrayBufferLike, number]; return buffer.byteLength - off; }
+			function h(b: ArrayBufferLike) { return b.byteLength; }
+			export function libAlias(): number { const b = new ArrayBuffer(8); return g(b, 3) * 10 + h(b); }
+		`);
+		check("a non-generic lib alias of a lib class (ArrayBufferLike) is that class", libAlias(), 58);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
