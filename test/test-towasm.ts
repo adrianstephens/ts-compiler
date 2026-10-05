@@ -1729,6 +1729,22 @@ async function main() {
 			main:	`import { len, make } from './lib'; export function shadowed(): number { return len(make(3)); }`,
 		}, 'main');
 		check("shadowed() (a module's own generic type over a lib class's name)", shadowed(), 8);
+		// Nested functions materialized out of order (a cycle through make): a sibling's holder outlives the scope that made it, and the body's
+		// own `make` is nearer than the module's.
+		const { nestedOrder } = await compileMulti({
+			lib:	`function factory<R>(k: R) {
+					function make(x: number, y: number, z: number, w: number): number { return x + y + z + w + (x > 100 ? ctor(x - 100) : x > 90 ? fromArray([1]) : 0); }
+					function create(n: number) { return make(n, 0, 0, 0); }
+					function fromArray(a: number[]) { return create(a.length); }
+					function fromBuffer(x: number, y = 0) { return make(x, y, 0, 1); }
+					function ctor(x: number): number { return fromBuffer(x); }
+					return ctor;
+				}
+				export function make(a: number, b: number, c?: boolean) { return a * 1000; }
+				export const F = factory<number>(1);`,
+			main:	`import { F, make } from './lib'; export function nestedOrder(): number { return F(5) + F(105) * 10 + F(95) * 100 + make(1, 2); }`,
+		}, 'main');
+		check("nestedOrder() (sibling functions materialized out of order)", nestedOrder(), 11826);
 	}
 
 	{

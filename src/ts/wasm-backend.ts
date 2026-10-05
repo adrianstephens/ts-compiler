@@ -2346,14 +2346,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// the missing local becomes a holder the closure and the sibling's declaration share. Undefined for a name that is no sibling.
 	function ensureForwardHolder(ctx: FunctionContext, name: string): W.Local | undefined {
 		// Its own initializer's declarator first: a self-reference may sit in any nested block, which the top-level scan misses.
-		const d = ctx.initializing?.slice().reverse().find(d => d.name === name)
-			?? ctx.ownBody?.flatMap(s => s.type === 'var_decl' ? s.declarations : []).find(d => d.name === name);
+		const self	= ctx.initializing?.slice().reverse().find(d => d.name === name);
+		const d		= self ?? ctx.ownBody?.flatMap(s => s.type === 'var_decl' ? s.declarations : []).find(d => d.name === name);
 		// A sibling function declaration not yet created: mutual recursion.
 		const fd = d ? undefined : ctx.ownBody?.find((s): s is Extract<Stmt, { type: 'function_decl' }> => s.type === 'function_decl' && s.name === name && !!s.body);
 		if (fd) {
 			const fnType = (fd as { scope?: Scope }).scope?.value(name) ?? checkerTypeOf({ ...fd, type: 'function' } as Expr, ctx.scope);
 			const fnWtype = typeOf(fnType);
-			return fnWtype ? declareHolder(ctx, name, fnWtype, fnType) : undefined;
+			return fnWtype ? declareHolder(ctx, name, fnWtype, fnType, true) : undefined;
 		}
 		if (!d)
 			return undefined;
@@ -2361,18 +2361,19 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (!tsType)
 			return undefined;
 		const wt = typeOf(tsType);
-		return wt ? declareHolder(ctx, name, wt, tsType) : undefined;
+		return wt ? declareHolder(ctx, name, wt, tsType, !self) : undefined;
 	}
 
 
 	// Promotes `name` to a shared heap holder: a captured BINDING, so a write from either side of the capture is seen by the other.
-	function declareHolder(ctx: FunctionContext, name: string, wt: W.Type, tsType: Type): W.Local {
+	// `pinned`: a binding of the body's own top level, outliving the nested scope that first needs it (a sibling's closure built mid-scope).
+	function declareHolder(ctx: FunctionContext, name: string, wt: W.Type, tsType: Type, pinned = false): W.Local {
 		if (process.env.DBGHOLDER)
 			console.error(`HOLDER ${ctx.name}.${name}`);
 		// The holder's field must be DEFAULTABLE (allocated before the declaration that fills it runs): a reference is
 		// nullable, but a scalar stays RAW -- `types.nullable` would box it, and `holderInner` must describe the value.
 		const holderTypeIndex = types.holder(toValType(typeof wt === 'string' ? wt : types.nullable(wt)));
-		const local = ctx.declareValue(name, { typeIndex: holderTypeIndex, nullable: false }, tsType);
+		const local = ctx.declareValue(name, { typeIndex: holderTypeIndex, nullable: false }, tsType, pinned);
 		local.holderInner = wt;
 		ctx.emit(I.struct.new_default(holderTypeIndex), I.local.set(local.index));
 		return local;
@@ -5443,7 +5444,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			// `undefined` is no declared value (`case 'identifier'` reads it as `isNullLiteral`).
 			if (name === 'undefined' || (name === 'this' && thisHolder))
 				continue;
-			if (!ctx.resolvesName(name) && !resolvesGlobally(ctx, name) && !ensureForwardHolder(ctx, name))
+			// The enclosing body's own declaration (a sibling function not created yet) before the module's: it is the nearer binding.
+			if (!ctx.resolvesName(name) && !ensureForwardHolder(ctx, name) && !resolvesGlobally(ctx, name))
 				throw `unresolved identifier '${name}'`;
 		}
 
