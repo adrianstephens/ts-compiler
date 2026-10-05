@@ -265,6 +265,10 @@ function argContext(a: Expr, declared: Type | undefined, sig: TS.CallSig, scope:
 // against the candidate's OWN parameter, since a literal's type depends on it (`new Map([['', true]])` fits only as tuples).
 function candidateFits(c: TS.CallSig, args: Expr[], scope: Scope, typeArgs?: Type[], typedIn = args.map(() => new Map<Type | undefined, Type>()), yieldCollector?: Type[], pos: Location = { line: 0, col: 0 }): boolean {
 	const paramAt = (i: number) => T.paramTypeAt(c, i, scope);
+	// TS's hasCorrectArity: a spread of unknown length (no tuple) starts past the required parameters, and lands in a rest or optional one (TS2556).
+	const spreadAt = args.findIndex(a => a.type === 'spread' && T.resolveOwn(trial(() => typeOf(a.operand, scope, false)), scope).type !== 'tuple');
+	if (spreadAt >= 0 && (spreadAt < T.minArgumentCount(c, scope) || (!c.rest && spreadAt >= c.params.length)))
+		return false;
 	// A callback fits as any function (the chosen candidate fixes its parameters later); every other argument gets the final pass's
 	// own context (`argContext`). Muted and unwidened, typed once per distinct context (`typedIn`).
 	const ts = args.map((a, i) => {

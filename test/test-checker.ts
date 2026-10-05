@@ -475,6 +475,12 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		declare const L: { (v: string): number; new (v: string): object };
 		const a = ['1'].map(L), q: string = a[0];`,
 		[NOT_ASSIGNABLE('number', 'string')]],
+	['a spread of unknown length picks the overload whose rest takes it (TS2556)', `
+		declare function g(code: number): string;
+		declare function g(...codes: number[]): boolean;
+		const u: number[] = [1, 2], t: [number] = [1];
+		const r: string = g(...u), q: boolean = g(...t);`,
+		[NOT_ASSIGNABLE('boolean', 'string'), NOT_ASSIGNABLE('string', 'boolean')]],
 ];
 
 (async () => {
