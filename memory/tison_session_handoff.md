@@ -1,10 +1,10 @@
 ---
 name: tison-session-handoff
-description: LIVE cold-start state for the wasm-backend self-hosting work -- where things stand (survey at 11aa1d6, 2026-10-05), the top blockers, what the user decided and has not decided, open-not-fixed items, and the contracts to know before editing codegen. Read this before anything else.
+description: LIVE cold-start state for the wasm-backend self-hosting work -- where things stand (survey at 11aa1d6, 2026-10-05; binary work to 2026-10-06), the top blockers, what the user decided and has not decided, open-not-fixed items, and the contracts to know before editing codegen. Read this before anything else.
 metadata:
   node_type: memory
   type: project
-  modified: 2026-10-05
+  modified: 2026-10-06
 ---
 
 **Read this first, then [[tison_towasm_self_hosting_plan]] (distilled: instruments, traps, design invariants) only for a specific
@@ -20,83 +20,29 @@ wasm-backend.ts slice 0 peak above the 2 GB default and report CRASHED otherwise
 16 GB Mac to a halt (2026-10-01)**: the scheduler now costs every job at >= half the heap cap (V8's garbage ceiling), so 6144
 runs ~2 workers here -- slower, but the machine stays usable. Ask before a full run; `SURVEY_JOBS` caps it further.
 
-## State at 2026-10-05
+## State at 2026-10-06
 
-Survey at `11aa1d6` (snapshot `compiler@cc3edca`): **399/421 declarations compile, 22 fail** (was 260/161 at `cc3edca`).
-wasm-backend.ts's worker still CRASHES (OOM, "does not parse" row). Rows left, by blocks:
-- **8, wasm.ts: `unresolved identifier 'bin'`** -- NEXT. (Was "unknown method 'as'" on `bin.as(...)`, wasm.ts:47; star re-export.)
-- 3, checker.ts + transform.ts: `'null'/'undefined' is only supported where a nullable object type ... is expected`.
-- 2 transform.ts local `class_decl`; 2 codegen.ts `'this' can't be used yet`; 1 each: core.ts closure-through-any, wasm.ts
-  `[...unknown[]]` rest (checker), wasm.ts closure param `p` untyped, transform.ts `SwitchCase` rest (checker), `unknown field 'type'`,
-  `loadLib` local `spec`, async function expression, walker.ts `recur` (checker) and unary `+`, codegen.ts `BigInt(string | undefined)`.
+Survey at `11aa1d6` gave 399/421; since then the binary-libs wasm.ts work: the instruments now resolve the bare `@isopodlabs/binary`
+to SOURCE (`assistant/sibling-paths.ts`, shared by every probe), which exposed the real binary gaps, fixed one by one (abstract
+classes; imported superclasses; class values; static fields as lazy globals; JSON lib; Awaited lib; symbol-keyed fields; index
+signatures; union of generic signatures; template-resolution fallback for generic instances; ...). Next: wasm.ts `insertFactory`/
+`WasmModule` probes stop at `RemainingRepeat<...>` "closure parameter 'v' needs an explicit number/boolean/object type";
+`binary-libs/assistant/tt.ts` (`bin.as(UINT8, ...)`) stops at `Awaited<ReadType<any>>` (the deferred any+infer conditional above).
+Re-run the survey before trusting rows.
 
-**binary-libs' builder `I` WORKS** (user: "evaluate the types" + "dynamic objects"): `I` is a dynamic object built by writes through
-`any`; codegen.ts `isRef` probes OK. Mechanisms: `builtShapes` records each built shape with its scope, and a shape counts as built
-only by a literal ASSIGNABLE to it (names alone collided: `{f64: F}` vs `{f64: Nest & Nest & F}`); `Object.assign(fn, {...})` builds
-its callable object; a shape with a call signature can be open; held rest closures pack rest args (`emitHeldCall`); a field holding no
-static closure is called through `any`; `takesArgCount` (an unfilled slot must be nullable/any). Checker: a function PART seals an
-intersection in assignability (`sealed(..., functions)`); member access keeps functions open because expando holders and inherited
-statics on constructor types are unmodelled (sealing everywhere = +44 corpus false positives -- the proper fix is to model them).
-Self-check errcount: checker/type-core/codegen 0, wasm.ts 1 (1636), wasm-backend.ts 9 (pre-existing).
+## Gates baseline (2026-10-06)
 
-## The direction since 2026-09-21 (the user's) and what it settled
-
-`wasm-backend.ts` had grown by giving each failing case its own path because it RE-DERIVED types the checker already knew. Now **the
-checker stamps each expression's type** (`checkedTypeOf`, [[tison_checker_type_stamps]], ~94% coverage) and **representation is the
-backend's own choice** ([[tison_representation_table]]). Landed: backend consolidation (W.Type guards, one closure-call path, one runtime-
-helper mechanism, `resolvePlace` for every place read/write, `classifyCall`/`emitCallee`/`emitGuardedCall`/`dispatchArm`, `emitShortCircuit`);
-call resolution reads the checker's stamp (`checkedCallOf` = `{sig, typeArgs}`; deleted `inferCallTypeArgs`/`overloadForArgs`/the
-checker's `resolveOverload`; `implementationOf` + `callTypeArgs`); narrowing machinery in the backend deleted; canonical boxing
-(`coerceValue`); the interrupted resumable unification (generators and async share `resumableFrame`/`emitResumableBody`); the checker owns
-flow and numeric ranges (below); machine types; **type parameters are opaque as TS's** (`302be07`); TS's inference PRIORITY (a callback's
-return outranks the destination, which only fills a parameter nothing else spoke for; codegen keeps the caller's layout by FLOW:
-`callTypeArgs` instantiates with the destination's argument where the checker's is an ANONYMOUS object shape, the destination is struct
-shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
-
-**Rules learned (checker/flow/scale)**
-- `checkStmt` returns its flow (`undefined` = never falls out); `joinFlow` merges; `break`/`continue` deliver to a `FlowTarget`; a loop head
-  iterates QUIETLY (`Scope.quiet`) to a fixpoint then one real walk. A check narrows iff it reports, stamps, or is quiet -- a QUERY (the
-  backend's `checkerTypeOf`) must not mutate its scope; never RESOLVE a declared type during hoisting (bakes an interface before a later
-  lib block merges into it -- hit twice); never re-type an expression with `err` (duplicate diagnostics -- hit twice).
-- Numeric ranges in the flow: `rangeStep` = the USER'S RULE (`++`/`--`/`+= a`/`-= a`/`x = x +- a` never overflow i32, else i64, both sides
-  fit); loop heads `rangeWiden` to machine limits then step down; `combineTypes` merges true intervals; a `let`'s representation = the hull
-  of its stamped reads+writes (`d.flowType`). `NumRange.integer` EXCLUDES -0. 32-bit `+ - *` keeps 32 bits only where the checker's stamp
-  says i32/u32, else `f64`. u32 compares `_u`; mixed i32/u32 compare as f64 (NOT i64). Bigints are `i32`/`i64` where the checker proves the
-  range; `scalarBinding` reads a machine-scalar binding as it (a boxed union narrowed to `number` must unbox -- letting every binding win
-  regressed 60 rows).
-- Machine types: lib.d.ts declares `Int<Bits, Signed>`/`Float<Bits>` (built in by being declared in the ROOT = lib scope) and `i8..u64/f32/
-  f64` as applications; `T.machineOf` follows the alias chain from the DECLARATION, never a name. User: an annotation is TRUSTED, not
-  checked -- the value is converted into its slot automatically, SATURATING (`trunc_sat`) is fine; a machine type's JS semantics are
-  `number`'s for Bits <= 53 and `bigint`'s above. `machineSlot` is honest (i8/i16 -> i32, u8/u16 -> u32, u64 own); a NUMBER's box is ALWAYS
-  `f64`; a slot holding two array storages opens PER DECLARATION (user chose per-slot over per-type; aliasing kept); out-of-range packed
-  writes WRAP.
-- Scale: fluent builders (`B<T & F<T>>`) double per step, so printed keys (`typeKey`) are exponential -- use `T.typeId` (structural hash,
-  DAG-linear; lives on the node, skips checker stamps) for any equality/cache/set key; `resolve`'s structural cache is weak. A cycle guard
-  must be a WeakMap (a Map OOMed the workers). Each named alias body resolves with its OWN depth budget (`resolveAliasBody`). Conditionals
-  distribute at their own node; `mentionsAbstract` must cover indexed/keyof/mapped/conditional kinds. An undeclared TYPE name is silently
-  "abstract" (no TS2304 for types): suspect a missing lib name whenever a conditional over concrete-looking types stays deferred.
-- A stamp is taken when a closure is first checked, so a `let`/`const` declared LATER in its block was unbound there: `hoist` binds each lazily
-  (`Scope.addLazyValue`); speculative walks (`trying`) stamp nothing and undo what they wrote onto the AST (`ahead`/`written`). `var` is
-  function-scoped (`scope.varScope()`; backend `hoistVars`). A node codegen SYNTHESIZES is typed with `typeOf(..., overStamps)`.
-- Proof a refactor changes no behaviour: **a WAT A/B over the towasm suite** (`suite-wat-diff.py before.out after.out` names the tests whose
-  printed WAT changed; `test-watdiff.py before.out after.out <test>` shows one) -- stronger than difftest agreeing. A snippet runs with
-  `towasm-run.ts file.ts export...` (reads dist/).
-- **A checker change needs a self-hosting gate too**: `SNAP=<packages root|snapshot> errcount.ts <surveyed files>` counts checker errors under
-  the survey's sibling-source resolution and the wasm lib. The corpus A/B (TS's lib, single files) and test-checker cannot see a lazily
-  inferred IMPORT read during a trial (db47972: walker.ts 1 -> 13 errors, both instruments green). Probes, all `SNAP`-aware where they load
-  modules: `probe-ctx.ts file [lines]` (expected/checked per call/new/arrow/array, `KINDS=`), `probe-obj.ts file [lines]` (object literals'
-  flow/expected/checked), `probe-call.ts file` (each call's resolved overload). In wasm-backend/codegen code a stack needs
-  `new globalThis.Error().stack`: codegen.ts's own `Error` class shadows the global and has no stack.
-- The checker never reports an unknown name for TYPES; for values TS2304 is behind `Scope.unknownNames` ([[tison_unknown_name_diagnostic]]).
-
-## Gates baseline (2026-10-05)
-
-corpus A/B vs `07b036e`: ERROR +13 (f13 +2, 9 tsc-confirmed, 2 real), GAP 195 (-76). difftest 2232/2234 agree. User decisions all
-DONE: builder types + dynamic-object `I`; per-instance method override = closure slot `#own:<method>`; `new Map()` = TS's
-`Map<any, any>` built at its contextual instantiation.
-**Checker queue (left):** a declaration's initializer is checked WIDENED (`const r: 'a' = 'b'` only GAPs); checking it precisely
-(corpus +24) exposes flow ranges of `number` slots compared as literals. Fix: tell flow ranges apart from literal types, then drop
-the widening. Also `unique symbol` types (a remapped symbol key is kept unfiltered).
+corpus A/B vs `07b036e`: ERROR +24 (was +13), GAP 195. The +11 from index-signature checking (`b6996e0`) are 10 errors tsc ITSELF
+reports (the corpus's tsc-clean classification is stale for them -- always re-run real tsc on a new corpus error, matching by
+line-1 as well, since our positions are the NEXT token's) + 1 false positive left: reverseMappedTupleContext.ts:47 (reverse-mapped
+inference through a nested homomorphic mapped type falls back to the constraint). difftest 2232/2234. Self-check errcount:
+checker/type-core/codegen 0, wasm.ts 2, wasm-backend.ts 8. **test-towasm reads `dist`: `npm run build` before it** (lib files too).
+User decisions all DONE (builder types + dynamic-object `I`; `#own:` override slots; `new Map()` contextual; class values = constructor
+closures with a per-class env tag, statics read by tag).
+**Checker queue (left):** declarations checked WIDENED (`const r: 'a' = 'b'` GAPs; flow ranges vs literals); `unique symbol`; a call on
+an intersection of function types picks only the first signature (`p('x')` on `((s: number) => R) & ((s: string) => R)` errs);
+`any extends P<infer R>` stays deferred (TS: both branches, a naked `infer` binds `any`, a nested one `unknown`; collapsing it broke
+corpus cases where an erased placeholder stood for a type parameter, so it was reverted).
 
 ## Next up (2026-09-30, end of session)
 
