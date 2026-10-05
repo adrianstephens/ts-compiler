@@ -8807,6 +8807,17 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			});
 			const ext = closureExtArm(() => kind === 'set' ? emitClosureExtSet(dctx, keyArg, localArg(dctx, value, W.REF_ANY_NULLABLE))
 				: kind === 'get' ? emitClosureExtGet(dctx, keyArg, result) : emitClosureExtDelete(dctx, keyArg));
+			// An element holder keyed by an array index (`arr["0"]`) reads or writes that element, as a number key does.
+			const holders = kind === 'delete' ? [] : elementHolders(kind);
+			if (kind !== 'delete' && holders.length) {
+				const n = dctx.temp(`$arrayIndex$${dctx.tempCounter++}`, 'f64');
+				dctx.emit(I.local.get(key));
+				coerceTop(emitCallOn(ensureClass('String')!, '_arrayIndex', [], dctx), dctx, 'f64');
+				dctx.emit(I.local.tee(n), I.f64.const(0), I.f64.ge);
+				holders.forEach((h, i) => dctx.emit(I.local.get(recv), I.ref.test(h.heap), ...i ? [I.i32.or] : []));
+				dctx.emit(I.i32.and);
+				dctx.emitIf(undefined, () => dctx.emit(I.local.get(recv), I.local.get(n), ...kind === 'set' ? [I.local.get(value)] : [], I.call(ensureAnyIndex(kind).funcIndex), I.return));
+			}
 			emitTypeCascade(dctx, recv, [...dynamic, ...ext, ...owners.map(({ heap, cls }) => ({ heap, emit: () => {
 				const obj = dctx.temp(`$keyobj$${heap}`, cls.thisWtype!);
 				dctx.emit(I.local.set(obj));
@@ -8878,14 +8889,19 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					}, asKey);
 				}
 			} });
-			// A string's storage is also the heap type of a class that owns its methods; the string arm reads it, and a string has nothing to write.
-			const strings	= types.array('i16');
-			const accessor	= kind === 'get' ? '__get' : '__set';
-			const indexable	= distinctHeaps(dynamicReceivers(false).filter(r => r.heap !== strings && (r.cls.methodDecls.has(accessor) || !!r.cls.inlineMethods?.has(accessor))
-				&& !!T.lookupMember(r.cls.thisTsType, 'length', libGlobal)));
-			const stringArm	= kind === 'get' ? [elementOf({ heap: strings, cls: builtinTypeOwner('string')! })] : [];
-			emitTypeCascade(dctx, recv, [...stringArm, ...indexable.map(elementOf)], asKey, result);
+			emitTypeCascade(dctx, recv, elementHolders(kind).map(elementOf), asKey, result);
 		});
+	}
+	// What reads or writes elements by position. A string's storage is also the heap type of a class that owns its methods; the string arm
+	// reads it, and a string has nothing to write.
+	function elementHolders(kind: 'get' | 'set'): Receiver[] {
+		const strings	= types.array('i16');
+		const accessor	= kind === 'get' ? '__get' : '__set';
+		return [
+			...kind === 'get' ? [{ heap: strings, cls: builtinTypeOwner('string')! }] : [],
+			...distinctHeaps(dynamicReceivers(false).filter(r => r.heap !== strings && (r.cls.methodDecls.has(accessor) || !!r.cls.inlineMethods?.has(accessor))
+				&& !!T.lookupMember(r.cls.thisTsType, 'length', libGlobal))),
+		];
 	}
 
 	// `x.name` where `x` is `any`: a `ref.test` over every representation declaring `name`, boxed. A receiver declaring nothing reads `undefined`;

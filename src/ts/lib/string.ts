@@ -110,6 +110,20 @@ export class String {
 
 	// Out of range is `''`, not a trap -- so this cannot be the bare `array.get_u`/`array.new_fixed` pair
 	// it used to be. `charCodeAt` stays raw: every caller in this file guards its own index.
+	// The array index this string names (`"12"`, not `"012"`), as JS's CanonicalNumericIndexString below 2^32 - 1; else -1.
+	_arrayIndex(): number {
+		const n = this.length;
+		if (n === 0 || n > 10 || (n > 1 && this.charCodeAt(0) === 0x30))
+			return -1;
+		let v = 0;
+		for (let i = 0; i < n; i++) {
+			const d = this.charCodeAt(i) - 0x30;
+			if (d < 0 || d > 9)
+				return -1;
+			v = v * 10 + d;
+		}
+		return v < 4294967295 ? v : -1;
+	}
 	charAt(pos: i32): string {
 		return pos < 0 || pos >= this.length ? '' : String.fromCharCode(this.charCodeAt(pos));
 	}

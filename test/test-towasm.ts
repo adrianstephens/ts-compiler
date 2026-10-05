@@ -4578,6 +4578,10 @@ async function main() {
 			export function topRegex(): number { const m = R.exec('1,'); return m ? m[0].length : -1; }
 		`);
 		check('a module-level regex global', topRegex(), 1);
+		const { keyedElement } = await compile(`
+			export function keyedElement(): number { const a: any = [5, 6]; const s: any = 'xy'; return a['1'] + (s['0'] === 'x' ? 10 : 0) + (a['01'] === undefined ? 100 : 0); }
+		`);
+		check('an array index key reads the element through any', keyedElement(), 116);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };
