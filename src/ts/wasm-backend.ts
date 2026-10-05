@@ -9105,9 +9105,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// The owners of a real, non-`this`-reassigning `name` fitting `argTs`, which a dynamic (`any`) call tests: a `this`-reassigning method
 	// (`Array<T>.push`) has no write-back target through `any`.
 	function findAnyDispatchCandidates(name: string, argTs: Type[], ctx: FunctionContext) {
-		return distinctHeaps(dynamicReceivers(true).filter(r => r.cls.methodDecls.get(name)?.some(d => d.body && !d.rest && !assignsToThis(d.body) && T.argsFit(T.FixSig(d, T.ANY), argTs, ctx.scope))))
+		const fitting = (r: Receiver) => r.cls.methodDecls.get(name)?.find(d => d.body && !d.rest && !assignsToThis(d.body) && T.argsFit(T.FixSig(d, T.ANY), argTs, ctx.scope));
+		// The overload the arguments fit, chosen here: the call it serves has no node to resolve by.
+		return distinctHeaps(dynamicReceivers(true).filter(r => !!fitting(r)))
 			.flatMap(r => {
-				const funcInfo = ensureMethod(r.cls, name, [], ctx);
+				const funcInfo = ensureMethod(r.cls, name, [], ctx, fitting(r));
 				return funcInfo ? [{ ...r, funcInfo }] : [];
 			});
 	}

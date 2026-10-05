@@ -411,8 +411,9 @@ export class TypedArray<T extends number | bigint> {
 		for (let i = 0; i < src.length; i++)
 			this[offset + i] = src[i];
 	}
+	// Any array-like, as TS's `ArrayLike<number>`: its own representation whatever its element kind (`set([9])` from a `number[]`).
 	// @ts-expect-error - tison extension: multiple method implementations
-	set(array: T[], offset: i32 = 0): void {
+	set(array: ArrayLike<T>, offset: i32 = 0): void {
 		if (offset < 0 || offset + array.length > this.length)
 			throw new RangeError('offset is out of bounds');
 		for (let i = 0; i < array.length; i++)

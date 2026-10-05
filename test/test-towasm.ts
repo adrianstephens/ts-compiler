@@ -2960,6 +2960,13 @@ async function main() {
 	}
 
 	{
+		const { anySet } = await compile(`
+			export function anySet(): number { const u: any = new Uint8Array(4); u.set(new Uint8Array([7, 8]), 1); u.set([9]); return (u[0] as number) * 100 + (u[1] as number) * 10 + (u[2] as number); }
+		`);
+		check("an overloaded lib method called through any: the overload the arguments fit; set from any array-like", anySet(), 978);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
