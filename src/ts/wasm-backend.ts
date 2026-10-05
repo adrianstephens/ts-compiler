@@ -8557,10 +8557,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				ctx.inScope(() => {
 					const bind = lowering(ctx).emit;
 					superCtor.params.forEach((p, i) => {
-						const argExpr = call.arguments[i] ?? p.default;
+						const optional	= hasMod(p, 'optional');
+						const argExpr	= call.arguments[i] ?? p.default ?? (optional ? Identifier('undefined') : undefined);
 						if (!argExpr)
 							throw `'super(...)': missing argument parameter '${describeBinding(p.key)}'`;
-						bind(JS.VarDecl('const', JS.Var(p.key, argExpr, p.typeAnnotation)));
+						bind(JS.VarDecl('const', JS.Var(p.key, argExpr, p.typeAnnotation && T.optional(p.typeAnnotation, optional))));
 					});
 					emitCtorStatements(superCtor, superClass, ctx, setField);
 				});

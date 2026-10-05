@@ -2613,6 +2613,16 @@ async function main() {
 	}
 
 	{
+		const { superOpt } = await compile(`
+			class Base { constructor(public a: number, public b = 2, public c?: number) {} }
+			class Sub extends Base { constructor() { super(10); } }
+			export function superOpt(): number { const s = new Sub(); return s.a + s.b + (s.c === undefined ? 100 : 0); }
+		`);
+		check("super(...) omitting an optional parameter passes undefined", superOpt(), 112);
+	}
+
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
