@@ -250,6 +250,11 @@ function argContext(a: Expr, declared: Type | undefined, sig: TS.CallSig, scope:
 	// hints, so `[[k, v]]` and `xs.map(x => [a, b])` become tuples), and itself to an `as const` argument, which reads only mutability.
 	const generic	= !!sig.typeParams?.some(p => T.mentionsTypeParam(declared, p.name));
 	const constArg	= a.type === 'as' && isConstContext(a.typeAnnotation);
+	// An array literal against `K[]`: its elements' context is the bare type parameter, so a primitive-constrained one keeps their literals
+	// (TS's isLiteralOfContextualType: `keys: K[]` with `K extends string` infers `"image"` from `["image"]`).
+	const element	= declared.type === 'array' ? declared.element : declared.type === 'ref' && (declared.name === 'Array' || declared.name === 'ReadonlyArray') ? declared.typeArgs?.[0] : undefined;
+	if (a.type === 'array' && element?.type === 'ref' && !element.typeArgs && sig.typeParams?.some(p => p.name === element.name))
+		return declared;
 	if (!generic || constArg || ((a.type === 'array' || a.type === 'call') && tupleShaped(declared, scope)))
 		return declared;
 	// A generic call's result is inferred from the rest, as TS's non-fixing mapper instantiates it: the parameters still unsolved stand for nothing yet.
@@ -1658,6 +1663,10 @@ function contextualMember(t: Type, key: string, scope: Scope): Type | undefined 
 // literal checked against it keeps its literal type instead of widening.
 function contextKeepsLiteral(t: Type, scope: Scope): boolean {
 	return T.unionMembers(t, scope).some(m => {
+		// TS's isLiteralOfContextualType: a type parameter constrained to a primitive (`K extends string`) keeps the literal too.
+		const bound = T.typeParamConstraint(m, scope);
+		if (bound)
+			return T.unionMembers(bound, scope).some(c => (r => T.isRef(r, 'string') || T.isRef(r, 'number') || T.isRef(r, 'bigint') || T.isRef(r, 'boolean') || r.type === 'literal')(T.resolveOwn(c, scope)));
 		const r = T.resolveOwn(m, scope);
 		return r.type === 'literal' || (r.type === 'range' && r.min !== undefined && r.min === r.max);
 	});
