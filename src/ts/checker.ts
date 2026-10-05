@@ -299,10 +299,11 @@ function applyContextualParams(fn: { params: JS.Param<Type>[]; typeParams?: TS.T
 			written(fn, 'typeParams');
 			fn.typeParams = sig.typeParams;
 		}
+		// Stamped where it is written: a name the context spells unqualified (`put<TypedArray>`) is this module's, wherever the type is read later.
 		params.forEach((p, j) => {
 			if (!p.typeAnnotation) {
 				written(p, 'typeAnnotation');
-				p.typeAnnotation = contextual(sig.params[j]) ?? restElem;
+				p.typeAnnotation = (t => t && T.stampScope(t, scope))(contextual(sig.params[j]) ?? restElem);
 			}
 		});
 	}
