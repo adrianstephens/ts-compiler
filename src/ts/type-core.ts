@@ -1070,6 +1070,15 @@ export function typeParamConstraint(t: Type, scope: Scope): Type | undefined {
 	return entry?.isTypeParam ? entry.type : undefined;
 }
 
+// TS's apparent type of a homomorphic mapped type over a type parameter constrained to an array or tuple: the mapping of that constraint
+// (`{[K in keyof T]: E<T[K]>}` with `T extends unknown[]` is `E<unknown>[]`).
+export function mappedApparentType(t: Type, scope: Scope): Type | undefined {
+	const arg		= t.type === 'mapped' && !t.nameType && t.constraint.type === 'keyof' ? t.constraint.argument : undefined;
+	const bound		= arg?.type === 'ref' ? typeParamConstraint(arg, scope) : undefined;
+	const shape		= bound && resolve(scope, bound).type;
+	return arg?.type === 'ref' && (shape === 'array' || shape === 'tuple') ? substituteType(t, new Map([[arg.name, bound!]])) : undefined;
+}
+
 // TS's `NonNullable` of a type parameter whose constraint may be nullish (`T & {}`, which relates through that constraint); else undefined.
 export function nonNullableParam(t: Type, scope: Scope): Type | undefined {
 	const bound = typeParamConstraint(t, scope);
@@ -2630,6 +2639,9 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 			return true;
 		// A type parameter is itself, else related through its constraint as a source; as a target only itself fits. Unconstrained it relates as `{}`
 		// without `strictNullChecks`, as in TS; with a union constraint it is also the union of `T & c` (`T extends 1 | 2` is `(1 & T) | (2 & T)`).
+		const apparent = mappedApparentType(src, scope);
+		if (apparent && recurse(apparent, dst, depth - 1))
+			return true;
 		const srcBound = typeParamConstraint(src, scope);
 		if (srcBound) {
 			const bound		= isRef(srcBound, 'unknown') && !scope.strictNullChecks() ? TS.ObjectType([]) : srcBound;
@@ -3115,7 +3127,7 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 		}
 		// TS's getApparentType: a type-parameter argument infers through its constraint (`A extends readonly T[]` gives `readonly E[]`
 		// its `E = T`), but a union, intersection or conditional target pairs its parts with the parameter itself first.
-		const bound = paramT.type !== 'union' && paramT.type !== 'intersection' && paramT.type !== 'conditional' ? typeParamConstraint(argT, scope) : undefined;
+		const bound = paramT.type !== 'union' && paramT.type !== 'intersection' && paramT.type !== 'conditional' ? typeParamConstraint(argT, scope) ?? mappedApparentType(argT, scope) : undefined;
 		if (bound)
 			return recurse(paramT, bound, depth - 1);
 		const a = resolveOwn(argT, scope);

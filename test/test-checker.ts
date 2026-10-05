@@ -463,6 +463,14 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		class C extends A {}
 		const b: string = new B(1).tell(), c: string = new C().tell();`,
 		["Type 'number' is not assignable to type 'string'", "Type 'number' is not assignable to type 'string'"]],
+	['a homomorphic mapped type over an array-constrained type parameter is apparently that array mapped', `
+		interface Expr<T> { t: T }
+		declare function fold(...args: Expr<any>[]): number;
+		function struct<T extends readonly unknown[]>(...fields: { [K in keyof T]: Expr<T[K]> }) {
+			const v = Object.values(fields), w: string = v;
+			return fold(...v);
+		}`,
+		["is not assignable to type 'string'"]],
 ];
 
 (async () => {
