@@ -4567,6 +4567,11 @@ async function main() {
 				export function importedBase(): number { return new Mid().tell() * 10 + new Top().tell(); }`,
 		}, 'main');
 		check('a superclass imported from another module', importedBase(), 27);
+		const { predicateAny } = await compile(`
+			function isStr(x: any): x is string { return x.length; }
+			export function predicateAny(): number { return (isStr('ab') ? 1 : 0) + (isStr('') ? 10 : 0) + (isStr({ length: 'x' }) ? 100 : 0); }
+		`);
+		check('an any returned as a type predicate is read by truthiness', predicateAny(), 101);
 	}
 
 	{

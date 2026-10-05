@@ -3466,8 +3466,15 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			got = big;
 		}
 		if ((want === 'i32' || want === 'u32') && W.isAny(got) && !boxesAsBoolean(e, ctx)) {
-			coerceTop(got, ctx, 'f64');
-			got = 'f64';
+			// Into a boolean (a predicate's `return x.prototype`), an `any` is read as JS reads it there: by truthiness.
+			const dest = contextOf(e);
+			if (dest && ownerFor(dest)?.name === 'Boolean') {
+				emitTruthyOf(got, ctx.narrowedTypeOf(e), ctx);
+				got = 'i32';
+			} else {
+				coerceTop(got, ctx, 'f64');
+				got = 'f64';
+			}
 		}
 		// A number's box is the `f64` one, whatever its compact form (`i32`, `u32`, `f32`).
 		if ((got === 'i32' || got === 'u32' || got === 'f32') && W.isAny(want) && !boxesAsBoolean(e, ctx)) {

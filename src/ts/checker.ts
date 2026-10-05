@@ -2778,9 +2778,12 @@ function checkFunctionBody(fn: TS.CallSig, body: JS.Stmt<any>[] | Expr | undefin
 		expected = p ? p.typeArgs![0] : expected;
 	}
 	// A declared type predicate (`x is T`) is neither checked against the body's boolean return nor inferred over.
-	const isPredicate = expected?.type === 'predicate';
-	if ((skipReturn && !generator) || (expected && T.isAny(expected)) || isPredicate)
+	const predicate = expected?.type === 'predicate' ? expected : undefined, isPredicate = !!predicate;
+	// A type predicate returns a `boolean` (an `asserts` one, nothing): its returns are checked, and typed, against that.
+	if ((skipReturn && !generator) || (expected && T.isAny(expected)) || predicate?.asserts)
 		expected = undefined;
+	else if (predicate)
+		expected = T.BOOLEAN;
 	// What a returned value is typed against: in an async function, the value or a promise of it.
 	const returnContext = expected && async ? T.awaitContext(expected) : expected;
 
