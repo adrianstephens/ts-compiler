@@ -2737,6 +2737,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (ctor)
 			return ctor;
 		switch (resolved.type) {
+			// A conditional the checker keeps deferred (over an erased or opaque check type) holds a value of one of its branches, as TS relates it;
+			// an `infer` binding left unbound has no representation of its own, so that branch is held as `any`.
+			case 'conditional':
+				return typeOf(T.deferredBranches(resolved));
 			// A type that RESOLVES to an array or tuple (an alias, `N[K]`) is an `Array` too, not raw storage nothing casts back to.
 			case 'array': {
 				const cls = ensureClass('Array', [resolved.element]);

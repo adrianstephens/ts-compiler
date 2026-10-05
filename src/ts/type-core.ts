@@ -1087,7 +1087,7 @@ export function nonNullableParam(t: Type, scope: Scope): Type | undefined {
 
 // A deferred conditional is one of its branches, the true one reading its check type as also its extends type (TS's
 // substitution types): `X extends T ? X : never` is an `X & T`.
-function deferredBranches(t: Extract<Type, { type: 'conditional' }>): Type {
+export function deferredBranches(t: Extract<Type, { type: 'conditional' }>): Type {
 	const check = typeId(t.checkType), narrowed = TS.IntersectionType([t.checkType, t.extendsType]);
 	const trueType = walker(undefined, undefined, (x: Type, process: <T extends Type>(x: T) => T) => typeId(x) === check ? narrowed : process(x)).type(t.trueType) ?? t.trueType;
 	return combineTypes([trueType, t.falseType]);

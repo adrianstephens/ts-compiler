@@ -2746,6 +2746,15 @@ async function main() {
 	}
 
 	{
+		const { deferredCond } = await compile(`
+			type Unwrap<T> = T extends PromiseLike<infer R> ? R : T;
+			function after<V, R>(v: V, then: (value: Unwrap<V>) => R): R { return then(v as Unwrap<V>); }
+			export function deferredCond(): number { const x: any = 5; return after(x, v => v + 1) as number; }
+		`);
+		check("a conditional kept deferred over an erased check type is held as its branches", deferredCond(), 6);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
