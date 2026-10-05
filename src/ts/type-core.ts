@@ -3237,8 +3237,9 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 			}
 
 		} else if (paramT.type === 'function' || paramT.type === 'constructor') {
-			// A callable built by `Object.assign(fn, {...})` is an intersection: `flattenIntersection` finds the callable part.
-			const callable = flattenIntersection(a, scope).find(p => p.type === paramT.type) as typeof paramT;
+			// The argument's signatures of that kind, its last as TS infers from (a function type, an intersection's callable part as
+			// `Object.assign(fn, {...})` builds, or an object's call member: `arr.map(Number)`).
+			const callable = signaturesOf(a, paramT.type === 'function' ? 'call' : 'construct', scope).at(-1);
 			if (callable) {
 				// A generic argument is instantiated in the context of a parameter that says what it takes (TS's higher-order inference); against one still
 				// naming this call's parameters, at its constraints.

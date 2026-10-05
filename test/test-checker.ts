@@ -471,6 +471,10 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 			return fold(...v);
 		}`,
 		["is not assignable to type 'string'"]],
+	['a callback argument infers from an object type\'s call signature', `
+		declare const L: { (v: string): number; new (v: string): object };
+		const a = ['1'].map(L), q: string = a[0];`,
+		[NOT_ASSIGNABLE('number', 'string')]],
 ];
 
 (async () => {
