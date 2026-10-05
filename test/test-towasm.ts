@@ -2755,6 +2755,36 @@ async function main() {
 	}
 
 	{
+		// binary's merge: a class instance read through a Switch takes its record's other fields, kept in its `#ext` map.
+		const { instExt } = await compile(`
+			class A { x = 1; get double() { return this.x * 2; } }
+			class W2 { v: number; constructor(v: number) { try { this.v = v; } finally { this.v = this.v + 1000; } } }
+			function put(o: any, k: string, v: any) { o[k] = v; }
+			function merge(obj: any, value: any): any {
+				if (value.constructor !== Object) {
+					for (const k of Object.keys(obj))
+						if (!(k in value))
+							value[k] = obj[k];
+					return value;
+				}
+				Object.assign(obj, value);
+				return obj;
+			}
+			export function instExt(): number {
+				const r = merge({ marker: 7 }, new A());
+				const w: any = new W2(5);
+				put(w, 'extra' + '', 3);
+				const had = 'extra' in w ? 1 : 0, key = 'ex' + 'tra', hadKey = key in w ? 1 : 0;
+				delete w[key];
+				const gone = key in w ? 0 : 1;
+				return (r.marker as number) + (r.double as number) * 10 + (r instanceof A ? 100 : 0) + Object.keys(r).length * 1000
+					+ (w.v as number) * 10000 + (had + hadKey + gone) * 100000000;
+			}
+		`);
+		check("a class instance holds keys written at run time that its class does not declare", instExt(), 310052127);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {

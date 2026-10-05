@@ -90,6 +90,13 @@ class Map<K, V> {
 	[Symbol.iterator](): Generator<[K, V], void, unknown> {
 		return __towasm_indexed<[K, V]>(() => this.keys_.length, i => [this.keys_[i], this.values_[i]]);
 	}
+	// These entries as an object's own keys (a dynamic object's, a struct's `#ext`): the raw `any[]` `Object.keys/values/entries` answer with.
+	anyEntries(which: string): RawArray<any> {
+		const n = this.keys_.length, out = new RawArray<any>(n);
+		for (let i = 0; i < n; i++)
+			out[i] = which === 'keys' ? this.keys_[i] : which === 'values' ? this.values_[i] : [this.keys_[i], this.values_[i]];
+		return out;
+	}
 
 	// `thisArg` is ignored (not needed for the few real call sites this project has, and not supported by the `for...of` loop either).
 	forEach(callbackfn: (value: V, key: K, map: Map<K, V>) => void, thisArg?: any): void {
@@ -124,11 +131,7 @@ class DynamicObject<V> {
 
 	// `Object.keys/values/entries` of an erased receiver: the raw `any[]` every representation answers with.
 	anyEntries(which: string): RawArray<any> {
-		const keys	= this.map_.keys();
-		const out	= new RawArray<any>(keys.length);
-		for (let i = 0; i < keys.length; i++)
-			out[i] = which === 'keys' ? keys[i] : which === 'values' ? this.map_.get(keys[i]) : [keys[i], this.map_.get(keys[i])];
-		return out;
+		return this.map_.anyEntries(which);
 	}
 }
 
