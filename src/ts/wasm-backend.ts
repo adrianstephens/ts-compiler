@@ -9321,6 +9321,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	const mod		= new wasm.WasmModule();
 
 	const promotedConsts = new Set<string>();
+	const eagerGlobals: (() => void)[] = [];
 
 	// EXPANDO fields are decided whole-program and UP FRONT, keyed by SHAPE (`collectExpandoFields`): a struct type is fixed once anything mentions it.
 	// TS width subtyping has no wasm analogue, so a shape receiving a value of another type is stored as `any` (`collectOpenShapes`).
@@ -9410,12 +9411,16 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						if (moduleId === '.')
 							promotedConsts.add(d.name);
 					} else if (moduleId === '.' && d.init) {
-						// Registered eagerly: once a global, its position in `ast.body` stops mattering.
-						const eager = eagerGlobal(d.init, d.typeAnnotation);
-						if (eager) {
-							ensureGlobal(d.name, eager.wtype, eager.init, s.kind !== 'const');
-							promotedConsts.add(d.name);
-						}
+						// Registered eagerly: once a global, its position in `ast.body` stops mattering. Typing it lays out classes, so it
+						// waits until which classes are extended is known (`everExtended`).
+						const init = d.init, name = d.name;
+						eagerGlobals.push(() => {
+							const eager = eagerGlobal(init, d.typeAnnotation);
+							if (eager) {
+								ensureGlobal(name, eager.wtype, eager.init, s.kind !== 'const');
+								promotedConsts.add(name);
+							}
+						});
 					}
 				}
 			}
@@ -9496,6 +9501,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		markExtendedInterfaces(body);
 		markIntersected.statements(body);
 	}
+	eagerGlobals.forEach(f => f());
 
 	// The entry module's `var`s, at any block depth: globals from the start, as JS hoists them, each declaration assigning
 	// one in `__toplevel`. Held nullable where their type is a reference, since nothing has assigned them yet.

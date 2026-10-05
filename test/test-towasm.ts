@@ -4572,6 +4572,12 @@ async function main() {
 			export function predicateAny(): number { return (isStr('ab') ? 1 : 0) + (isStr('') ? 10 : 0) + (isStr({ length: 'x' }) ? 100 : 0); }
 		`);
 		check('an any returned as a type predicate is read by truthiness', predicateAny(), 101);
+		// A module-level global typed before `everExtended` was known laid `ArrayBase` out final, under the `Array` that extends it.
+		const { topRegex } = await compile(`
+			const R = /^1/;
+			export function topRegex(): number { const m = R.exec('1,'); return m ? m[0].length : -1; }
+		`);
+		check('a module-level regex global', topRegex(), 1);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };
