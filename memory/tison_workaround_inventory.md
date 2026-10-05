@@ -104,7 +104,12 @@ OPEN:
   (common.ts) did `Object.setPrototypeOf(obj, value.constructor.prototype)`, re-classing a plain object as `value`'s class. towasm cannot:
   a struct's class is fixed. The line was REMOVED from binary for expedience, so binary no longer behaves as it did under node. Proper fix:
   a mutable prototype link on `DynamicObject` (plain `{}`s), with prototype-chain dispatch for methods, `instanceof` and `.constructor`,
-  which needs class methods compiled for a dynamic `this`. Restore the line in binary once that exists. Related, also open: a generic
+  which needs class methods compiled for a dynamic `this`. Restore the line in binary once that exists. The user says the result
+  MUST inherit the class's methods; no case is known yet (binary-libs has none; maybe fonts/bitmaps/archives). A/B 2026-10-05: their tests
+  give byte-identical output with and without the line, but only testfont, test_dds and test_7z actually run (quadratic: missing export;
+  test_psd: unhandled rejection; tar/zip: missing fixtures, Windows paths). Without identity it is feasible: `merge` returns `value`
+  augmented with `obj`'s other fields, readers use `s.obj = merge(...)`, and class instances get an `#ext` map (as closures have) for
+  the undeclared fields, `C & {fields}` held as `C`. Deferred until a real case is found (user, 2026-10-05). Related, also open: a generic
   instantiation is its own class (statics per `ClassInfo`), so a user generic's instances have different `.constructor`s; method values
   (`obj.m`) have no identity; a dynamic `A.prototype` read builds a fresh object each time.
 
