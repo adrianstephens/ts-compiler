@@ -2673,6 +2673,20 @@ async function main() {
 	}
 
 	{
+		const { litNotClass } = await compile(`
+			class A { x = 1; }
+			class B extends A { y = 2; }
+			class P { constructor(public x: number, public y: number) {} }
+			function sum(p: P) { return p.x + p.y; }
+			export function litNotClass(): number {
+				const a: any = new A(), o: any = { x: 1 };
+				return (o instanceof A ? 1 : 0) + (o.constructor === Object ? 10 : 0) + (a.constructor === A ? 100 : 0) + sum({ x: 2, y: 3 }) * 1000;
+			}
+		`);
+		check("an object literal is laid out as no class's instance", litNotClass(), 5110);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {

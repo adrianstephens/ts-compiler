@@ -3139,6 +3139,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		return found;
 	}
 
+	// A class, not a shape: what it builds is an instance of it, which no object literal is.
+	const hasConstructor = (cls: ClassInfo) => (cls.methodDecls.get('constructor') ?? []).some(d => d.body);
+
 	// A struct still being BUILT has a placeholder type with no `final` yet, and its fields so far match shapes it is not.
 	function laidOut(cls: ClassInfo) {
 		const t = types.get(cls.typeIndex);
@@ -3163,7 +3166,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// several are told apart by literal discriminants. `new Set`: one class may be reachable under two keys.
 	function declaredShape(props: Map<string, ShapeProp>, supplied: ReadonlySet<string | undefined>, orElse: () => ClassInfo | undefined, ambiguous = (): ClassInfo | undefined => undefined): ClassInfo | undefined {
 		const candidates = [...new Set(classes.values())].filter(cls =>
-			!!laidOut(cls) && !cls.anonymous && [...props.keys()].every(k => cls.fieldIndex.has(k)) && cls.fields.every(f => supplied.has(f.name) || f.optional)
+			!!laidOut(cls) && !cls.anonymous && !hasConstructor(cls) && [...props.keys()].every(k => cls.fieldIndex.has(k)) && cls.fields.every(f => supplied.has(f.name) || f.optional)
 			&& [...props].every(([k, p]) => (declared => !declared || p.fits(declared))(cls.fieldDeclaredType(k, global))));
 		const matches = candidates.length > 1 ? candidates.filter(cls => [...props].every(([k, p]) => admitsLiterals(cls.fieldDeclaredType(k, global), p.literals))) : candidates;
 		return matches.length === 1 ? matches[0] : matches.length ? ambiguous() : orElse();
@@ -9263,7 +9266,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			}),
 			...structs.map(({ heap, cls }) => ({ heap, emit: () => {
 				dctx.emit(I.drop);
-				if ((cls.methodDecls.get('constructor') ?? []).some(d => d.body))
+				if (hasConstructor(cls))
 					coerceTop(emitClassValue(cls, undefined, dctx), dctx, result);
 				else
 					objectValue();
