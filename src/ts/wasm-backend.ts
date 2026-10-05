@@ -9688,7 +9688,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				if (!wt)
 					return [];
 				const sig	= closureSigOf(wt);
-				return takesArgCount(sig, argTs.length) && (want === 'void' || fits(sig.result, want)) ? [{ cls, idx: idx!, wt }] : [];
+				// No argument of a kind its parameter cannot hold (a struct for a number): a reference is cast at run time, a scalar boxed or unboxed.
+				const fixed	= sig.hasRest ? sig.params.length - 1 : sig.params.length;
+				const scalar	= (x: W.Type) => typeof x === 'string' || !!W.unboxedPrimitive(x);
+				const takes	= argWtypes.every((w, i) => i >= fixed || W.isAny(w) || W.isAny(sig.params[i]) || scalar(w) === scalar(sig.params[i]));
+				return takesArgCount(sig, argTs.length) && takes && (want === 'void' || fits(sig.result, want)) ? [{ cls, idx: idx!, wt }] : [];
 			});
 			// An entry looked up by `name` at run time -- a dynamic object's, a closure's `#ext` -- is called through `any`.
 			const callEntry = (got: W.Type) => {

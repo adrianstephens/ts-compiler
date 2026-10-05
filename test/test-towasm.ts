@@ -2942,6 +2942,16 @@ async function main() {
 	}
 
 	{
+		const { heldGet } = await compile(`
+			class S { x = 7; }
+			const reader = { get: (s: S) => s.x };
+			const backing = { get: (i: number) => i * 2 };
+			export function heldGet() { const r: any = reader, b: any = backing; return (r.get(new S()) as number) + (b.get(5) as number) * 10; }
+		`);
+		check("a call through any picks only held closures whose parameters take the arguments", heldGet(), 107);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
