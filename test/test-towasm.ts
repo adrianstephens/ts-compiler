@@ -4572,6 +4572,21 @@ async function main() {
 			export function predicateAny(): number { return (isStr('ab') ? 1 : 0) + (isStr('') ? 10 : 0) + (isStr({ length: 'x' }) ? 100 : 0); }
 		`);
 		check('an any returned as a type predicate is read by truthiness', predicateAny(), 101);
+		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
+		const { classValue, adapters } = await compile(`
+			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };
+			class P { static SIZE = 4; constructor(readonly a: number, readonly b: number) {} sum() { return this.a + this.b; } }
+			class Q { constructor(readonly a: number, readonly b: number) {} sum() { return this.a * this.b; } }
+			function make<V extends Maker<any>>(type: V, x: number) { return new type(x, (type.SIZE || 1)); }
+			export function classValue(): number { return make(P, 3).sum() * 100 + make(Q, 5).sum(); }
+			type adapter<T, D> = (new (x: T) => D) | ((x: T) => D);
+			class W { constructor(readonly v: number) {} }
+			function isCtor<T, D>(m: adapter<T, D>): m is new (x: T) => D { return m.prototype?.constructor.name; }
+			function apply<D>(m: adapter<number, D>, x: number): D { return isCtor(m) ? new m(x) : m(x); }
+			export function adapters(): number { return apply(W, 7).v * 10 + apply(x => x + 1, 1); }
+		`);
+		check('a class value constructs and reads its statics', classValue(), 705);
+		check('a class value or a function, told apart by prototype', adapters(), 72);
 	}
 
 	{

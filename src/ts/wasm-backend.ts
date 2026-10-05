@@ -2637,9 +2637,18 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// A shape's call signatures as one closure. Every overload must resolve: a partial merge would silently
 	// misrepresent the physical signature rather than fall through to the caller's own unresolved-type error.
 	function callSignaturesWtype(members: TS.TypeMember[]): W.ClosureType | undefined {
-		const sigs		= members.filter(m => m.type === 'call').map(closureSigParts);
-		const merged	= sigs.every((s): s is FullSig => !!s) ? mergeOverloadSigs(sigs) : undefined;
+		return sigsWtype(members.filter(m => m.type === 'call'));
+	}
+	function sigsWtype(sigs: TS.CallSig[]): W.ClosureType | undefined {
+		const parts		= sigs.map(closureSigParts);
+		const merged	= parts.every((s): s is FullSig => !!s) ? mergeOverloadSigs(parts) : undefined;
 		return merged && closureWtype(merged);
+	}
+	// A class as a value (`typeof C`, `new (...) => T`, with or without statics beside it) is a closure that constructs: its statics are read
+	// through `ensureClosureProp`, never stored in it.
+	function constructorWtype(t: Type): W.ClosureType | undefined {
+		const ctors = T.constructSignatures(t, global);
+		return ctors.length && !T.signaturesOf(t, 'call', global).length ? sigsWtype(ctors) : undefined;
 	}
 
 	function typeOfUncached(t: Type): W.Type | undefined {
@@ -2675,6 +2684,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		}
 
 		const resolved = T.resolve(global, t);
+		const ctor = (resolved.type === 'constructor' || resolved.type === 'intersection' || resolved.type === 'object') && constructorWtype(resolved);
+		if (ctor)
+			return ctor;
 		switch (resolved.type) {
 			// A type that RESOLVES to an array or tuple (an alias, `N[K]`) is an `Array` too, not raw storage nothing casts back to.
 			case 'array': {
@@ -4199,11 +4211,15 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const callee = e.callee;
 		if (e.type === 'new') {
 			// A plain identifier naming a lib class (`Map`) has no `Scope.decl` for `classRefTarget` to follow.
-			const target	= classRefTarget(callee, ctx.scope) ?? (callee.type === 'identifier' ? { name: callee.name, scope: ctx.scope } : undefined);
+			const target	= classRefTarget(callee, ctx.scope) ?? (callee.type === 'identifier' && !ctx.resolvesName(callee.name) ? { name: callee.name, scope: ctx.scope } : undefined);
 			const cls		= target && ensureClass(target.name, newTypeArgs(target.name, e.typeArgs, e, ctx, want), target.scope);
-			if (!cls)
+			if (cls)
+				return { kind: 'construct', cls, label: target.name, lowered: false };
+			// A class held as a value: its constructing closure.
+			const wtype = constructorWtype(ctx.narrowedTypeOf(callee));
+			if (!wtype)
 				throw `'new' is only supported for a known class`;
-			return { kind: 'construct', cls, label: target.name, lowered: false };
+			return { kind: 'closure', wtype, optional: false };
 		}
 		if (callee.type === 'call' && isAsm(callee))
 			return { kind: 'asm', asm: callee };
@@ -4898,6 +4914,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					return { wtype: 'u32', operands: [receiver(W.REF_ANY_NULLABLE)], load: () => ctx.emit(I.ref.cast(base), I.struct.get(base, closureField)) };
 				}
 			}
+			// A class held as a value, or a function's `prototype`: found through the closure's env (`ensureClosureProp`).
+			if (!write && (constructorWtype(t) || (prop === 'prototype' && T.unionMembers(t, ctx.scope).filter(m => !T.isNullish(m, ctx.scope)).every(m => closurePart(typeOf(m)))))) {
+				const info = ensureClosureProp(prop);
+				return { wtype: info.result, operands: [receiver(W.REF_ANY)], load: () => ctx.emit(I.call(info.funcIndex)) };
+			}
 			// An erased receiver -- typed `any`, stored as `any` (an open shape), or narrowed to a shape its declared type lacks (`'type' in c`):
 			// the field is found at run time (`ensureAnyField`). A write also reaches one through any receiver some class has the field for.
 			const refined	= !write && ctx.stampedTypeOf(unwrapAs(target.object));
@@ -5331,6 +5352,90 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// A named function used as a VALUE: a top-level function has no `env` param, so its `funcIndex` cannot fill a closure's `code` field
 	// (`(env, ...params)`). One shared zero-capture trampoline per function forwards to it.
+	// A class named in a value position (not `new C`, `C.x` or `instanceof C`): the class it names.
+	function classValueOf(e: Expr & { type: 'identifier' }, ctx: FunctionContext): ClassInfo | undefined {
+		const target = classRefTarget(e, ctx.scope) ?? (!ctx.resolvesName(e.name) && LIB_DECL_MAP.get(e.name)?.type === 'class_decl' ? { name: e.name, scope: ctx.scope } : undefined);
+		return target && ensureClass(target.name, undefined, target.scope);
+	}
+
+	// Each class held as a value, by its env's tag: an empty `envBase` subtype per class, which the constructing code ignores.
+	const classValueTags	= new Map<ClassInfo, number>();
+	const classValueFuncs	= new Map<FuncInfo, FuncInfo>();
+	function emitClassValue(cls: ClassInfo, want: W.Type | undefined, ctx: FunctionContext): W.Type {
+		const decls = (cls.methodDecls.get('constructor') ?? []).filter(d => d.body);
+		const takes	= (d: MethodMember) => W.isClosure(want) && resolveParams(d, cls.declScope ?? libGlobal).every((p, i) => i >= want.closure.params.length
+			? hasMod(d.params[i], 'optional') || !!d.params[i].default : fits(want.closure.params[i], p.wtype));
+		const decl	= decls.length > 1 ? decls.find(takes) : decls[0];
+		if (!decl)
+			throw `class '${cls.name}' as a value: none of its ${decls.length} constructors takes what its context passes`;
+		const ctor	= ensureCtorDecl(cls, decl);
+		const sig: FuncSig = { params: ctor.params, result: ctor.result, hasRest: ctor.hasRest, defaults: ctor.defaults };
+		const { funcTypeIndex, structTypeIndex } = ensureClosureType(sig);
+		let tag = classValueTags.get(cls);
+		if (tag === undefined) {
+			tag = types.add({ final: true, supertypes: [types.envBase()], type: { kind: 'struct', fields: [] } });
+			classValueTags.set(cls, tag);
+		}
+		let info = classValueFuncs.get(ctor);
+		if (!info) {
+			const { funcIndex, typeIndex } = types.funcAt(funcTypeIndex);
+			const made: FuncInfo = info = { ...sig, funcIndex, typeIndex };
+			classValueFuncs.set(ctor, made);
+			closureLiterals.push(made);
+			worklist.push(() => {
+				const wctx = new FunctionContext(`<class value>.${cls.name}`, new Scope(libGlobal), plainReturn(ctor.result), undefined);
+				wctx.declareLocal('#envParam', { typeIndex: types.envBase(), nullable: false });
+				ctor.params.forEach((p, i) => wctx.emit(I.local.get(wctx.declareLocal(`$arg$${i}`, p).index)));
+				wctx.emit(I.call(ctor.funcIndex));
+				made.body = wctx.toFuncBody(1 + ctor.params.length, toValType);
+			});
+		}
+		ctx.emit(I.ref.func(info.funcIndex), I.struct.new(tag), I.i32.const(jsLength(decl.params)), ...newClosure(structTypeIndex));
+		return closureWtype(sig);
+	}
+
+	// `f.name` on a closure: a class value's static (or its `name`, or a `prototype` whose `constructor` is the value), found by its env's tag;
+	// through a coercion wrapper's env, the closure it wraps; else a property written onto the function (`#ext`), or `undefined`.
+	function ensureClosureProp(name: string): FuncInfo {
+		const key = `<closure prop>.${name}`, result = W.REF_ANY_NULLABLE;
+		return synthesize(key, () => ({ params: [param('recv')], result }), (dctx, [recv]) => {
+			const base	= types.closureBase();
+			const env	= dctx.declareLocal('$env', { typeIndex: types.envBase(), nullable: false }).index;
+			dctx.emit(I.local.get(recv), I.ref.cast(base), I.struct.get(base, 1), I.local.set(env));
+			emitTypeCascade(dctx, env, [
+				...[...classValueTags].map(([cls, tag]) => ({ heap: tag, emit: () => {
+					dctx.emit(I.drop);
+					emitClassValueProp(cls, name, recv, dctx);
+				} })),
+				...[...closureCoercionWrappers.values()].map(w => ({ heap: w.envTypeIndex, emit: () => dctx.emit(I.struct.get(w.envTypeIndex, 0), I.call(funcs.get(key)!.funcIndex)) })),
+			], () => {
+				if (!types.closureExt)
+					return void emitAs(Identifier('undefined'), dctx, result);
+				dctx.emit(I.local.get(recv), I.ref.cast(base));
+				emitClosureExtGet(dctx, stringArg(dctx, name), result);
+			}, result);
+		});
+	}
+	function emitClassValueProp(cls: ClassInfo, name: string, recv: number, dctx: FunctionContext): void {
+		const result = W.REF_ANY_NULLABLE;
+		for (let c: ClassInfo | undefined = cls; c; c = c.superClass) {
+			const f = c.decl.body.find(m => m.type === 'field' && m.key === name && hasMod(m, 'static'));
+			if (f?.type === 'field' && f.value)
+				return coerceTop(emitExpr(f.value, dctx), dctx, result);
+		}
+		if (name === 'name')
+			return coerceTop(emitExpr(Literal(cls.decl.name ?? ''), dctx), dctx, result);
+		if (name !== 'prototype')
+			return void emitAs(Identifier('undefined'), dctx, result);
+		const proto = ensureClass('DynamicObject', [T.ANY])!, obj = dctx.temp(`$proto$${dctx.tempCounter++}`, proto.thisWtype!);
+		const ctor	= ensureCtor(proto, [], dctx);
+		emitCallArgs(`${proto.name}'s constructor`, ctor.params, ctor.defaults, !!ctor.hasRest, [], dctx, ctor.resolvedParams);
+		dctx.emit(I.call(ctor.funcIndex), I.local.set(obj), I.local.get(obj));
+		emitCallOn(proto, 'set', [stringArg(dctx, 'constructor'), localArg(dctx, recv, W.REF_ANY)], dctx);
+		dctx.emit(I.drop, I.local.get(obj));
+		coerceTop(proto.thisWtype!, dctx, result);
+	}
+
 	function ensureFunctionValueWrapper(name: string, decl: FunctionDecl, homeModule = '.', want?: W.Type, typeArgs?: Type[]): { info: FuncInfo; structTypeIndex: number } {
 		const key = typeArgs ? `${homeKey(homeModule, name)}<${typeArgs.map(T.typeKey).join(',')}>` : homeKey(homeModule, name);
 		const existing = functionValueWrappers.get(key);
@@ -5714,6 +5819,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const fnValue = functionValueDecl(e, ctx);
 				if (fnValue)
 					return emitFunctionValue(fnValue, want, ctx);
+				const classValue = e.type === 'identifier' ? classValueOf(e, ctx) : undefined;
+				if (classValue)
+					return emitClassValue(classValue, want, ctx);
 				// CommonJS's per-module names (`checker.bindModuleNames`): compile-time constants, as a bundler substitutes them.
 				if (name === '__dirname' || name === '__filename') {
 					const file = moduleFilename(ctx.homeModule);
@@ -8839,8 +8947,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					coerceTop('u32', dctx, 'f64');
 					coerceTop('f64', dctx, result);
 				} });
-			} else {
-				arms.push(...closureExtArm(() => emitClosureExtGet(dctx, stringArg(dctx, name), result)));
+			} else if (classValueTags.size || types.closureExt) {
+				arms.push({ heap: types.closureBase(), emit: () => dctx.emit(I.call(ensureClosureProp(name).funcIndex)) });
 			}
 			emitTypeCascade(dctx, recv, arms, () => dctx.emit(I.local.get(recv), I.ref.is_null,
 				I.if(toValType(result), [I.unreachable], [I.ref.null(heapTypeIndexOf(result))])), result);
