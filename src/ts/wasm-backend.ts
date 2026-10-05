@@ -2096,6 +2096,9 @@ function primitivePart(t: TS.IntersectionType, scope: Scope): Type | undefined {
 // its own `[Symbol.iterator]` is for a value known only as an `Iterable`.
 function iteratesByProtocol(e: Expr, ctx: FunctionContext): T.IterationTypes | undefined {
 	const t = ctx.narrowedTypeOf(e);
+	// An `any` is iterated as JS iterates any value, by its `[Symbol.iterator]()`: position is only an array's way.
+	if (T.isAny(t))
+		return T.iterationTypes(t, ctx.scope);
 	if (T.unionMembers(t, ctx.scope).every(m => arrayPartOf(m, ctx.scope)) || !T.lookupMember(t, '[Symbol.iterator]', ctx.scope))
 		return undefined;
 	const it = T.iterationTypes(t, ctx.scope);
@@ -3162,6 +3165,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			} else if (p.type === 'field' && staticKeyName(p.key, ctx.scope) !== undefined && p.value) {
 				const value = p.value;
 				props.set(staticKeyName(p.key, ctx.scope)!, { fits: declared => T.isAssignable(checkerTypeOf(unwrapAs(value), ctx.scope), declared, ctx.scope), literals: writtenLiteral(value) });
+			} else if (p.type === 'method' && staticKeyName(p.key, ctx.scope) !== undefined) {
+				// A method is a field holding its function (a symbol-keyed one too: `[Symbol.iterator]() {...}`).
+				const fn = TS.FunctionType({ ...T.FixSig(p, T.ANY, p.returnType), origin: p });
+				props.set(staticKeyName(p.key, ctx.scope)!, { fits: declared => T.isAssignable(fn, declared, ctx.scope) });
 			} else {
 				return undefined;
 			}

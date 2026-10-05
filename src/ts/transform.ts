@@ -353,8 +353,9 @@ export function patternBindings(kind: JS.DeclarationKind, target: BindingTarget,
 type ForOf = Extract<Stmt, { type: 'for'; right: unknown }>;
 
 // `iterator.next()`: JS sends `undefined` to a `next` that takes a value (a generator's).
+// As `for...of` calls it, with no argument; `undefined` only where the iterator's `next` declares a parameter it takes (an `any` iterator declares none).
 export function nextCall(iterator: TS.Expr, it: T.IterationTypes, scope: Scope): TS.Expr {
-	return JS.Call(JS.Member(iterator, 'next'), T.isNullish(it.next, scope) ? [] : [Identifier('undefined')]);
+	return JS.Call(JS.Member(iterator, 'next'), T.isNullish(it.next, scope) || T.isAny(it.next) ? [] : [Identifier('undefined')]);
 }
 
 // An expression codegen compiles as a plainer one, its parts reused (`typeOf` answers a part's checked type); `undefined`: as it is.

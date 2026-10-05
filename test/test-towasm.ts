@@ -2893,6 +2893,47 @@ async function main() {
 	}
 
 	{
+		// for...of over `any` by the protocol, as JS iterates any value; the iterator is an object literal with a symbol-keyed method.
+		const { anyIter, anyIterManual } = await compile(`
+			function counter(length: number) {
+				return {
+					length,
+					[Symbol.iterator](): IterableIterator<number> {
+						let index = 0;
+						return {
+							next: () => index < length ? { value: index++ * 10, done: false } : { value: undefined, done: true },
+							[Symbol.iterator]() { return this; },
+						};
+					},
+				} as any;
+			}
+			export function anyIter() { let s = 0; for (const v of counter(4)) s += v as number; return s; }
+			export function anyIterManual() { const it = counter(4)[Symbol.iterator](); const r = it.next(); return (r.value as number) + (r.done ? 100 : 0); }
+		`);
+		check("for...of over an any iterable calls its [Symbol.iterator]()", anyIter(), 60);
+		check("an iterator literal read by hand through any", anyIterManual(), 0);
+		const { pxIter } = await compile(`
+			function factory<R>(get: (i: number) => R) {
+				function counter(length: number) {
+					return new Proxy({
+						length,
+						[Symbol.iterator](): IterableIterator<R> {
+							let index = 0;
+							return {
+								next: () => index < length ? { value: get(index++) as R, done: false } : { value: undefined, done: true },
+								[Symbol.iterator]() { return this; },
+							};
+						},
+					}, {}) as any;
+				}
+				return counter;
+			}
+			export function pxIter() { let s = 0; for (const v of factory<number>(i => i * 10)(4)) s += v as number; return s; }
+		`);
+		check("a proxied target with a [Symbol.iterator] method, iterated", pxIter(), 60);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
