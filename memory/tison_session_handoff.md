@@ -1,10 +1,10 @@
 ---
 name: tison-session-handoff
-description: LIVE cold-start state for the wasm-backend self-hosting work -- where things stand (survey at b84847a, 2026-09-30), the top blockers, what the user decided and has not decided, open-not-fixed items, and the contracts to know before editing codegen. Read this before anything else.
+description: LIVE cold-start state for the wasm-backend self-hosting work -- where things stand (survey at 11aa1d6, 2026-10-05), the top blockers, what the user decided and has not decided, open-not-fixed items, and the contracts to know before editing codegen. Read this before anything else.
 metadata:
   node_type: memory
   type: project
-  modified: 2026-09-30
+  modified: 2026-10-05
 ---
 
 **Read this first, then [[tison_towasm_self_hosting_plan]] (distilled: instruments, traps, design invariants) only for a specific
@@ -20,37 +20,24 @@ wasm-backend.ts slice 0 peak above the 2 GB default and report CRASHED otherwise
 16 GB Mac to a halt (2026-10-01)**: the scheduler now costs every job at >= half the heap cap (V8's garbage ceiling), so 6144
 runs ~2 workers here -- slower, but the machine stays usable. Ask before a full run; `SURVEY_JOBS` caps it further.
 
-## State at 2026-09-30
+## State at 2026-10-05
 
-Survey at `b84847a` (SURVEY_HEAP_MB=6144): **314/403 compile, 107 failures / 35 causes.** Top rows:
-- **60, wasm-backend.ts + wasm/codegen.ts: `Invalid string length`** -- the MESSAGE half is fixed (`cd71072`: backend messages print
-  with `T.showType`, the budgeted printer; never `T.typeKey` in a message). The REAL cause is NOT literal-key indexing (`O[k]` with
-  `k: 'a'|'b'` on a plain struct runs correctly, `assistant/litkey-repro.ts`): even `I.f64` fails (`unknown field 'f64'`, probe
-  `resolveAsmLocals`). `wasm.I` is physically the `DynamicObject` `new TreeBuilder({})` built through `any`, statically the deferred
-  fluent intersection -- dynamic-objects STEP 4, waiting on the user (below). Repro `assistant/tb/litkey.ts`.
-- **probe-decl.ts / checker-type.ts had drifted from the survey** (no `@isopodlabs/tison/` paths since the split, so every tison import
-  read as `any` and probes showed a different, earlier failure). Fixed 2026-09-30; if a probe and the survey disagree, diff their `paths`.
-- **6, wasm.ts: `unknown method 'as'`** on `bin.as(SLEB128, ...)` (top-level `const S32`, wasm.ts:47) -- `bin` read as an object whose
-  type lacks `as` (star re-export via `export * from './types'`); a 3-module repro of the same shape compiled fine.
+Survey at `11aa1d6` (snapshot `compiler@cc3edca`): **399/421 declarations compile, 22 fail** (was 260/161 at `cc3edca`).
+wasm-backend.ts's worker still CRASHES (OOM, "does not parse" row). Rows left, by blocks:
+- **8, wasm.ts: `unresolved identifier 'bin'`** -- NEXT. (Was "unknown method 'as'" on `bin.as(...)`, wasm.ts:47; star re-export.)
+- 3, checker.ts + transform.ts: `'null'/'undefined' is only supported where a nullable object type ... is expected`.
+- 2 transform.ts local `class_decl`; 2 codegen.ts `'this' can't be used yet`; 1 each: core.ts closure-through-any, wasm.ts
+  `[...unknown[]]` rest (checker), wasm.ts closure param `p` untyped, transform.ts `SwitchCase` rest (checker), `unknown field 'type'`,
+  `loadLib` local `spec`, async function expression, walker.ts `recur` (checker) and unary `+`, codegen.ts `BigInt(string | undefined)`.
 
-Recent commits (all user-approved where noted): `1295278` dynamic-object step 2 (an EMPTY literal whose context names no layout is
-`DynamicObject<any>`; `collectExpandoFields` puts no expando on a member-less shape); `2d786a5`+`b84847a` the `EnumValue<EnumType>`
-row (TS key sets `keysOf`: aliases PEELED so `keyof Record<string,T>` stays `string`, union = intersect, intersection = union;
-union-object / union-key indexed access; homomorphic mapped types map MEMBERS); `ce614e6` a generic conditional stays DEFERRED as TS's
-(`deferred` in type-core; conditional source through `deferredBranches`, target = fits both branches; a generic TARGET signature binds
-its type params; **TS 3.4 higher-order inference** `liftGeneric`/`withLifted`); `274886b` numeric keys (`JS.Key = string | number |
-{computed}`; only `keyof` reads the number, everything else names via `JS.keyName`; `0 | 16` is held as a numeric RANGE, prints
-`number`). Known gap: an UNDECLARED name relates to anything, even strict. Corpus ERROR 1005 -> 999 since dd64ba2; each new error was
-checked against real tsc. `wasm.ts` probe: 42 s / 2.2 GB.
-
-**Dynamic objects (TreeBuilder in binary-libs wasm.ts), four steps (user chose option 2):** 1 DONE `68e9cb5` (`{[k:string]: V}` is the lib's
-`DynamicObject<V>`, map.ts; `dynamicObjectArms` in every erased cascade; the spread clone `ensureAnySpreadClone` has NO arm yet);
-2 DONE; **3 NEXT**: a callable object gaining run-time-keyed properties (`Object.assign(anyFn, anyObj)`, probe `tb/c.ts`);
-4 undecided, now the top blocker: the built dynamic object read statically as `T`; `this as never` across instantiations (`tb/d.ts`: `ensureClass` monomorphizes a generic class WITH methods per reference argument, so `B<T>` -> `B<T & X>` is a cast between unrelated structs; only method-less classes and `Array` erase).
-Callable objects are DONE (a shape with call signature(s) + fields is a struct extending the closure struct; [[tison_representation_table]]);
-not built: `Object.assign` onto an EXISTING callable object (a later mutation), and a function-typed value flowing into a callable-object
-slot other than as a literal (honestly unsupported). `TreeBuilder.more`'s own body is dynamic (`Object.assign(v, existing)` between two
-`any`s needs "sources that write their keys out"; `(this.root as any)[k] = ...`).
+**binary-libs' builder `I` WORKS** (user: "evaluate the types" + "dynamic objects"): `I` is a dynamic object built by writes through
+`any`; codegen.ts `isRef` probes OK. Mechanisms: `builtShapes` records each built shape with its scope, and a shape counts as built
+only by a literal ASSIGNABLE to it (names alone collided: `{f64: F}` vs `{f64: Nest & Nest & F}`); `Object.assign(fn, {...})` builds
+its callable object; a shape with a call signature can be open; held rest closures pack rest args (`emitHeldCall`); a field holding no
+static closure is called through `any`; `takesArgCount` (an unfilled slot must be nullable/any). Checker: a function PART seals an
+intersection in assignability (`sealed(..., functions)`); member access keeps functions open because expando holders and inherited
+statics on constructor types are unmodelled (sealing everywhere = +44 corpus false positives -- the proper fix is to model them).
+Self-check errcount: checker/type-core/codegen 0, wasm.ts 1 (1636), wasm-backend.ts 9 (pre-existing).
 
 ## The direction since 2026-09-21 (the user's) and what it settled
 
@@ -102,25 +89,14 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
   `new globalThis.Error().stack`: codegen.ts's own `Error` class shadows the global and has no stack.
 - The checker never reports an unknown name for TYPES; for values TS2304 is behind `Scope.unknownNames` ([[tison_unknown_name_diagnostic]]).
 
-## Self-hosting survey baseline (2026-10-04, second run)
+## Gates baseline (2026-10-05)
 
-Survey on snapshot `compiler@cc3edca`: checker.ts 89/90 compile (was 0/89); wasm-backend.ts's worker still CRASHES (2 GB heap).
-Fixed since, all committed and probed: `boxed`/`refinedMember` dispatch with no implementer in the program -> `unreachable` (53+7,
-type-core.ts); `Number(any)` ToNumber + `RegExp.toString` (5, walker.ts); unary `-`/`~` on `number | bigint` + boxed bigint
-`===` (25, ts-parser.ts); `x === null` on a never-null representation (13, js-parser.ts); `{}` in a `Record | {}` context
-(tison core.ts:312); `never`-typed param (6, transform.ts); call/construct members in structural assignability (ReadType ->
-codegen.ts 13 -> 1 checker errors, wasm.ts 7 -> 1). **User decisions (2026-10-04), status:** (1) binary-libs' instruction builder `I`: "evaluate the types" -- CHECKER DONE (`ff5ab4c` "evaluate
-binary-libs' instruction-builder types": template-literal infer, conditional infer union/intersection, tuple-spread normalization, remapped
-`keyof`, numeric mapped keys, identity-sharing type walker; codegen.ts self-checks with 0 errors in 12 s). BACKEND OPEN: `I` is built by
-dynamic writes into `{}` (`insertFactory`, `Object.assign(fn, existing)` = closures carrying properties), so no struct layout is known where
-`{}` is created; `I.f64.const(0)` throws "unknown method 'const'". Representation put back to the user. (2) per-instance method override:
-closure slot `#own:<method>` on the declaring class, DONE. (3) `new Map()` is TS's `Map<any, any>`, built at its contextual instantiation, DONE.
-Also open: local `class_decl` in a function, async function expressions (transform.ts); `unique symbol` types (a remapped symbol key is
-kept unfiltered meanwhile). Re-run the survey before trusting rows.
-**Checker queue (found 2026-10-04, left):** a declaration's initializer is checked WIDENED, so `const r: 'a' = 'b'` is only a
-GAP (lax "widened source" rule). Checking it precisely (tried, corpus ERROR +24) exposes tison's flow ranges of `number` slots
-compared as literals: `var x = 1` reads as `1`, so `f(x)` with `f(p: E)` already errs on ARGUMENTS. Fix needs flow ranges told
-apart from literal types (TS reads a `number` slot as `number`); then drop the widening. checker.ts self-host errcount: 0.
+corpus A/B vs `07b036e`: ERROR +13 (f13 +2, 9 tsc-confirmed, 2 real), GAP 195 (-76). difftest 2232/2234 agree. User decisions all
+DONE: builder types + dynamic-object `I`; per-instance method override = closure slot `#own:<method>`; `new Map()` = TS's
+`Map<any, any>` built at its contextual instantiation.
+**Checker queue (left):** a declaration's initializer is checked WIDENED (`const r: 'a' = 'b'` only GAPs); checking it precisely
+(corpus +24) exposes flow ranges of `number` slots compared as literals. Fix: tell flow ranges apart from literal types, then drop
+the widening. Also `unique symbol` types (a remapped symbol key is kept unfiltered).
 
 ## Next up (2026-09-30, end of session)
 

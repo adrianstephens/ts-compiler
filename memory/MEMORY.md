@@ -49,7 +49,7 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 - [don't simplify deps for self-hosting](feedback_no_simplifying_deps_for_selfhosting.md) — hard constructs need a real compiler feature
 - [no JSON.stringify on AST/Type](feedback_no_json_stringify_ast.md) — bigints throw; print with `T.typeKey` / `T.exprKey` / `T.stmtKey`
 - [no unimplemented-throws tests](feedback_no_unimplemented_throws_tests.md) — `checkThrows` is for permanent enforced behavior only
-- [SESSION HANDOFF](tison_session_handoff.md) — **read this at cold start**: live state (survey 314/403 at `b84847a`, top blockers), user decisions, what's deliberately unfixed, what the user hasn't decided
+- [SESSION HANDOFF](tison_session_handoff.md) — **read this at cold start**: live state (survey 399/421 at `11aa1d6`, top blockers), user decisions, what's deliberately unfixed, what the user hasn't decided
 - [harness portability](tison_harness_portability.md) — for running tison under a DIFFERENT agent harness: cwd, gate order, the acceptance numbers at `ec2a21f`, which instruments gate by EXIT CODE (difftest and vsdg-check do; the survey is a probe to be read), and what does not travel (the transcript)
 - [session boundaries](feedback_session_boundaries.md) — when the user asks "continue or start fresh?", recommend; default fresh after a committed fix, always after a compaction
 - [build and tests](compiler_build_and_tests.md) — tests import the BUILT `dist/`; `build` vs `build:emit`; the `dist/ts/lib` copy traps
