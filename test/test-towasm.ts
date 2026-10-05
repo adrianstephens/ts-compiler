@@ -4542,6 +4542,22 @@ async function main() {
 			export function heldArity(): number { return tbl.get('abc') + other.get('x', 4); }
 		`);
 		check('a held closure needing an argument the call omits is no candidate', heldArity(), 7);
+		// binary's `common_stream`, vsdg.ts's rebuilder: an abstract method is reached only through its overrides.
+		const { abstractMethod, abstractBase } = await compile(`
+			abstract class Shape {
+				constructor(readonly n: number) {}
+				abstract area(): number;
+				describe() { return this.area() * 10 + this.n; }
+			}
+			class Sq extends Shape { constructor(readonly s: number) { super(1); } area() { return this.s * this.s; } }
+			class Tri extends Shape { area() { return 2; } }
+			export function abstractMethod(): number { const xs: Shape[] = [new Sq(3), new Tri(2)]; return xs[0].describe() + xs[1].area(); }
+			abstract class Base { constructor(protected readonly offset0: number, protected offset = 0) {} tell() { return this.offset - this.offset0; } skip(n: number) { this.offset += n; } }
+			class Stream extends Base { constructor(readonly buf: number[]) { super(2, 2); } }
+			export function abstractBase(): number { const s = new Stream([1]); s.skip(5); return s.tell(); }
+		`);
+		check('an abstract method dispatches to its overrides', abstractMethod(), 93);
+		check('an abstract base class with parameter properties', abstractBase(), 5);
 	}
 
 	{

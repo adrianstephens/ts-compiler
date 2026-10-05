@@ -47,7 +47,7 @@ import * as WAT from '../wasm/wat-parser';
 //  - Classes:
 //    - a method call on a value 'instanceof' narrowed to a generic class whose instantiations differ
 //      in layout (a stored 'T'): the narrowed 'C<any>' is not the struct of a 'C<number>'
-//    - 'abstract'
+//    - an 'abstract' property (a subclass's field or accessor implementing it)
 //    - computed field names
 //    - a field cycle (a field can't be of its own class's type, directly or indirectly)
 //    - an object-typed field anywhere in a hierarchy that also uses 'extends' (needs 'struct.new' with
@@ -8058,9 +8058,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const bodiedKeys	= (decl.body as TS.ClassMember[]).flatMap(m => m.type === 'method' && m.body ? [T.memberKey(m.key)] : []);
 		const overloaded	= new Set(bodiedKeys.filter((k, i) => bodiedKeys.indexOf(k) !== i));
 
-		if (decl.abstract)
-			throw `abstract class '${name}' is not supported`;
-
 		// `TS.ClassMember` has an `index_signature` variant the shared `JS.ClassMember` lacks. A field's type resolves in the class's OWN module:
 		// an initializer may name what only that file declares, and `thisTsType` must resolve there.
 		const homeScope = info.declScope ?? libGlobal;
@@ -8071,6 +8068,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				if (m.type === 'field'/* && !hasMod(m, 'static')*/) {
 					if (typeof m.key === 'object')
 						throw `computed field names in '${name}' are not supported`;
+					if (hasMod(m, 'abstract'))
+						throw `abstract property '${String(m.key)}' in '${name}' is not supported`;
 					if (isAsm(m.value))
 						inlineDecls.push({ key: String(m.key), value: m.value! });
 					// A `declare` over an INHERITED field only re-narrows its type (`declare superClass?: ClassInfo`); the slot is the base's.
@@ -8443,7 +8442,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			returnType: decl.returnType && T.substituteThisType(decl.returnType, owner.thisTsType),
 			params:		decl.params.map(p => p.typeAnnotation ? { ...p, typeAnnotation: T.substituteThisType(p.typeAnnotation, owner.thisTsType) } : p),
 		};
-		if (!decl.body)
+		// An abstract method never runs: its class has no instance of its own, and every concrete subclass overrides it (`ensureVirtualDispatch`).
+		const abstract = !decl.body && hasMod(decl, 'abstract');
+		if (!decl.body && !abstract)
 			throw `'${fullName}' needs a body (overload signatures are not supported)`;
 		// Its body re-checked, as `instantiateDecl` re-checks a generic function's: the template's stamps do not hold for these type arguments.
 		if (instance?.length)
@@ -8455,12 +8456,17 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 		const params		= resolveParams(decl, owner.declScope ?? libGlobal);
 		const isStatic		= decl.modifiers?.includes('static');
-		const reassignsThis = !isStatic && assignsToThis(decl.body);
+		const reassignsThis = !isStatic && !abstract && assignsToThis(decl.body!);
 		const thisWtype		= owner.thisType;
 		const info			= declareFunc(key, decl, params, result, isStatic ? undefined : thisWtype, reassignsThis);
 		worklist.push(W.withCatch(() => {
 			// A method body resolves in its class's declaring module, as a constructor's does.
 			const ctx	= new FunctionContext(key, new Scope(moduleScopeOf(owner.homeModule) ?? owner.declScope ?? libGlobal), plainReturn(result), owner, owner.homeModule);
+			if (abstract) {
+				ctx.emit(I.unreachable);
+				info.body = ctx.toFuncBody((isStatic ? 0 : 1) + params.length, toValType);
+				return;
+			}
 			// A declared `this:` types the body's `this` (`flat<A>(this: A)`); the value is still the receiver's struct.
 			if (!isStatic)
 				ctx.declareValue('this', thisWtype, decl.thisType ? T.substituteThisType(decl.thisType, owner.thisTsType) : owner.thisTsType);
