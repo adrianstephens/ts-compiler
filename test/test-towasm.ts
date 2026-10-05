@@ -4602,6 +4602,23 @@ async function main() {
 		`);
 		check('JSON.stringify', jsonStringify(), 1111);
 		check('JSON.parse, with a reviver', jsonParse(), 303061);
+		// binary-libs' SLEB128: a bigint stepped in a loop is held as the 32-bit int its range proves, and the 64-bit step wraps into it.
+		const { sleb } = await compile(`
+			const bytes = [0xe5, 0x8e, 0x26];
+			function get(pos: { i: number }): bigint {
+				let result = 0n, shift = 0n, byte = 0;
+				do {
+					byte = bytes[pos.i++];
+					result |= BigInt(byte & 0x7f) << shift;
+					shift += 7n;
+				} while (byte & 0x80);
+				if (shift < 64n && (byte & 0x40))
+					result |= -1n << shift;
+				return result;
+			}
+			export function sleb(): number { return Number(get({ i: 0 })); }
+		`);
+		check('a machine-int bigint stepped in a loop', sleb(), 624485);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };

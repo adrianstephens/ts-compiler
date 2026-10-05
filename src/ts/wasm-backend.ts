@@ -2076,8 +2076,9 @@ const SCALAR_CONVERSIONS: Partial<Record<string, Partial<Record<string, wasm.Ins
 	f32: { f64: I.f64.promote_f32 },
 	i32: { f64: I.f64.convert_i32_s, f32: I.f32.convert_i32_s, i64: I.i64.extend_i32_s },
 	u32: { f64: I.f64.convert_i32_u, f32: I.f32.convert_i32_u, i64: I.i64.extend_i32_u },
-	i64: { f64: I.f64.convert_i64_s, f32: I.f32.convert_i64_s },
-	u64: { f64: I.f64.convert_i64_u },
+	// Into a 32-bit slot, which the checker's range proves the value fits (or a packed write wraps, as one does).
+	i64: { f64: I.f64.convert_i64_s, f32: I.f32.convert_i64_s, i32: I.i32.wrap_i64, u32: I.i32.wrap_i64 },
+	u64: { f64: I.f64.convert_i64_u, i32: I.i32.wrap_i64, u32: I.i32.wrap_i64 },
 };
 
 // `proven`: the type the result fits. 32-bit `+ - *` stays 32-bit only when that is `i32`/`u32`, else it is the exact `f64`.
