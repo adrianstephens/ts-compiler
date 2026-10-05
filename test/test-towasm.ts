@@ -4720,6 +4720,12 @@ async function main() {
 			export function genericInstance(): number { return read(1, { a: { get: (s: number) => s + 1 }, b: { get: (s: number) => 10 } }) as number; }
 		`);
 		check('a generic instance\'s call resolved through its template', genericInstance(), 12);
+		// binary's `ViewMaker`: a constructor taking \`i32\`s held in a slot passing \`f64\`s, the arguments converted as a call converts them.
+		const { scalarParams } = await compile(`
+			function mk(v: new (b: ArrayBuffer, o: number, l: number) => DataView): number { return new v(new ArrayBuffer(8), 2, 4).byteLength; }
+			export function scalarParams(): number { return mk(DataView); }
+		`);
+		check('a closure taking machine ints in a slot passing numbers', scalarParams(), 4);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };
