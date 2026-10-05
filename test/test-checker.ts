@@ -232,6 +232,7 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 	// TS's read of a tuple position: an optional element, or a union member too short for it, reads `undefined` too (towasm's
 	// bounds-checked read relies on it); a position a rest spread covers reads the spread's element, with no error.
 	['a union of tuples read past a shorter member is possibly undefined', 'function f(...args: [number] | [number, number]) { const q: number = args[1]; }', ['is not assignable']],
+	['an overload implementation\'s own type parameters are its body\'s', 'function q<T extends object>(s: number, spec: T): number; function q<T extends object>(s: string, spec: T): string; function q<T extends object>(s: any, spec: T): any { const n: string = Object.entries(spec); return 0; }', ["'[string, any][]' is not assignable"]],
 	['a union of generic methods with identical type parameters is callable', 'class A { view<V>(t: V, n: number): number { return n; } } class B { view<V>(t: V, n: number): string { return ""; } } function h(s: A | B) { const r: boolean = s.view(1, 2); }', ['is not assignable']],
 	['Awaited unwraps nested promises', 'declare const p: Promise<Promise<number>>; function f(s: string) {} f(0 as any as Awaited<typeof p>);', ['is not assignable']],
 	['undefined is assignable to no class under strict null checks', 'function f(a: number[]) {} f(undefined); type C = undefined extends number[] ? 1 : 2; const c: 2 = 1 as C;', ['is not assignable']],

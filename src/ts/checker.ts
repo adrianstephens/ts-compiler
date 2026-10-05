@@ -1527,10 +1527,12 @@ function hoist(block: Stmt[], scope: Scope) {
 			// The bodied implementation an overload group always has.
 			const impl = decls.find(d => d.body);
 			if (impl) {
-				// The IMPLEMENTATION's own annotations resolve in this module too, for a consumer reading the decl (codegen's `resolveParams`).
-				impl.params.forEach(p => p.typeAnnotation && T.stampScope(p.typeAnnotation, scope));
+				// The IMPLEMENTATION's own annotations resolve in this module too, for a consumer reading the decl (codegen's `resolveParams`), except
+				// its own type parameters, which its body binds.
+				const own = new Set(impl.typeParams?.map(tp => tp.name));
+				impl.params.forEach(p => p.typeAnnotation && T.stampScope(p.typeAnnotation, scope, own));
 				if (impl.returnType)
-					T.stampScope(impl.returnType, scope);
+					T.stampScope(impl.returnType, scope, own);
 				scope.addDecl(name, impl);
 			}
 		} else {
