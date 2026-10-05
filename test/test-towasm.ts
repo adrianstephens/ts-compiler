@@ -1721,6 +1721,14 @@ async function main() {
 				export function nsInstanceof(): number { return isScope(new T.Scope(7)) * 10 + isScope(new T.Other()); }`,
 		}, 'main');
 		check("nsInstanceof() (instanceof NS.Class)", nsInstanceof(), 70);
+		// A non-entry module's own generic type shadows the lib class of its name (binary's `TypedArray<R>` interface, not the lib's typed array).
+		const { shadowed } = await compileMulti({
+			lib:	`export interface TypedArray<R> { length: number; first: R }
+				export function len<R>(t: TypedArray<R>): number { return t.length + (t.first as number); }
+				export function make(n: number): TypedArray<number> { return { length: n, first: 5 }; }`,
+			main:	`import { len, make } from './lib'; export function shadowed(): number { return len(make(3)); }`,
+		}, 'main');
+		check("shadowed() (a module's own generic type over a lib class's name)", shadowed(), 8);
 	}
 
 	{

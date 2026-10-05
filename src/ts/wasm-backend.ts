@@ -2734,10 +2734,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				return cls.thisType;
 		}
 		if (t.type === 'ref' && t.typeArgs?.length) {
-			const name = READONLY_ALIAS.get(t.name) ?? t.name;
-			const decl = LIB_DECL_MAP.get(name) ?? userGenericClassDecls.get(name);
+			// As the reference's own module sees the name: its own type (binary's `TypedArray` interface) shadows a lib class.
+			const name = READONLY_ALIAS.get(t.name) ?? t.name, scope = T.declScopeOf(t, global);
+			const decl = classDeclOf(name, scope);
 			if (decl?.type === 'class_decl' && decl.typeParams?.length) {
-				const cls = ensureClass(name, t.typeArgs);
+				const cls = ensureClass(name, t.typeArgs, scope);
 				if (cls)
 					return cls.thisType;
 			}
