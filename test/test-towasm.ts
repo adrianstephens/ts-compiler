@@ -4752,6 +4752,11 @@ async function main() {
 		asyncClosure();
 		check('an async closure capturing its enclosing function', result(), 28);
 
+		const { undefinedAsserted } = await compile(`
+			function opt<T>(v?: T): () => T | undefined { return () => v === undefined ? undefined as T | undefined : v; }
+			export function undefinedAsserted(): number { return opt<number>()() === undefined ? 1 : 0; }
+		`);
+		check('undefined asserted to a type', undefinedAsserted(), 1);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };

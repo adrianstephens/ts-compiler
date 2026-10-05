@@ -3800,8 +3800,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// `adoptErased`: a caller that stores what it gets (an unannotated local) takes a value read through an erased instantiation as it
 	// was built (`erasedTwin`), there being no conversion to `want`'s precise layout. Returns what it left on the stack.
 	function emitAs(e: Expr, ctx: FunctionContext, want: W.Type, adoptErased = false): W.Type {
-		// `null`/`undefined` alone is legal only into a nullable slot, or a non-nullable `any`: what a `void` param, field or local is boxed to.
-		if (T.isNullLiteral(e)) {
+		// `null`/`undefined` alone (or asserted, `undefined as R`) is legal only into a nullable slot, or a non-nullable `any`: what a `void` param,
+		// field or local is boxed to.
+		if (T.isNullLiteral(unwrapAs(e))) {
 			if (W.isAny(want) && !want.nullable)
 				ctx.emit(I.f64.const(0), I.struct.new(types.box('f64')));
 			else if (!W.isNullable(want))
