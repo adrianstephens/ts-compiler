@@ -5512,9 +5512,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	const classValueFuncs	= new Map<string, FuncInfo>();
 	function emitClassValue(cls: ClassInfo, want: W.Type | undefined, ctx: FunctionContext, e?: Expr): W.Type {
 		const decls = (cls.methodDecls.get('constructor') ?? []).filter(d => d.body);
-		// The overload taking what the destination's construct signature passes, as TS relates the class to it: arity, then each parameter's TS type.
-		const wanted	= (t => t && T.constructSignatures(t, ctx.scope)[0])(e && contextOf(e));
-		const takes		= (d: MethodMember) => !!wanted && wanted.params.length <= d.params.length
+		// The overload taking what the destination's construct signature passes, as TS relates the class to it, by each parameter's TS type. A lib
+		// class called is its conversion (`Number(x)`), so a call signature asks too (`arr.map(Number)`); an argument past its last is ignored.
+		const wanted	= (t => t && (T.constructSignatures(t, ctx.scope)[0] ?? T.signaturesOf(t, 'call', ctx.scope)[0]))(e && contextOf(e));
+		const takes		= (d: MethodMember) => !!wanted
 			&& d.params.every((p, i) => i < wanted.params.length ? !p.typeAnnotation || T.isAssignable(wanted.params[i].typeAnnotation ?? T.ANY, p.typeAnnotation, ctx.scope, cls.declScope ?? libGlobal)
 				: hasMod(p, 'optional') || !!p.default);
 		// With nothing asking for another, the first: one closure carries one signature.

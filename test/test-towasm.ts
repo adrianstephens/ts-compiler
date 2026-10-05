@@ -2687,6 +2687,16 @@ async function main() {
 	}
 
 	{
+		const { numberAsFn } = await compile(`
+			export function numberAsFn(): number {
+				const a = ['1', '2.5', 'x'].map(Number), conv: (s: string) => number = Number;
+				return a[0] + a[1] + (a[2] !== a[2] ? 100 : 0) + conv('7') * 1000;
+			}
+		`);
+		check("a lib class as a function value is its conversion (arr.map(Number))", numberAsFn(), 7103.5);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
