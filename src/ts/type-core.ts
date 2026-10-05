@@ -2958,6 +2958,7 @@ export class Inference {
 	private readonly fromReturn	= new Map<string, Type>();
 	private readonly defaulted	= new Set<string>();
 	private readonly literal	= new Set<Type>();		// candidates inferred from an object/array literal argument
+	private readonly stored		= new Set<Type>();		// candidates an existing array's element type gives: its storage, kept as is
 	private feedingLiteral		= false;
 
 	constructor(typeParams: readonly TS.TypeParam[], readonly scope: Scope, readonly declScope: Scope) {
@@ -2966,7 +2967,10 @@ export class Inference {
 	// `inferTypeArgs` skips a name this reports: only a fixed one takes no more candidates.
 	has(name: string): boolean	{ return this.fixed.has(name); }
 	// Every candidate comes from the CALLER's side but is substituted into the callee's types and resolved there, so it carries the caller's scope.
-	add(name: string, t: Type, contra: boolean, reversed = false) {
+	add(name: string, t: Type, contra: boolean, reversed = false, stored = false) {
+		// A fresh copy: the set is by identity, and the same type object may also arrive as an ordinary candidate.
+		if (stored && !this.feedingLiteral)
+			this.stored.add(t = { ...t });
 		stampScope(t, this.scope);
 		if (reversed) {
 			this.reversed.set(name, [...this.reversed.get(name) ?? [], t]);
@@ -3005,7 +3009,7 @@ export class Inference {
 		const reversed = this.reversed.get(name);
 		if (reversed && !this.co.has(name) && !this.contra.has(name))
 			return chooseInference(reversed, [], this.scope);
-		const co		= (this.co.get(name) ?? []).map(t => unforced(t, this.scope)), contra = this.contra.get(name) ?? [];
+		const co		= (this.co.get(name) ?? []).map(t => this.stored.has(t) ? t : unforced(t, this.scope)), contra = this.contra.get(name) ?? [];
 		const covariant	= co.length ? chooseInference(co, [], this.scope, t => this.literal.has(t)) : undefined;
 		if (!covariant || !contra.length)
 			return covariant ?? chooseInference([], contra, this.scope);
@@ -3060,6 +3064,8 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 	let contra = contraStart;
 	// Bindings made so far: whether an alternative drew an inference from the argument (see the union case).
 	let inferences = 0;
+	// Inside an argument array's element type: what binds there is that array's storage (`Inference.stored`).
+	let inElement = 0;
 	return recurse(paramT, argT, startDepth);
 
 	function found(name: string, t: Type, reversed = false) {
@@ -3067,7 +3073,7 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 		if (pooled)
 			pooled.set(name, [...pooled.get(name) ?? [], t]);
 		else if (out instanceof Inference)
-			out.add(name, t, contra, reversed);
+			out.add(name, t, contra, reversed, inElement > 0);
 		else if (!reversed || !out.has(name))
 			out.set(name, t);
 	}
@@ -3148,7 +3154,9 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 		}
 		if (paramT.type === 'array') {
 			if (a.type === 'array') {
+				inElement++;
 				recurse(paramT.element, a.element, depth - 1);
+				inElement--;
 			} else if (a.type === 'tuple') {
 				// Every element is a candidate, unioned (`readonly T[]` from `['a', 'b'] as const` is `'a' | 'b'`). More precise than tsc, which keeps the common
 				// supertype: codegen lays structs out by these keys.
@@ -3164,8 +3172,11 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 			} else {
 				// An array-like spelled by name (`ReadonlyArray<A>`), which resolves to its interface's members.
 				const el = arrayLikeElement(argT);
-				if (el)
+				if (el) {
+					inElement++;
 					recurse(paramT.element, el, depth - 1);
+					inElement--;
+				}
 			}
 		} else if (paramT.type === 'ref' && paramT.typeArgs) {
 			// A generic alias unfolded one level (`paramT.name` is declared in `declScope`, not `scope`; `sync.TypeT` through its namespace).
@@ -3183,7 +3194,10 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 			// Iterating is the language's protocol: what the argument iterates as is what its iteration interface's arguments are (`Iterable<T>` from a string).
 			const iteration	= !el && !sameName ? scope.semantics.iterationOf(paramT, argT, scope) : undefined;
 			if (el) {
+				const stored = a.type !== 'tuple' ? 1 : 0;
+				inElement += stored;
 				recurse(paramT.typeArgs[0], el, depth - 1);
+				inElement -= stored;
 			} else if (iteration) {
 				recurse(iteration.target.yield, iteration.source.yield, depth - 1);
 				recurse(iteration.target.return, iteration.source.return, depth - 1);

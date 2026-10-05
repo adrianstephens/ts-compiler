@@ -2952,6 +2952,14 @@ async function main() {
 	}
 
 	{
+		// A machine-typed array's own storage fixes what a type parameter bound by its element is (`Array._raw(result)` in `Array<i32>.slice`).
+		const { i32Slice } = await compile(`
+			export function i32Slice(): number { const a: i32[] = [1, 2, 3]; const b = a.slice(1); return b.length * 10 + b[0]; }
+		`);
+		check("an i32[] sliced keeps its storage", i32Slice(), 22);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
