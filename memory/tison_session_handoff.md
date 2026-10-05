@@ -30,6 +30,56 @@ signatures; union of generic signatures; template-resolution fallback for generi
 `binary-libs/assistant/tt.ts` (`bin.as(UINT8, ...)`) stops at `Awaited<ReadType<any>>` (the deferred any+infer conditional above).
 Re-run the survey before trusting rows.
 
+## The direction since 2026-09-21 (the user's) and what it settled
+
+`wasm-backend.ts` had grown by giving each failing case its own path because it RE-DERIVED types the checker already knew. Now **the
+checker stamps each expression's type** (`checkedTypeOf`, [[tison_checker_type_stamps]], ~94% coverage) and **representation is the
+backend's own choice** ([[tison_representation_table]]). Landed: backend consolidation (W.Type guards, one closure-call path, one runtime-
+helper mechanism, `resolvePlace` for every place read/write, `classifyCall`/`emitCallee`/`emitGuardedCall`/`dispatchArm`, `emitShortCircuit`);
+call resolution reads the checker's stamp (`checkedCallOf` = `{sig, typeArgs}`; deleted `inferCallTypeArgs`/`overloadForArgs`/the
+checker's `resolveOverload`; `implementationOf` + `callTypeArgs`); narrowing machinery in the backend deleted; canonical boxing
+(`coerceValue`); the interrupted resumable unification (generators and async share `resumableFrame`/`emitResumableBody`); the checker owns
+flow and numeric ranges (below); machine types; **type parameters are opaque as TS's** (`302be07`); TS's inference PRIORITY (a callback's
+return outranks the destination, which only fills a parameter nothing else spoke for; codegen keeps the caller's layout by FLOW:
+`callTypeArgs` instantiates with the destination's argument where the checker's is an ANONYMOUS object shape, the destination is struct
+shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
+
+**Rules learned (checker/flow/scale)**
+- `checkStmt` returns its flow (`undefined` = never falls out); `joinFlow` merges; `break`/`continue` deliver to a `FlowTarget`; a loop head
+  iterates QUIETLY (`Scope.quiet`) to a fixpoint then one real walk. A check narrows iff it reports, stamps, or is quiet -- a QUERY (the
+  backend's `checkerTypeOf`) must not mutate its scope; never RESOLVE a declared type during hoisting (bakes an interface before a later
+  lib block merges into it -- hit twice); never re-type an expression with `err` (duplicate diagnostics -- hit twice).
+- Numeric ranges in the flow: `rangeStep` = the USER'S RULE (`++`/`--`/`+= a`/`-= a`/`x = x +- a` never overflow i32, else i64, both sides
+  fit); loop heads `rangeWiden` to machine limits then step down; `combineTypes` merges true intervals; a `let`'s representation = the hull
+  of its stamped reads+writes (`d.flowType`). `NumRange.integer` EXCLUDES -0. 32-bit `+ - *` keeps 32 bits only where the checker's stamp
+  says i32/u32, else `f64`. u32 compares `_u`; mixed i32/u32 compare as f64 (NOT i64). Bigints are `i32`/`i64` where the checker proves the
+  range; `scalarBinding` reads a machine-scalar binding as it (a boxed union narrowed to `number` must unbox -- letting every binding win
+  regressed 60 rows).
+- Machine types: lib.d.ts declares `Int<Bits, Signed>`/`Float<Bits>` (built in by being declared in the ROOT = lib scope) and `i8..u64/f32/
+  f64` as applications; `T.machineOf` follows the alias chain from the DECLARATION, never a name. User: an annotation is TRUSTED, not
+  checked -- the value is converted into its slot automatically, SATURATING (`trunc_sat`) is fine; a machine type's JS semantics are
+  `number`'s for Bits <= 53 and `bigint`'s above. `machineSlot` is honest (i8/i16 -> i32, u8/u16 -> u32, u64 own); a NUMBER's box is ALWAYS
+  `f64`; a slot holding two array storages opens PER DECLARATION (user chose per-slot over per-type; aliasing kept); out-of-range packed
+  writes WRAP.
+- Scale: fluent builders (`B<T & F<T>>`) double per step, so printed keys (`typeKey`) are exponential -- use `T.typeId` (structural hash,
+  DAG-linear; lives on the node, skips checker stamps) for any equality/cache/set key; `resolve`'s structural cache is weak. A cycle guard
+  must be a WeakMap (a Map OOMed the workers). Each named alias body resolves with its OWN depth budget (`resolveAliasBody`). Conditionals
+  distribute at their own node; `mentionsAbstract` must cover indexed/keyof/mapped/conditional kinds. An undeclared TYPE name is silently
+  "abstract" (no TS2304 for types): suspect a missing lib name whenever a conditional over concrete-looking types stays deferred.
+- A stamp is taken when a closure is first checked, so a `let`/`const` declared LATER in its block was unbound there: `hoist` binds each lazily
+  (`Scope.addLazyValue`); speculative walks (`trying`) stamp nothing and undo what they wrote onto the AST (`ahead`/`written`). `var` is
+  function-scoped (`scope.varScope()`; backend `hoistVars`). A node codegen SYNTHESIZES is typed with `typeOf(..., overStamps)`.
+- Proof a refactor changes no behaviour: **a WAT A/B over the towasm suite** (`suite-wat-diff.py before.out after.out` names the tests whose
+  printed WAT changed; `test-watdiff.py before.out after.out <test>` shows one) -- stronger than difftest agreeing. A snippet runs with
+  `towasm-run.ts file.ts export...` (reads dist/).
+- **A checker change needs a self-hosting gate too**: `SNAP=<packages root|snapshot> errcount.ts <surveyed files>` counts checker errors under
+  the survey's sibling-source resolution and the wasm lib. The corpus A/B (TS's lib, single files) and test-checker cannot see a lazily
+  inferred IMPORT read during a trial (db47972: walker.ts 1 -> 13 errors, both instruments green). Probes, all `SNAP`-aware where they load
+  modules: `probe-ctx.ts file [lines]` (expected/checked per call/new/arrow/array, `KINDS=`), `probe-obj.ts file [lines]` (object literals'
+  flow/expected/checked), `probe-call.ts file` (each call's resolved overload). In wasm-backend/codegen code a stack needs
+  `new globalThis.Error().stack`: codegen.ts's own `Error` class shadows the global and has no stack.
+- The checker never reports an unknown name for TYPES; for values TS2304 is behind `Scope.unknownNames` ([[tison_unknown_name_diagnostic]]).
+
 ## Gates baseline (2026-10-06)
 
 corpus A/B vs `07b036e`: ERROR +24 (was +13), GAP 195. The +11 from index-signature checking (`b6996e0`) are 10 errors tsc ITSELF
