@@ -2217,11 +2217,22 @@ export function unionSignature(t: Type, kind: 'call' | 'construct', scope: Scope
 	if (r.type !== 'union')
 		return undefined;
 	const sigs = r.types.map(m => signaturesOf(m, kind, scope));
-	if (sigs.some(s => s.length !== 1 || s[0].typeParams?.length))
+	if (sigs.some(s => s.length !== 1))
 		return undefined;
-	const each = sigs.map(s => s[0]);
-	const combined = each.slice(1).reduce((a, b) => combineUnionParameters(a, b, scope), each[0]);
-	return { params: combined.params, rest: combined.rest, returnType: combineTypes(each.map(s => s.returnType ?? ANY)) };
+	// As TS's getUnionSignatures, generic members combine only over IDENTICAL type parameter lists, renamed to the first's.
+	const tps	= sigs[0][0].typeParams ?? [];
+	const each	= sigs.map(([s]) => {
+		const own = s.typeParams ?? [];
+		if (own.length !== tps.length)
+			return undefined;
+		const rename = new Map(own.map((p, i) => [p.name, TS.RefType(tps[i].name) as Type]));
+		const renamed = own.length ? substituteType({ ...s, type: 'function', typeParams: undefined } as Type, rename) as TS.CallSig : s;
+		return own.every((p, i) => typeId(p.constraint ? substituteType(p.constraint, rename) : UNKNOWN) === typeId(tps[i].constraint ?? UNKNOWN)) ? renamed : undefined;
+	});
+	if (each.some(s => !s))
+		return undefined;
+	const combined = each.slice(1).reduce((a, b) => combineUnionParameters(a!, b!, scope), each[0])!;
+	return { typeParams: tps.length ? tps : undefined, params: combined.params, rest: combined.rest, returnType: combineTypes(each.map(s => s!.returnType ?? ANY)) };
 }
 
 // Each position takes the intersection of both signatures' types there (a missing one constrains nothing), and is optional

@@ -4691,6 +4691,17 @@ async function main() {
 			export function voidArg(): number { return id(f()); }
 		`);
 		check('a void value passed where a value is wanted is undefined', voidArg(), 1);
+		// binary's `s.view(DataView, n)` on `sync._stream | async._stream`: the two generic methods share their type parameters, so the call resolves.
+		const { unionGeneric } = await compile(`
+			type MaybePromise<T> = T | Promise<T>;
+			function after<V, R>(v: V, then: (value: Awaited<V>) => R): R { return then(v as Awaited<V>); }
+			class A { view<V>(t: V, n: number): number { return n + 1; } }
+			class B { view<V>(t: V, n: number): MaybePromise<number> { return n * 10; } }
+			function h(s: A | B) { return after(s.view('x', 4), v => 1); }
+			function k(s: A) { return after(s.view('x', 4), v => 1); }
+			export function unionGeneric(): number { return h(new A()) + k(new A()); }
+		`);
+		check('a call through a union of generic methods', unionGeneric(), 2);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };
