@@ -3526,6 +3526,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			ctx.emit(I.unreachable);
 			return want;
 		}
+		// A `void` value where one is wanted (`after(x.put(s, v), ...)`) is `undefined`, as JS gives it: the call ran for its effects.
+		if (got === 'void' && want !== 'void' && T.isRef(ctx.typeAt(e), 'void')) {
+			emitAs(Identifier('undefined'), ctx, want);
+			return want;
+		}
 		// A bigint's canonical `any` form is its limb array, never a number box (`typeof` tests the heap type), so a machine-int bigint widens first.
 		if (W.isAny(want) && typeof got === 'string' && T.typeofName(ctx.narrowedTypeOf(e), ctx.scope) === 'bigint') {
 			const big = builtinTypes.get('bigint')!.wtype;

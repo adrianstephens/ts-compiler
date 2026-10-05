@@ -4685,6 +4685,12 @@ async function main() {
 			export function unionNew(): number { return mk(K).v * 10 + mk(x => ({ v: x + 1 })).v; }
 		`);
 		check('new on a union of a class and a function', unionNew(), 45);
+		const { voidArg } = await compile(`
+			function f(): void {}
+			function id(x: any): number { return x === undefined ? 1 : 0; }
+			export function voidArg(): number { return id(f()); }
+		`);
+		check('a void value passed where a value is wanted is undefined', voidArg(), 1);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };
