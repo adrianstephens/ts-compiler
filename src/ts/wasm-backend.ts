@@ -3755,6 +3755,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			ctx.emit(I.struct.new(types.box(got === 'f64' ? 'f64' : 'i32')));
 			return;
 		}
+		// A machine 64-bit int is a `bigint`, held as bigint's own limbs (what `typeof` tells); an `f32` is a number, the `f64` box.
+		if ((got === 'i64' || got === 'u64') && W.isAny(want))
+			return coerceTop(got, ctx, typeOf(T.BIGINT)!);
+		if (got === 'f32' && W.isAny(want)) {
+			ctx.emit(I.f64.promote_f32);
+			return coerceTop('f64', ctx, want);
+		}
 
 		if (typeof got !== 'string') {
 			if (W.isAny(got)) {

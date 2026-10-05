@@ -2967,6 +2967,15 @@ async function main() {
 	}
 
 	{
+		const { machineAny } = await compile(`
+			const a = new BigUint64Array([5n, 2n ** 63n]), b = new Float32Array([1.5]);
+			const fns: any[] = [(i: number) => a[i], (i: number) => b[i]];
+			export function machineAny() { const x = fns[0](0), y = fns[0](1), z = fns[1](0); return (typeof x === 'bigint' ? 1 : 0) + (x === 5n ? 10 : 0) + (y === 2n ** 63n ? 100 : 0) + (z === 1.5 ? 1000 : 0); }
+		`);
+		check("a u64 into any is a bigint, an f32 a number", machineAny(), 1111);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
