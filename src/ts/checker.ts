@@ -2773,7 +2773,8 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 				// inference from the assertion (`xs.flatMap(...) as C[]`).
 				// A function or literal operand takes `anno` as its context, as in TS (`(s => ...) as get<R>`, `{ get: s => t } as TypeT<T>`): no inference rides on it.
 				if (isContextSensitive(e.expression) || e.expression.type === 'object' || e.expression.type === 'array') {
-					recurse(e.expression, anno);
+					// Local aliases expanded as the result's are: a parameter typed from them must resolve outside the body too.
+					recurse(e.expression, T.expandLocalQueries(anno, scope));
 				} else if (stamp) {
 					recurse(e.expression);
 					// What the operand is BUILT as, though not typed against: `{ type: 'array', ... } as Expr` names the union member.
