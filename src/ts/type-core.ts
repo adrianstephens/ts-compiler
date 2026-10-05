@@ -93,12 +93,23 @@ export function typeId(t: Type, scoped = false): string {
 		.map(k => `${k}:${part((o as Record<string, unknown>)[k])}`);
 	// A node reached again while its own id is computed (`f` returning `f`) reads as a provisional id unique to it, which ends the cycle.
 	Object.defineProperty(t, memo, { value: `~${++cyclicIds}`, configurable: true });
-	const sig	= fields(t).join(';');
+	const sig	= fields(t).join(';') + (scoped ? '' : declaredAs(t));
 	const id	= `${hash53(sig, 0).toString(36)}.${hash53(sig, 0x9e3779b9).toString(36)}`;
 	Object.defineProperty(t, memo, { value: id });
 	return id;
 }
 let cyclicIds = 0;
+// A stamped ref is also WHAT it names, by identity: two modules' same-spelled classes (binary's sync and async `_stream`) are two types,
+// while refs to one class from different modules stay one. An unstamped ref names whatever its reader's scope does.
+const declIds	= new WeakMap<object, number>();
+let nextDeclId	= 0;
+function declaredAs(t: Type): string {
+	if (t.type !== 'ref' || !t.declScope || INTRINSIC_TYPES.has(t.name))
+		return '';
+	const [ns, last] = (t.declScope as Scope).qualified(t.name);
+	const target: object | undefined = ns?.classDecl(last) ?? ns?.type(last);
+	return target ? `@${declIds.get(target) ?? (declIds.set(target, nextDeclId), nextDeclId++)}` : '';
+}
 // cyrb53: a well-mixed 53-bit string hash.
 function hash53(str: string, seed: number): number {
 	let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
@@ -2283,13 +2294,14 @@ export function mergeIdenticalSignatures(t: Type): Type {
 	const [first, ...rest] = t.types;
 	if (first.type !== 'function')
 		return t;
+	// By `typeId`, which tells two modules' same-spelled classes apart (binary's sync and async `_stream`), where a printed key does not.
 	const names	= first.typeParams?.map(p => p.name) ?? [];
-	const key	= typeKey(first);
+	const key	= typeId(first);
 	const same	= (f: Type) => {
 		if (f.type !== 'function' || (f.typeParams?.length ?? 0) !== names.length)
 			return false;
 		const renamed = names.length ? substituteType(f, new Map(f.typeParams!.map((p, i) => [p.name, TS.RefType(names[i])] as const))) as TS.FunctionType : f;
-		return typeKey({ ...renamed, typeParams: renamed.typeParams?.map((p, i) => ({ ...p, name: names[i] })) }) === key;
+		return typeId({ ...renamed, typeParams: renamed.typeParams?.map((p, i) => ({ ...p, name: names[i] })) }) === key;
 	};
 	return rest.every(same) ? first : t;
 }

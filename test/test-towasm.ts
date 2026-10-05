@@ -4757,6 +4757,15 @@ async function main() {
 			export function undefinedAsserted(): number { return opt<number>()() === undefined ? 1 : 0; }
 		`);
 		check('undefined asserted to a type', undefinedAsserted(), 1);
+		// binary's sync and async \`_stream\`: two modules' same-spelled classes are two types, so a call through their union keeps both.
+		const { sameNamedClasses } = await compileMulti({
+			sa:		`export class S { constructor(readonly k: number) {} off(n: number) { return new S(this.k + n); } }`,
+			sb:		`export class S { constructor(readonly k: number) {} off(n: number) { return new S(this.k * n); } }`,
+			main:	`import * as a from './sa'; import * as b from './sb';
+				function f(s: a.S | b.S): number { const t = s.off(3); return t.k; }
+				export function sameNamedClasses(): number { return f(new a.S(2)) + f(new b.S(2)) * 10; }`,
+		}, 'main');
+		check('two modules\' same-named classes through a union', sameNamedClasses(), 65);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };
