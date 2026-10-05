@@ -2621,6 +2621,18 @@ async function main() {
 		check("super(...) omitting an optional parameter passes undefined", superOpt(), 112);
 	}
 
+	{
+		const { boxedParam } = await compile(`
+			class V { constructor(public n: number, public off?: number, public len?: number) {} }
+			type Maker = new (n: number, off: number, len: number) => V;
+			function build<M extends Maker>(type: M, d: <X extends Maker>(t: X, o: number, l: number) => InstanceType<X>) { return d(type, 3, 4); }
+			export function boxedParam(): number {
+				const v = build(V, (t, o, l) => new t(1, o, l));
+				return v.n + (v.off ?? 0) * 10 + (v.len ?? 0) * 100;
+			}
+		`);
+		check("a closure whose optional number parameters are boxed fits a slot passing bare numbers", boxedParam(), 431);
+	}
 
 	{
 		const { caught } = await compile(`

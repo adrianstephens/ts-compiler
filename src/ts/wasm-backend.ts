@@ -3622,10 +3622,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const gotSig = closureSigOf(got), wantSig = closureSigOf(want);
 			// A shared param may DIFFER where the wrapper adapts it with a cast: `Array<T>`'s methods compile at `T = any`, so `(x: string)` meets `(x: any)`.
 			// Both REFERENCES, scalar against `any` ((un)boxed in the wrapper), or two scalars converted as a call converts an argument into its
-			// parameter (`ViewMaker`'s `f64` offset into `DataView`'s `i32`, saturating, as a machine-typed slot takes any number).
-			const paramFits = (p: W.Type, i: number) => (w => W.typeEq(p, w) || (typeof p !== 'string' && typeof w !== 'string')
+			// parameter (`ViewMaker`'s `f64` offset into `DataView`'s `i32`, saturating, as a machine-typed slot takes any number), boxed for an
+			// optional one (`length?: number`).
+			const scalarInto	= (w: W.Type, p: W.Type) => typeof w === 'string' && typeof p === 'string' && (w === p || !!SCALAR_CONVERSIONS[w]?.[p]);
+			const paramFits		= (p: W.Type, i: number) => (w => W.typeEq(p, w) || (typeof p !== 'string' && typeof w !== 'string')
 				|| (typeof p === 'string' && W.isAny(w)) || (typeof w === 'string' && W.isAny(p))
-				|| (typeof p === 'string' && typeof w === 'string' && !!SCALAR_CONVERSIONS[w]?.[p]))(wantSig.params[i]);
+				|| scalarInto(w, p) || (box => !!box && scalarInto(w, box.kind))(W.unboxedPrimitive(p)))(wantSig.params[i]);
 			// MORE params than the slot offers fits when the wrapper can supply each extra one: a defaulted or optional parameter (`(m, depth = 6)`).
 			if ((gotSig.params.length <= wantSig.params.length || gotSig.params.slice(wantSig.params.length).every((p, i) => {
 				const d = gotSig.defaults?.[wantSig.params.length + i];
