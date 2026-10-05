@@ -2677,6 +2677,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		return ctors.length && !T.signaturesOf(t, 'call', global).length ? sigsWtype(ctors) : undefined;
 	}
 
+	// A NUMBER index signature (`ArrayLike<T>`) is met by arrays, strings, typed arrays and plain objects alike: no one layout.
+	const numberIndexed = (o: TS.ObjectType) => o.members.some(m => m.type === 'index' && m.paramType.type === 'ref' && m.paramType.name === 'number');
+
 	function typeOfUncached(t: Type): W.Type | undefined {
 		// A machine type's representation is the slot it names, which resolving (to its value type) would lose.
 		if (T.machineOf(t, global))
@@ -2732,9 +2735,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const cls	= vt && ensureClass('DynamicObject', [vt]);
 				if (cls)
 					return cls.thisType;
-				// A NUMBER index signature (`ArrayLike<T>`) is met by arrays, strings, typed arrays and plain objects alike: no one layout.
 				// Nor is `{}`, which holds any value but `null`/`undefined` (a truthy `unknown` narrows to it).
-				if (!resolved.members.length || resolved.members.some(m => m.type === 'index' && m.paramType.type === 'ref' && m.paramType.name === 'number'))
+				if (!resolved.members.length || numberIndexed(resolved))
 					return W.REF_ANY;
 				if (onlyCalls(resolved.members)) {
 					const closure = callSignaturesWtype(resolved.members);
@@ -2752,6 +2754,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const prim = primitivePart(resolved, global);
 				if (prim)
 					return typeOf(prim);
+				// An interface extending another (binary's `TypedArray extends ArrayBufferView`) is an intersection; its members decide as an object's do.
+				if (resolved.types.some(p => (r => r.type === 'object' && numberIndexed(r))(T.resolve(global, p))))
+					return W.REF_ANY;
 				break;
 			}
 			case 'union': {
