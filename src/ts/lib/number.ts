@@ -706,6 +706,8 @@ export class Math {
 // The global functions JS defines as the same functions as `Number`'s.
 export function parseInt(s: string, radix?: number): number	{ return Number.parseInt(s, radix); }
 export function parseFloat(s: string): number				{ return Number.parseFloat(s); }
+export function isNaN(n: number): boolean					{ return n !== n; }
+export function isFinite(n: number): boolean				{ return n === n && n !== Infinity && n !== -Infinity; }
 
 // `Object.is` -- SameValue: `===`, except that NaN is itself and +0 and -0 differ. towasm lowers the intrinsic to this call;
 // the operands arrive boxed (printer.ts's `Object.is(expr.value, -0)` passes a union), so the number test is made at run time.

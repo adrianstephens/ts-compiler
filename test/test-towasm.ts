@@ -2793,6 +2793,14 @@ async function main() {
 	}
 
 	{
+		const { globalsNaN } = await compile(`
+			export function globalsNaN(): number { return (isNaN(0 / 0) ? 1 : 0) + (isNaN(1) ? 10 : 0) + (isFinite(1) ? 100 : 0) + (isFinite(1 / 0) ? 1000 : 0) + (isFinite(0 / 0) ? 10000 : 0); }
+		`);
+		check("the global isNaN and isFinite", globalsNaN(), 101);
+	}
+
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
