@@ -457,6 +457,12 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		declare function g<E>(a: readonly E[]): E;
 		function f<T, A extends readonly T[]>(a: A): T { const y: number = g(a); return g(a); }`,
 		["Type 'A' is not assignable to type 'number'", "Type 'A' is not assignable to type 'number'", "Type 'T' is not assignable to type 'number'"]],
+	['a class adding no members has the members of its base', `
+		class A { tell() { return 1; } }
+		class B extends A { constructor(x: number) { super(); } }
+		class C extends A {}
+		const b: string = new B(1).tell(), c: string = new C().tell();`,
+		["Type 'number' is not assignable to type 'string'", "Type 'number' is not assignable to type 'string'"]],
 ];
 
 (async () => {

@@ -1740,7 +1740,11 @@ export function resolveMembers(t: Type, scope: Scope, depth = 10): Type {
 		return r;
 	const [ns, name]	= declScopeOf(r, scope).qualified(r.name);
 	const entry			= ns?.type(name);
-	return ns && entry ? resolve(ns, instantiateEntry(entry, r.typeArgs), depth - 1) : r;
+	if (!ns || !entry)
+		return r;
+	// A class adding no members reduces to its base's nominal ref (`{} & A` is `A`), whose members are then the class's.
+	const members = resolve(ns, instantiateEntry(entry, r.typeArgs), depth - 1);
+	return members.type === 'ref' && members !== r && depth > 0 ? resolveMembers(members, ns, depth - 1) : members;
 }
 
 // Every member a union could BE: `resolve` leaves a union's MEMBERS alone, and one may resolve to a further union (`AB | C`); `never` is dropped,
