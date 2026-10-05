@@ -3150,7 +3150,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// declare (`Record<symbol, V>`) is found by its value at run time (`#ext`).
 	function symbolMember(recv: Expr, key: Expr, ctx: FunctionContext): string | undefined {
 		const name = symbolKey(key, ctx.scope), t = ctx.narrowedTypeOf(recv);
-		return name !== undefined && (T.isAny(t) || T.lookupMember(T.nonNullable(t, ctx.scope), name, ctx.scope)) ? name : undefined;
+		return name !== undefined && (T.isAny(t) || assertedAny(recv) || T.lookupMember(T.nonNullable(t, ctx.scope), name, ctx.scope)) ? name : undefined;
 	}
 
 	function matchObjectShape(e: JS.ObjectExpr<Type>, ctx: FunctionContext, anon = true): ClassInfo | undefined {
@@ -5772,13 +5772,19 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// `obj.m` read, not called: a closure over `envThis(obj)`, whose code calls `this.m(...)` as any call site would --
 	// overloads and overrides included. Called with no receiver, the null `this` traps where JS would throw.
 	function emitMethodValue(e: Expr & { type: 'member' }, cls: ClassInfo, ctx: FunctionContext): W.Type {
-		const fnType	= T.resolve(ctx.scope, ctx.narrowedTypeOf(e));
-		const w			= typeOf(fnType);
-		if (fnType.type !== 'function' || !W.isClosure(w))
+		const fnType = T.resolve(ctx.scope, ctx.narrowedTypeOf(e));
+		if (fnType.type !== 'function')
 			throw `method '${e.property}' as a value needs a function type, got '${T.showType(fnType)}'`;
+		return emitBoundMethod(cls, e.property, fnType, () => emitAs(e.object, ctx, W.REF_ANY_NULLABLE), ctx);
+	}
+	// `cls`'s method `name` as a closure over the receiver `pushRecv` leaves on the stack, at its function type `fnType`.
+	function emitBoundMethod(cls: ClassInfo, name: string, fnType: TS.FunctionType, pushRecv: () => void, ctx: FunctionContext): W.Type {
+		const w = typeOf(fnType);
+		if (!W.isClosure(w))
+			throw `method '${name}' as a value has no closure representation ('${T.showType(fnType)}')`;
 		const sig		= closureSigOf(w);
 		const { funcTypeIndex, structTypeIndex } = ensureClosureType(sig);
-		const key		= `${cls.name}.${e.property}:${W.typeKey(w)}`;
+		const key		= `${cls.name}.${name}:${W.typeKey(w)}`;
 		let info		= methodValueWrappers.get(key);
 		if (!info) {
 			const made: FuncInfo = { ...sig, ...types.funcAt(funcTypeIndex) };
@@ -5786,12 +5792,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			closureLiterals.push(made);
 			methodValueWrappers.set(key, made);
 			worklist.push(() => {
-				const wctx	= new FunctionContext(`<method value>.${cls.name}.${e.property}`, new Scope(libGlobal), plainReturn(sig.result), undefined, ctx.homeModule);
+				const wctx	= new FunctionContext(`<method value>.${cls.name}.${name}`, new Scope(libGlobal), plainReturn(sig.result), undefined, ctx.homeModule);
 				const env	= wctx.declareLocal('#envParam', { typeIndex: types.envBase(), nullable: false });
 				// A rest parameter's array is the method's own rest array: the wrapper's caller built it fresh.
 				const args	= sig.params.map((p, i) => localArg(wctx, wctx.declareLocal(`$arg$${i}`, p).index, p, sig.resolvedParams![i].tsType));
 				wctx.emit(I.local.get(env.index), I.ref.cast(envThis()), I.struct.get(envThis(), 0), I.ref.cast(cls.typeIndex));
-				const got	= emitCallOn(cls, e.property, args, wctx);
+				const got	= emitCallOn(cls, name, args, wctx);
 				if (sig.result !== 'void')
 					coerceAs(fnType.returnType, got, wctx, sig.result);
 				else if (got !== 'void')
@@ -5800,7 +5806,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			});
 		}
 		ctx.emit(I.ref.func(info.funcIndex));
-		emitAs(e.object, ctx, W.REF_ANY_NULLABLE);
+		pushRecv();
 		ctx.emit(I.struct.new(envThis()), I.i32.const(jsLength(fnType.params)), ...newClosure(structTypeIndex));
 		return w;
 	}
@@ -9333,6 +9339,15 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const sig = cls.getterNames?.has(name) ? methodSig(cls, accessorKey('get', name), dctx) : undefined;
 				if (sig)
 					return [{ heap, emit: () => emitBoxed(cls, name, emitMethodCall(cls, accessorKey('get', name), [], dctx), dctx, result) }];
+				// A method read as a value: bound to the receiver, as JS's `x.m` is the function called on `x`. One signature only: an overload set is no one closure.
+				const method = cls.typeIndex !== -1 && cls.methodDecls.has(name) && !cls.fieldIndex.has(name)
+					? (m => m && T.resolveOwn(m, cls.declScope ?? libGlobal))(T.lookupMember(cls.thisTsType, name, cls.declScope ?? libGlobal)) : undefined;
+				if (method?.type === 'function' && !method.typeParams?.length)
+					return [{ heap, emit: () => {
+						const obj = dctx.temp(`$mvobj$${heap}`, cls.thisWtype!);
+						dctx.emit(I.local.set(obj));
+						coerceTop(emitBoundMethod(cls, name, method, () => dctx.emit(I.local.get(obj)), dctx), dctx, result);
+					} }];
 				// A key the class does not declare, written onto this instance at run time: its `#ext` map's.
 				return cls.typeIndex !== -1 && cls.fieldIndex.has('#ext') && !cls.methodDecls.has(name) ? [{ heap, emit: () => {
 					const obj = dctx.temp(`$extobj$${heap}`, cls.thisWtype!);

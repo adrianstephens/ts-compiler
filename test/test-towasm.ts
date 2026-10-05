@@ -2934,6 +2934,14 @@ async function main() {
 	}
 
 	{
+		const { symIter } = await compile(`
+			function isIter<R>(a: R) { return typeof (a as any)[Symbol.iterator] === 'function'; }
+			export function symIter(): number { return (isIter([1]) ? 1 : 0) + (isIter({ x: 1 }) ? 10 : 0) + (isIter(new Set([1])) ? 100 : 0); }
+		`);
+		check("(x as any)[Symbol.iterator]: a well-known symbol key names the member, a method read as a bound value", symIter(), 101);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
