@@ -82,7 +82,9 @@ interface Function {
 	readonly length: number;
 	readonly name: string;
 }
-interface CallableFunction {}
+interface CallableFunction {
+	call<T, A extends any[], R>(this: (this: T, ...args: A) => R, thisArg: T, ...args: A): R;
+}
 interface NewableFunction {}
 interface IArguments {}
 interface Boolean {}
@@ -389,6 +391,7 @@ interface ArrayConstructor {
 	new <T>(...items: T[]): T[];
 	<T>(n?: number): T[];
 	<T>(...items: T[]): T[];
+	isArray(arg: any): arg is any[];
 }
 declare var Array: ArrayConstructor;
 
@@ -605,6 +608,16 @@ declare var Math: {
 	sin(x: number): number;
 	sqrt(x: number): number;
 	tan(x: number): number;
+};
+
+//-----------------------------------------------------------------------------
+//	JSON
+//-----------------------------------------------------------------------------
+
+// TS's two `stringify` overloads as one, as `lib/json.ts` implements them.
+declare var JSON: {
+	parse(text: string, reviver?: (this: any, key: string, value: any) => any): any;
+	stringify(value: any, replacer?: ((this: any, key: string, value: any) => any) | (number | string)[] | null, space?: string | number): string;
 };
 
 //-----------------------------------------------------------------------------

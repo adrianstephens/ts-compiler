@@ -4587,6 +4587,21 @@ async function main() {
 			export function narrowedCall(): number { return new H(n => n * 3).run() + new H().run() * 10; }
 		`);
 		check('.call on a field narrowed to non-null', narrowedCall(), -4);
+		const { jsonStringify, jsonParse } = await compile(`
+			export function jsonStringify(): number {
+				return (JSON.stringify({ a: 1, b: [true, null, 'x"\\n'], c: { d: 2.5 } }) === '{"a":1,"b":[true,null,"x\\\\"\\\\n"],"c":{"d":2.5}}' ? 1 : 0)
+					+ (JSON.stringify([1, 'two', { three: 3 }], null, 2) === '[\\n  1,\\n  "two",\\n  {\\n    "three": 3\\n  }\\n]' ? 10 : 0)
+					+ (JSON.stringify('lone\\ud800') === '"lone\\\\ud800"' && JSON.stringify(NaN) === 'null' ? 100 : 0)
+					+ (JSON.stringify({ a: 1, b: 2 }, ['b']) === '{"b":2}' ? 1000 : 0);
+			}
+			export function jsonParse(): number {
+				const v = JSON.parse('{"a": [1, 2, {"b": "c\\u0041"}], "n": -1.5e2, "t": true, "z": null}');
+				return v.a.length * 1000 + v.a[2].b.length * 100 + (v.a[2].b === 'cA' ? 10 : 0) + (v.t && v.z === null ? 1 : 0) + v.n
+					+ JSON.parse('[1,2,3]', (k, x) => typeof x === 'number' ? x * 10 : x)[2] * 10000;
+			}
+		`);
+		check('JSON.stringify', jsonStringify(), 1111);
+		check('JSON.parse, with a reviver', jsonParse(), 303061);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };

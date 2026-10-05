@@ -396,9 +396,10 @@ class FunctionContext extends W.FunctionContext {
 		}
 		if (test.type !== 'call')
 			return undefined;
+		// The signature the checker resolved the call to: the callee's type may hold several (an interface's member beside a class's static).
 		const scope	= this.scope;
-		const fn	= T.resolveOwn(checkerTypeOf(test.callee, scope), scope);
-		if (fn.type !== 'function' || fn.typeParams?.length)
+		const fn	= callOf(test, scope)?.sig;
+		if (!fn || fn.typeParams?.length)
 			return undefined;
 		const pred = fn.returnType;
 		if (pred?.type !== 'predicate' || pred.asserts || !pred.assertedType)
