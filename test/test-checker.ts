@@ -232,6 +232,7 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 	// TS's read of a tuple position: an optional element, or a union member too short for it, reads `undefined` too (towasm's
 	// bounds-checked read relies on it); a position a rest spread covers reads the spread's element, with no error.
 	['a union of tuples read past a shorter member is possibly undefined', 'function f(...args: [number] | [number, number]) { const q: number = args[1]; }', ['is not assignable']],
+	['undefined is assignable to no class under strict null checks', 'function f(a: number[]) {} f(undefined); type C = undefined extends number[] ? 1 : 2; const c: 2 = 1 as C;', ['is not assignable']],
 	['a local type alias in an asserted result takes the caller\'s type arguments', 'function opt<T>(v: T) { type R = T | undefined; return ((x: number) => v) as (x: number) => R; } const f = opt(1); const n: string = f(0);', ['is not assignable']],
 	['a remapped key that is no literal is an index signature', 'type Invert<T> = { [K in keyof T as T[K] & PropertyKey]: K }; declare const I: Invert<{ a: number; b: number }>; const z: number = I[1];', ['is not assignable']],
 	['a signed number is a literal in a const context', 'const S = { i8: -8 } as const; function f(a: -9) {} f(S.i8);', ['is not assignable']],

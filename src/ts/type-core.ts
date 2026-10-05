@@ -2770,13 +2770,12 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 				if (src.name === 'void' && dst.name === 'undefined')
 					return true;	// this checker's own bare-`return` inference produces `void`
 				// A PRIMITIVE never satisfies a real CLASS (`string` is no `RegExp`, nor an `Array<T>`), except its boxed wrapper; the leniency below is for a name
-				// not found at all. `undefined`/`null`/`void`/`any` stay lenient: rejecting them against a class cost real diagnostics on code tsc accepts.
+				// not found at all.
 				const boxedSrc = scope.semantics.boxed(src.name);
 				if (boxedSrc && (isClassRef(dst, dstScope) || dst.name === 'Array' || dst.name === 'ReadonlyArray'))
 					return boxedSrc === dst.name;
-				// Under the subtype relation (strict null checks; else answered above) `undefined`/`null` are below no class: an inferred predicate
-				// (`o => !!o` is `o is C`) and a static guard both rest on it.
-				if (precise && isNullOrUndefined(src))
+				// Under strict null checks (else answered above) `undefined`/`null` are assignable to no class: `undefined extends T[]` is false.
+				if (isNullOrUndefined(src))
 					return false;
 				return !(INTRINSIC_TYPES.has(src.name) && INTRINSIC_TYPES.has(dst.name));	// distinct primitives: no; unresolved names: lenient
 			}
