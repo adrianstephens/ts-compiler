@@ -1905,6 +1905,23 @@ function indexMembers(members: TS.TypeMember[]): IndexMember[] {
 	return members.filter((m): m is IndexMember => m.type === 'index');
 }
 
+// The shape an `interface` declares (checker's hoist): unlike an object literal TYPE it has no implicit index signature.
+export const declaredShapes = new WeakSet<Type>();
+// Whether a value written as `t` has TS's implicit index signature: an object literal type (or an alias to one) does; an interface or class does not.
+export function hasImplicitIndex(t: Type, scope: Scope): boolean {
+	if (t.type === 'intersection')
+		return t.types.every(p => hasImplicitIndex(p, scope));
+	if (t.type !== 'ref')
+		return !declaredShapes.has(t);
+	// `object` and the primitives (through their boxed interfaces) have no implicit index signature either.
+	if (INTRINSIC_TYPES.has(t.name))
+		return false;
+	if (isClassRef(t, scope))
+		return false;
+	const entry = declScopeOf(t, scope).lookupType(t.name)?.type;
+	return !entry || (entry !== t && hasImplicitIndex(entry, scope));
+}
+
 // A property name that is an array index (`'0'`, `'12'`), as a numeric index signature or a tuple position covers.
 function isIndexKey(prop: string): boolean {
 	return /^(0|[1-9]\d*)$/.test(prop);
@@ -2593,8 +2610,16 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 		if (srcBound) {
 			const bound		= isRef(srcBound, 'unknown') && !scope.strictNullChecks() ? TS.ObjectType([]) : srcBound;
 			const members	= dst.type === 'union' ? unionMembers(bound, scope) : [];
-			return isRef(dst, src.type === 'ref' ? src.name : '') && !dst.typeArgs || recurse(bound, dst, depth - 1)
-				|| (members.length > 1 && members.every(c => recurse(TS.IntersectionType([c, src]), dst, depth - 1)));
+			if (isRef(dst, src.type === 'ref' ? src.name : '') && !dst.typeArgs || recurse(bound, dst, depth - 1))
+				return true;
+			// Each `c & T` meets the intersection rule, which asks `T` against `dst` again: the question in progress here, so it adds nothing.
+			const key = `bound:${typeId(src)}:${typeId(dst)}`;
+			if (members.length < 2 || inProgress.has(key))
+				return false;
+			inProgress.add(key);
+			const each = members.every(c => recurse(TS.IntersectionType([c, src]), dst, depth - 1));
+			inProgress.delete(key);
+			return each;
 		}
 		// A deferred conditional, as TS relates one: the same conditional; as a source, through its branches; as a target, whatever
 		// fits both branches (no `infer`, whose bindings only an instantiation supplies).
@@ -2752,8 +2777,28 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 					// A computed key names its member by path (`[Symbol.iterator]`), as `lookupMember` finds it.
 					if (m.type === 'call' || m.type === 'construct')
 						return signatureFits(src, m, depth);
+					if (m.type === 'index' && src.type !== 'tuple' && (isRef(m.paramType, 'string') || isRef(m.paramType, 'number'))) {
+						// As TS: the source's own index signature covering the key (a string one covers numbers too), else an object literal type's
+						// implicit one (each of its properties, numeric-named only for a number index); an interface or class has none.
+						const numeric	= isRef(m.paramType, 'number');
+						// TS's indexSignaturesRelatedTo: a target string index of type `any` (`Record<string, any>`) takes any non-primitive source.
+						if (!numeric && isRef(m.typeAnnotation, 'any'))
+							return true;
+						const members	= collectMembers(src, scope);
+						const indexes	= indexMembers(members);
+						const own		= (numeric ? indexes.find(i => isRef(i.paramType, 'number')) : undefined) ?? indexes.find(i => isRef(i.paramType, 'string'));
+						if (own)
+							return recurse(own.typeAnnotation, m.typeAnnotation, depth - 1);
+						if (!hasImplicitIndex(srcWritten, scope))
+							return false;
+						return members.every(p => {
+							const key = (p.type === 'property' || p.type === 'method') ? memberKey(p.key) : undefined;
+							const got = key !== undefined && (!numeric || isIndexKey(key)) ? lookupMember(src, key, scope) : undefined;
+							return !got || recurse(got, m.typeAnnotation, depth - 1);
+						});
+					}
 					if (m.type !== 'property' && m.type !== 'method')
-						return true;		// index: unchecked (inventory C4)
+						return true;		// a symbol or template-literal index: unchecked
 					const key = memberKey(m.key);
 					if (key === undefined)
 						return true;

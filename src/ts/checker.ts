@@ -1432,6 +1432,7 @@ function hoist(block: Stmt[], scope: Scope) {
 			scope.addType(stmt.name, T.stampScope(stmt.value, scope), stmt.typeParams);
 		} else if (stmt.type === 'interface_decl') {
 			const obj = T.stampScope(TS.ObjectType(stmt.body), scope);
+			T.declaredShapes.add(obj);
 			// Inherited parts FIRST, own members LAST: the order `mergeType` uses, which `lookupMember`'s reversal turns into override precedence.
 			scope.mergeType(stmt.name, stmt.extendsClause?.length ? T.intersectTypes([...stmt.extendsClause.map(e => T.stampScope(e, scope)), obj]) : obj, stmt.typeParams, true);
 		}
