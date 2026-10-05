@@ -2799,6 +2799,39 @@ async function main() {
 		check("the global isNaN and isFinite", globalsNaN(), 101);
 	}
 
+	{
+		// binary's DataViewTypedArray: a proxy whose traps forward declared keys to the target and index the rest.
+		const { px } = await compile(`
+			function view(store: number[]) {
+				const length = store.length;
+				const target = { length, sum() { let s = 0; for (const v of store) s += v; return s; } };
+				return new Proxy(target, {
+					get(t, prop) {
+						if (prop in t)
+							return t[prop as keyof typeof t];
+						const index = Number(prop);
+						return !isNaN(index) && index >= 0 && index < length ? store[index] * 10 : undefined;
+					},
+					set(_t, prop, value) {
+						const index = Number(prop);
+						if (!isNaN(index) && index >= 0 && index < length) {
+							store[index] = value;
+							return true;
+						}
+						return false;
+					},
+				}) as any;
+			}
+			export function px(): number {
+				const v = view([1, 2, 3]);
+				v[1] = 7;
+				const k = 'len' + 'gth';
+				return (v[0] as number) + (v[1] as number) * 100 + (v.length as number) * 10000 + (v.sum() as number) * 100000 + (v[5] === undefined ? 1e7 : 0)
+					+ (k in v ? 1e8 : 0) + ('nope' in v ? 1e9 : 0) + Object.keys(v).length * 1e10;
+			}
+		`);
+		check("a Proxy: get and set traps, a method read through get, in, Object.keys", px(), 20111137010);
+	}
 
 	{
 		const { caught } = await compile(`

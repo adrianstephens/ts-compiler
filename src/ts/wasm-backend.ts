@@ -503,6 +503,7 @@ function isAsmMethod(m: JS.Method<Type>): JS.Call<Type> | undefined {
 
 // A structural `{[k: string]: V}` type is the lib's `DynamicObject<V>`, whose `get`/`set`/`delete`/`has`/`keys` implement it.
 const isDynamicObject = (cls: ClassInfo) => cls.decl.name === 'DynamicObject' && cls.homeModule === undefined;
+const isProxy = (cls: ClassInfo) => cls.decl.name === 'Proxy' && cls.homeModule === undefined;
 
 // A string index signature makes a dynamic object, its declared properties beside it too (`{ op: string; [k: string]: any }`): TS holds them to
 // the index type, so they are entries like any other key.
@@ -3278,6 +3279,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	function physicallyAny(e: Expr, ctx: FunctionContext): boolean {
 		return W.isAny(wtypeOf(e, ctx));
 	}
+	// An object ASSERTED `any` (`(switches as any).default`) is read as one: a key its type lacks reads `undefined` where absent.
+	const assertedAny = (e: Expr) => e.type === 'as' && T.isAny(e.typeAnnotation);
 
 	// Each argument of a call dispatched at run time, as its own representation: a bare `null`/`undefined` has none, so it goes as a null `any`.
 	function emitDynamicArgs(args: Expr[], ctx: FunctionContext): W.Type[] {
@@ -3289,7 +3292,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 	function classOfForIndexing(e: Expr, ctx: FunctionContext): ClassInfo | undefined {
-		if (physicallyAny(e, ctx))
+		if (physicallyAny(e, ctx) || assertedAny(e))
 			return undefined;
 		const cls = ownerOf(e, ctx);
 		// A union of array types (`string[] | never[]`) names no single class, but its members share ONE physical class: its accessors.
@@ -5087,7 +5090,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const refined	= !write && ctx.stampedTypeOf(unwrapAs(target.object));
 			// So is one ASSERTED `any` (`(switches as any).default`): a key its type lacks, which reads `undefined` where absent.
 			const dynamic	= T.isAny(T.resolveOwn(ctx.narrowedTypeOf(target.object), ctx.scope)) || physicallyAny(target.object, ctx)
-				|| (target.object.type === 'as' && T.isAny(target.object.typeAnnotation))
+				|| assertedAny(target.object)
 				|| (!!refined && !!T.lookupMember(refined, prop, ctx.scope) && !T.lookupMember(checkerTypeOf(unwrapAs(target.object), ctx.scope), prop, ctx.scope))
 				|| (write && [...classes.values()].some(c => c.fieldIndex.has(prop) && c.typeIndex !== -1));
 			if (dynamic)
@@ -5149,6 +5152,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 			const stringKey = T.isAssignable(ctx.narrowedTypeOf(target.index), T.STRING, ctx.scope);
 			const keyWtype	= typeOf(T.STRING)!;
+			// A key typed neither a string nor a number alone (a trap's `p: string | symbol`, `any`), on any receiver: told apart at run time.
+			const keyT = ctx.narrowedTypeOf(target.index);
+			if (T.isAny(keyT) || (!stringKey && !T.isNumberLike(keyT, ctx.scope)))
+				return { wtype: W.REF_ANY_NULLABLE, operands: [expr(target.object, W.REF_ANY), expr(target.index, W.REF_ANY_NULLABLE)],
+					load:	() => ctx.emit(I.call(ensureAnyProp('get').funcIndex)),
+					store:	() => ctx.emit(I.call(ensureAnyProp('set').funcIndex)) };
 			// A computed STRING key on a struct: the field the key names, compared at run time; a key naming none reads `undefined`
 			// and writes nothing, since a struct has no slot to grow.
 			if (cls && cls.typeIndex !== -1 && cls.fields.length && stringKey) {
@@ -5176,7 +5185,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 			// A key on an erased receiver -- typed `any`, or a union of differing structs boxed as one: each class's arm is picked
 			// by `ref.test` at run time, as JS reads `x[k]`.
-			if (T.isAny(ctx.narrowedTypeOf(target.object)) || physicallyAny(target.object, ctx)) {
+			if (T.isAny(ctx.narrowedTypeOf(target.object)) || physicallyAny(target.object, ctx) || assertedAny(target.object)) {
 				if (stringKey)
 					return { wtype: W.REF_ANY_NULLABLE, operands: [expr(target.object, W.REF_ANY), expr(target.index, keyWtype)],
 						load:	() => ctx.emit(I.call(ensureAnyKey('get').funcIndex)),
@@ -9001,6 +9010,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		return out;
 	}
 
+	// Each reached lib `Proxy` as a cascade arm, `use` running with it on the stack: FIRST in every `any` dispatch, since each property operation
+	// on a proxy is its handler's (`lib/proxy.ts`), never its own fields'.
+	function proxyArms(use: (cls: ClassInfo) => void) {
+		return [...new Set(classes.values())].filter(cls => isProxy(cls) && cls.typeIndex !== -1).map(cls => ({ heap: cls.typeIndex, emit: () => use(cls) }));
+	}
 	// Each reached `DynamicObject<V>` as a cascade arm, `use` running with it on the stack.
 	function dynamicObjectArms(use: (cls: ClassInfo) => void) {
 		return [...new Set(classes.values())].filter(cls => isDynamicObject(cls) && cls.typeIndex !== -1).map(cls => ({ heap: cls.typeIndex, emit: () => use(cls) }));
@@ -9118,14 +9132,15 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					dctx.emit(I.i32.const(1));
 			};
 			const owners		= distinctHeaps(dynamicReceivers(false).filter(r => r.cls.typeIndex !== -1 && r.cls.fields.length && r.cls.thisTsType));
-			const dynamic		= dynamicObjectArms(cls => {
+			const proxy			= proxyArms(cls => emitProxyOp(cls, kind, keyArg, kind === 'set' ? localArg(dctx, value, W.REF_ANY_NULLABLE) : undefined, dctx, result));
+			const dynamic		= [...proxy, ...dynamicObjectArms(cls => {
 				const got = emitCallOn(cls, kind, kind === 'set' ? [keyArg, localArg(dctx, value, W.REF_ANY_NULLABLE)] : [keyArg], dctx);
 				if (kind === 'get')
 					coerceTop(got, dctx, result);
 				else
 					dctx.emit(I.drop);
 				deleted();
-			});
+			})];
 			const ext = closureExtArm(() => kind === 'set' ? emitClosureExtSet(dctx, keyArg, localArg(dctx, value, W.REF_ANY_NULLABLE))
 				: kind === 'get' ? emitClosureExtGet(dctx, keyArg, result) : emitClosureExtDelete(dctx, keyArg));
 			// An element holder keyed by an array index (`arr["0"]`) reads or writes that element, as a number key does.
@@ -9286,8 +9301,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					emitExtOp(cls, obj, 'get', stringArg(dctx, name), dctx, undefined, result);
 				} }] : [];
 			};
-			const arms = name === 'constructor' ? constructorArms(dctx, result)
-				: [...dynamicObjectArms(cls => coerceTop(emitCallOn(cls, 'get', [stringArg(dctx, name)], dctx), dctx, result)), ...distinctHeaps(dynamicReceivers(true).flatMap(readOf))];
+			const arms = [...proxyArms(cls => coerceTop(emitCallOn(cls, '_get', [stringArg(dctx, name)], dctx), dctx, result)), ...name === 'constructor' ? constructorArms(dctx, result)
+				: [...dynamicObjectArms(cls => coerceTop(emitCallOn(cls, 'get', [stringArg(dctx, name)], dctx), dctx, result)), ...distinctHeaps(dynamicReceivers(true).flatMap(readOf))]];
 			// Gated like the arrays: with no closure type, no function value can be in an `any` slot.
 			const closureField = CLOSURE_FIELDS.get(name);
 			if (closureField !== undefined && closureTypes.size) {
@@ -9332,10 +9347,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	function ensureAnyFieldWrite(name: string): FuncInfo {
 		return synthesize(`<any field write>.${name}`, () => ({ params: [param('recv'), param('value', W.REF_ANY_NULLABLE)], result: 'void' as W.Type }), (dctx, [recv, value]) => {
 			const owners	= distinctHeaps(dynamicReceivers(false).filter(r => r.cls.typeIndex !== -1 && r.cls.fieldIndex.has(name)));
-			const dynamic	= dynamicObjectArms(cls => {
+			const dynamic	= [...proxyArms(cls => {
+				emitCallOn(cls, '_set', [stringArg(dctx, name), localArg(dctx, value, W.REF_ANY_NULLABLE)], dctx);
+				dctx.emit(I.drop);
+			}), ...dynamicObjectArms(cls => {
 				emitCallOn(cls, 'set', [stringArg(dctx, name), localArg(dctx, value, W.REF_ANY_NULLABLE)], dctx);
 				dctx.emit(I.drop);
-			});
+			})];
 			const ext		= closureExtArm(() => emitClosureExtSet(dctx, stringArg(dctx, name), localArg(dctx, value, W.REF_ANY_NULLABLE)));
 			// A class not declaring the key keeps it in its `#ext` map; after the declaring ones, which a subclass instance must meet first.
 			const extra		= extOwners().filter(r => !r.cls.fieldIndex.has(name)).map(({ heap, cls }) => ({ heap, emit: () => {
@@ -9400,16 +9418,43 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// A key known only at run time (a symbol) on a struct: its `#ext` map. A struct without one has no such key: a read is `undefined`,
 	// a write traps, since dropping it is worse.
-	function ensureExtKey(kind: 'get' | 'set'): FuncInfo {
+	function ensureExtKey(kind: 'get' | 'set' | 'delete'): FuncInfo {
 		return synthesize(`<ext key ${kind}>`, () => ({
 			params: [param('recv'), param('key', W.REF_ANY_NULLABLE), ...(kind === 'set' ? [param('value', W.REF_ANY_NULLABLE)] : [])],
-			result: kind === 'get' ? W.REF_ANY_NULLABLE : 'void' as W.Type,
+			result: kind === 'get' ? W.REF_ANY_NULLABLE : kind === 'delete' ? 'i32' : 'void' as W.Type,
 		}), (dctx, [recv, key, value], { result }) => {
-			emitTypeCascade(dctx, recv, extOwners().map(({ heap, cls }) => ({ heap, emit: () => {
+			const deleted = () => {
+				if (kind === 'delete')
+					dctx.emit(I.i32.const(1));
+			};
+			emitTypeCascade(dctx, recv, [...proxyArms(cls => emitProxyOp(cls, kind, localArg(dctx, key, W.REF_ANY_NULLABLE), kind === 'set' ? localArg(dctx, value, W.REF_ANY_NULLABLE) : undefined, dctx, result)),
+				...extOwners().map(({ heap, cls }) => ({ heap, emit: () => {
 				const obj = dctx.temp(`$extobj$${heap}`, cls.thisWtype!);
 				dctx.emit(I.local.set(obj));
 				emitExtOp(cls, obj, kind, localArg(dctx, key, W.REF_ANY_NULLABLE), dctx, kind === 'set' ? localArg(dctx, value, W.REF_ANY_NULLABLE) : undefined, result);
-			} })), kind === 'get' ? () => dctx.emitDefaultValue(result, types, toValType) : trap(dctx), kind === 'get' ? result : undefined);
+				deleted();
+			} }))], kind === 'get' ? () => dctx.emitDefaultValue(result, types, toValType) : kind === 'delete' ? deleted : trap(dctx), kind === 'get' ? result : undefined);
+		});
+	}
+	// A proxy (on the stack) read, written or deleted at `key` through `lib/proxy.ts`: a get's value as `result`, a delete's success as `i32`.
+	function emitProxyOp(cls: ClassInfo, kind: 'get' | 'set' | 'delete', key: HeldArg, value: HeldArg | undefined, ctx: FunctionContext, result: W.Type): void {
+		const got = emitCallOn(cls, kind === 'get' ? '_get' : kind === 'set' ? '_set' : '_delete', kind === 'set' ? [key, value!] : [key], ctx);
+		if (kind === 'set')
+			ctx.emit(I.drop);
+		else
+			coerceTop(got, ctx, result);
+	}
+	// A key typed neither a string nor a symbol alone (`p: string | symbol`, `any`): told apart at run time, a string's by name, a symbol's in `#ext`.
+	function ensureAnyProp(kind: 'get' | 'set' | 'delete'): FuncInfo {
+		return synthesize(`<any prop ${kind}>`, () => ({
+			params: [param('recv'), param('key', W.REF_ANY_NULLABLE), ...(kind === 'set' ? [param('value', W.REF_ANY_NULLABLE)] : [])],
+			result: kind === 'get' ? W.REF_ANY_NULLABLE : kind === 'delete' ? 'i32' : 'void' as W.Type,
+		}), (dctx, [recv, key, value], { result }) => {
+			const str = typeOf(T.STRING)!, rest = kind === 'set' ? [I.local.get(value)] : [];
+			dctx.emit(I.local.get(key), I.ref.test(heapTypeIndexOf(str)));
+			dctx.emitIf(result === 'void' ? undefined : toValType(result),
+				() => dctx.emit(I.local.get(recv), I.local.get(key), I.ref.cast(heapTypeIndexOf(str)), ...rest, I.call(ensureAnyKey(kind).funcIndex)),
+				() => dctx.emit(I.local.get(recv), I.local.get(key), ...rest, I.call(ensureExtKey(kind).funcIndex)));
 		});
 	}
 
@@ -9423,7 +9468,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// A key known only at run time is compared with each one's names; a primitive or null answers `false`.
 	function ensureAnyIn(name?: string): FuncInfo {
 		const names = (cls: ClassInfo) => [...cls.fieldIndex.keys(), ...cls.getterNames ?? [], ...cls.methodDecls.keys()].filter(n => !n.startsWith('#'));
-		const has = (dctx: FunctionContext, key: HeldArg) => dynamicObjectArms(cls => coerceTop(emitCallOn(cls, 'has', [key], dctx), dctx, 'i32'));
+		const has = (dctx: FunctionContext, key: HeldArg) => [...proxyArms(cls => coerceTop(emitCallOn(cls, '_has', [key], dctx), dctx, 'i32')),
+			...dynamicObjectArms(cls => coerceTop(emitCallOn(cls, 'has', [key], dctx), dctx, 'i32'))];
 		// A key in a struct's `#ext` map: the declared names first (`names`), then the map. After the declaring classes, as a subclass is tested first.
 		const extHas = (dctx: FunctionContext, cls: ClassInfo, obj: number, key: HeldArg, result: W.Type) =>
 			emitWithExt(cls, obj, dctx, m => coerceTop(emitCallOn(m, 'has', [key], dctx), dctx, 'i32'), () => dctx.emit(I.i32.const(0)), result);
@@ -9461,7 +9507,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		return synthesize(`<any ${which}>`, () => ({ params: [param('recv')], result: W.ARRAY.ref }), (dctx, [recv], { result }) => {
 			const owners = distinctHeaps(dynamicReceivers(false).filter(({ cls }) => cls.typeIndex !== -1 && cls.decl.name !== 'Map' && W.isRef(cls.thisWtype))
 				.sort((a, b) => depthOf(b.cls) - depthOf(a.cls)));
-			emitTypeCascade(dctx, recv, [...dynamicObjectArms(cls => coerceTop(emitCallOn(cls, 'anyEntries', [stringArg(dctx, which)], dctx), dctx, result)),
+			emitTypeCascade(dctx, recv, [...proxyArms(cls => coerceTop(emitCallOn(cls, '_anyEntries', [stringArg(dctx, which)], dctx), dctx, result)),
+				...dynamicObjectArms(cls => coerceTop(emitCallOn(cls, 'anyEntries', [stringArg(dctx, which)], dctx), dctx, result)),
 				...owners.map(({ heap, cls }) => ({ heap, emit: () => void emitEntriesOf(cls, which, dctx) }))], trap(dctx), result);
 		});
 	}
@@ -9616,6 +9663,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			if (!methods.length && !held.length && !keyed.length)
 				throw `no reachable class (or 'number'/'boolean'/'string'/array) declares a '${name}' callable with ${argTs.length} such argument(s) -- a dynamic dispatch on 'any' needs at least one real candidate`;
 			emitTypeCascade(dctx, recv, [
+				// A proxy's method is what its `get` trap answers for the name, called as any function value is.
+				...proxyArms(cls => callEntry(emitCallOn(cls, '_get', [stringArg(dctx, name)], dctx))),
 				...methods.map(c => ({ heap: c.heap, emit: () => {
 					if (c.boxed)
 						dctx.emit(I.struct.get(c.heap as number, 0));

@@ -621,6 +621,21 @@ declare var Math: {
 };
 
 //-----------------------------------------------------------------------------
+//	Proxy
+//-----------------------------------------------------------------------------
+
+// The traps `lib/proxy.ts` implements, as TS declares them; a handler with any other is refused here rather than ignored at run time.
+interface ProxyHandler<T extends object> {
+	get?(target: T, p: string | symbol, receiver: any): any;
+	set?(target: T, p: string | symbol, newValue: any, receiver: any): boolean;
+	has?(target: T, p: string | symbol): boolean;
+	deleteProperty?(target: T, p: string | symbol): boolean;
+}
+declare var Proxy: {
+	new <T extends object>(target: T, handler: ProxyHandler<T>): T;
+};
+
+//-----------------------------------------------------------------------------
 //	JSON
 //-----------------------------------------------------------------------------
 
