@@ -100,6 +100,13 @@ OPEN:
   fails at codegen ("'new' is only supported for a known class") and, in a module-level const, blocks EVERY declaration in the file --
   `grep -E "^(const|let) .*new [A-Z]"` finds it in seconds (it was `WeakSet`/`SyntaxError`, 56 declarations). An ambient `declare var Map`
   would merge as an intersection whose class `constructor` part picks first -- needs an ambient-first rule for class+var merges.
+- **SOURCE CHANGED, gap left open (user's call, 2026-10-05, binary `HEAD` "merge(): copy fields only")**: binary's `merge(obj, value)`
+  (common.ts) did `Object.setPrototypeOf(obj, value.constructor.prototype)`, re-classing a plain object as `value`'s class. towasm cannot:
+  a struct's class is fixed. The line was REMOVED from binary for expedience, so binary no longer behaves as it did under node. Proper fix:
+  a mutable prototype link on `DynamicObject` (plain `{}`s), with prototype-chain dispatch for methods, `instanceof` and `.constructor`,
+  which needs class methods compiled for a dynamic `this`. Restore the line in binary once that exists. Related, also open: a generic
+  instantiation is its own class (statics per `ClassInfo`), so a user generic's instances have different `.constructor`s; method values
+  (`obj.m`) have no identity; a dynamic `A.prototype` read builds a fresh object each time.
 
 ## Checker rules learnt (keep; they are TS facts and traps)
 

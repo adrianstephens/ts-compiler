@@ -28,10 +28,11 @@ subclasses lost inherited members (`resolveMembers`); `instanceof` on a scalar/v
 the rest of its block (`staticGuard` + `exits`); mapped-type apparent type over an array constraint; `super()` omitting optionals;
 boxed optional closure params; **function/class value IDENTITY** (user chose "identity first": one identity env per declaration,
 `Types.identityEnv`/`viewEnv`, `ensureClosureIdentity` in `===`); `x.constructor` on any + `Object` as a value; literals never laid
-out as a class. **Now blocked on `Object.setPrototypeOf` in binary's `merge` (common.ts:469)** -- re-classing an object needs a
-prototype link on dynamic objects and methods callable with a dynamic `this`: a design question PUT TO THE USER (see Waiting).
+out as a class. `Object.setPrototypeOf` in binary's `merge`: the user had the SOURCE changed (the re-classing line removed from binary) -- the gap vs
+JS stays OPEN, recorded in [[tison_workaround_inventory]] section D; restore the line once dynamic objects have prototype links.
 Known gaps found: a generic instantiation is its own class (statics per instantiation, so `G<number>` vs `G<string>` constructors
-differ); `arr.map(Number)` (a class value called, not constructed); a literal with a method into a class-typed slot; method values
+differ); a literal with a method into a class-typed slot (`object literal for 'A' has unknown property`); `unknown + unknown` is
+accepted (checked `any`, a missed error); method values
 (`obj.m`) have no identity. Re-run the survey before trusting rows.
 
 ## The direction since 2026-09-21 (the user's) and what it settled
@@ -86,7 +87,7 @@ shapes, and every argument still fits). wasm-backend.ts ~11.0k -> ~10.5k lines.
 
 ## Gates baseline (2026-10-06)
 
-corpus A/B vs `07b036e`: ERROR +25 (was +13), GAP 194 (+1 on 2026-10-05: classSideInheritance1.ts:13, a real TS2576). The +11 from index-signature checking (`b6996e0`) are 10 errors tsc ITSELF
+corpus A/B vs `07b036e`: ERROR +25 (was +13), GAP 185 (+1 on 2026-10-05: classSideInheritance1.ts:13, a real TS2576). The +11 from index-signature checking (`b6996e0`) are 10 errors tsc ITSELF
 reports (the corpus's tsc-clean classification is stale for them -- always re-run real tsc on a new corpus error, matching by
 line-1 as well, since our positions are the NEXT token's) + 1 false positive left: reverseMappedTupleContext.ts:47 (reverse-mapped
 inference through a nested homomorphic mapped type falls back to the constraint). difftest 2232/2234. Self-check errcount:
@@ -131,8 +132,6 @@ corpus cases where an erased placeholder stood for a type parameter, so it was r
 
 ## Waiting on the user
 
-**`Object.setPrototypeOf` (2026-10-05).** binary's `merge(obj, value)` re-classes `obj` as `value`'s class. Options: a mutable prototype
-link on `DynamicObject` with prototype-chain dispatch (methods compiled for a dynamic `this`), or the user changes `merge`.
 
 **String cheap representation.** Done: each literal is materialized once. The data segment is PASSIVE (copy-only), so a bare `u32` offset
 cannot be a string. Options put to the user: (1) offset+length packed in an `i64` (`.length` a shift, materialize on char access);
