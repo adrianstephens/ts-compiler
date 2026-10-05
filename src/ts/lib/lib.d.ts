@@ -496,10 +496,19 @@ interface ImportMeta {
 //	TypedArray
 //-----------------------------------------------------------------------------
 interface ArrayBuffer {
-//	byteLength: number;
+	readonly byteLength: number;
+	[i: number]: number;
 }
+declare var ArrayBuffer: {
+	new (byteLength: number): ArrayBuffer;
+};
 // TS's is `ArrayBuffer | SharedArrayBuffer`; this lib has no SharedArrayBuffer.
 declare type ArrayBufferLike = ArrayBuffer;
+interface ArrayBufferView {
+	readonly buffer: ArrayBufferLike;
+	readonly byteLength: number;
+	readonly byteOffset: number;
+}
 
 interface TypedArray<T extends number | bigint> {
 	readonly BYTES_PER_ELEMENT: number;

@@ -2697,6 +2697,30 @@ async function main() {
 	}
 
 	{
+		const { enc, dec, u16, fatal } = await compile(`
+			function sum(b: Uint8Array) { let s = 0; for (let i = 0; i < b.length; i++) s = (s * 31 + b[i]) % 1000003; return s; }
+			function hash(s: string) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 1000003; return h; }
+			export function enc(): number { const e = new TextEncoder(); return sum(e.encode('a\u00e9\u20ac\u{1f600}\ud800z')) + e.encode('a\u00e9\u20ac\u{1f600}').length * 1000000; }
+			export function dec(): number {
+				const bytes = new Uint8Array([0xef, 0xbb, 0xbf, 0x61, 0xc3, 0xa9, 0xe2, 0x82, 0xac, 0xf0, 0x9f, 0x98, 0x80, 0xc0, 0x80, 0xe0, 0x80, 0xed, 0xa0, 0x80, 0xf4, 0x90, 0x80, 0x80, 0xe2, 0x82, 0x7a, 0xff]);
+				const s = new TextDecoder('utf-8').decode(bytes), v = new Uint8Array([0x78, 0x61, 0x62, 0x79]);
+				return hash(s) + s.length * 1000000 + hash(new TextDecoder().decode(v.subarray(1, 3))) * 100000000 + hash(new TextDecoder().decode(v.buffer));
+			}
+			export function u16(): number {
+				const s = new TextDecoder('utf-16le').decode(new Uint8Array([0xff, 0xfe, 0x41, 0x00, 0x3d, 0xd8, 0x00, 0xde, 0x00, 0xd8, 0x42, 0x00, 0x43]));
+				return hash(s) + s.length * 1000000;
+			}
+			export function fatal(): number {
+				try { new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array([0xc3])); return 0; } catch (e) { return e instanceof TypeError ? 1 : 2; }
+			}
+		`);
+		check("TextEncoder: UTF-8, a lone surrogate as U+FFFD", enc(), 10877900);
+		check("TextDecoder: WHATWG UTF-8 (BOM, maximal-subpart U+FFFD), from a view or a buffer", dec(), 310520079566);
+		check("TextDecoder: UTF-16LE with BOM, a lone surrogate and an odd byte", u16(), 6209496);
+		check("TextDecoder fatal: a TypeError", fatal(), 1);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {
