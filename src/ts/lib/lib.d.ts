@@ -660,6 +660,10 @@ type Omit<T, K extends keyof any> = Pick<T, Exclude<keyof T, K>>;
 type Readonly<T> = { readonly [P in keyof T]: T[P]; };
 type Parameters<T extends (...args: any) => any> = T extends (...args: infer P) => any ? P : never;
 type ReturnType<T extends (...args: any) => any> = T extends (...args: any) => infer R ? R : any;
+// TS's own (lib.es5): the type a value resolves to through any chain of thenables.
+type Awaited<T> = T extends null | undefined ? T
+	: T extends object & { then(onfulfilled: infer F, ...args: infer _): any } ? F extends ((value: infer V, ...args: infer _) => any) ? Awaited<V> : never
+	: T;
 type Required<T> = { [P in keyof T]-?: T[P]; };
 type ConstructorParameters<T extends abstract new (...args: any) => any> = T extends abstract new (...args: infer P) => any ? P : never;
 type InstanceType<T extends abstract new (...args: any) => any> = T extends abstract new (...args: any) => infer R ? R : any;
