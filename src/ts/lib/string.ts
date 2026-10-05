@@ -118,6 +118,22 @@ export class String {
 	charAt(pos: i32): string {
 		return pos < 0 || pos >= this.length ? '' : String.fromCharCode(this.charCodeAt(pos));
 	}
+	// `fillString` repeated, then cut, to bring this up to `maxLength`; an empty one pads nothing.
+	padStart(maxLength: i32, fillString: string = ' '): string {
+		return this._padding(maxLength, fillString) + this.toString();
+	}
+	padEnd(maxLength: i32, fillString: string = ' '): string {
+		return this.toString() + this._padding(maxLength, fillString);
+	}
+	_padding(maxLength: i32, fill: string): string {
+		const n = maxLength - this.length;
+		return n <= 0 || !fill.length ? '' : fill.repeat(Math.ceil(n / fill.length)).substring(0, n);
+	}
+	// A negative index counts back from the end; out of range is `undefined`.
+	at(index: i32): string | undefined {
+		const i = index < 0 ? this.length + index : index;
+		return i >= 0 && i < this.length ? this.charAt(i) : undefined;
+	}
 	// A surrogate pair's code point, else the code unit itself (a lone surrogate too); out of range, `undefined`.
 	codePointAt(pos: i32): number | undefined {
 		if (pos < 0 || pos >= this.length)

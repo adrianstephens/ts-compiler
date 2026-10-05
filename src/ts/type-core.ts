@@ -2020,8 +2020,8 @@ export function lookupMember(t: Type, prop: string, scope: Scope, depth = 10, sk
 		}
 		// A bare `ref` stamped with its own `declScope` resolves there instead of in `scope` -- the caller's chain may shadow it (e.g. DOM's `Element`).
 		t = resolveMembers(t, scope, depth);
-		// A LITERAL type has the members of its primitive (`'a,b'.split(/,/)`, `(255).toString(16)`).
-		if (t.type === 'literal')
+		// A LITERAL type, or a numeric range, has the members of its primitive (`'a,b'.split(/,/)`, `(255).toString(16)`).
+		if (t.type === 'literal' || t.type === 'range')
 			t = widenLiterals(t);
 		const refined = !write && scope.semantics.refinedMember(t, prop, scope, depth);
 		if (refined)
@@ -2186,6 +2186,11 @@ export function sealed(t: Type, scope: Scope, depth = 6, functions = false): boo
 		return false;
 	}
 	t = resolveMembers(t, scope);
+	// A primitive has exactly its boxed interface's members (`'abc'.foo` is TS2339).
+	const w		= widenLiterals(t);
+	const boxed	= w.type === 'ref' ? scope.semantics.boxed(w.name) : undefined;
+	if (boxed)
+		return sealed(TS.RefType(boxed), scope, depth - 1, functions);
 	return t.type === 'object' || (functions && t.type === 'function') || (t.type === 'intersection' && t.types.every(p => sealed(p, scope, depth - 1, functions)));
 }
 

@@ -2735,6 +2735,17 @@ async function main() {
 	}
 
 	{
+		const { pad } = await compile(`
+			function hash(s: string) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 1000003; return h; }
+			export function pad(): number {
+				return hash('7'.padStart(3, '0') + 'ab'.padEnd(7, 'xyz') + 'abc'.padStart(2) + 'q'.padStart(4) + 'r'.padEnd(3, '') + ('abc'.at(-1) ?? '') + ('abc'.at(5) ?? '!'))
+					+ (255).toString(16).length * 1000000;
+			}
+		`);
+		check("String padStart, padEnd and at", pad(), 2745759);
+	}
+
+	{
 		const { caught } = await compile(`
 			class Stop { constructor(public v: number) {} }
 			export function caught(): number {

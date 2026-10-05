@@ -486,6 +486,10 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		function* gen() { yield 1; }
 		const a: boolean = h('abc'), b: boolean = h([1, 2]), c: boolean = h(new Set(['x'])), d: boolean = h(gen());`,
 		[NOT_ASSIGNABLE('string', 'boolean'), NOT_ASSIGNABLE('number', 'boolean'), NOT_ASSIGNABLE('string', 'boolean'), NOT_ASSIGNABLE('number', 'boolean')]],
+	['a primitive has exactly its boxed interface\'s members (TS2339), a literal or range too', `
+		declare const n: number;
+		const z = 'abc'.foo, y = (5).bar, x = 'a'.length, w: boolean = (n | 0).toFixed(2);`,
+		["Property 'foo' does not exist", "Property 'bar' does not exist", NOT_ASSIGNABLE('string', 'boolean')]],
 	['Object.prototype\'s members before an index signature; a symbol key reads its member, not an element', `
 		declare const r: Record<string, string>;
 		declare const array: number[];
