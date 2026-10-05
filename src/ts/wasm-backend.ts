@@ -2892,7 +2892,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// the same `ref.test` cascade as every other `any` dispatch (`ensureAnySpreadClone`).
 	function emitAnySpreadClone(e: JS.ObjectExpr<Type>, ctx: FunctionContext): W.Type | undefined {
 		const spreads	= e.properties.flatMap(p => p.type === 'spread' ? [p] : []);
-		const written	= e.properties.flatMap(p => p.type === 'field' && typeof p.key !== 'object' && p.value ? [{ key: String(p.key), value: p.value }] : []);
+		const written	= e.properties.flatMap(p => (key => p.type === 'field' && key !== undefined && p.value ? [{ key, value: p.value }] : [])(p.type === 'spread' ? undefined : staticKeyName(p.key, ctx.scope)));
 		// The PHYSICAL type decides: an `any` operand and one whose shape is OPEN (stored as `any`) are the same value here.
 		const operand = spreads.length === 1 && typeOf(ctx.narrowedTypeOf(spreads[0].operand));
 		if (!operand || !W.isAny(operand) || written.length + 1 !== e.properties.length)
@@ -2905,7 +2905,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				emitAs(p.value, ctx, W.REF_ANY_NULLABLE);
 		}
 		// The arguments are on the stack in written order; the dispatcher declares them in that same order.
-		ctx.emit(I.call(ensureAnySpreadClone(e.properties.map(p => p.type === 'spread' ? undefined : p.type === 'field' && typeof p.key !== 'object' ? String(p.key) : undefined)).funcIndex));
+		ctx.emit(I.call(ensureAnySpreadClone(e.properties.map(p => p.type === 'field' ? staticKeyName(p.key, ctx.scope) : undefined)).funcIndex));
 		return W.REF_ANY;
 	}
 
@@ -3036,6 +3036,22 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// A literal with no single target type (`case 'object'`'s `want` names no class) matched against every built shape. A written
 	// value is built in its field's context; a spread's already has a layout the field must hold, per member of its operand's union.
+	// A key TS fixes at compile time, spelled as `memberKey` spells it in a type: a plain or literal key, or a computed `symbol` path (`[CONST_VALUE]`).
+	// A computed key of any other type is a run-time string: no static name.
+	function staticKeyName(key: JS.Key<Type>, scope: Scope): string | undefined {
+		return typeof key !== 'object' || key.computed.type === 'literal' ? T.memberKey(key) : symbolKey(key.computed, scope);
+	}
+	// A `symbol`-typed path as a key (`x[CONST_VALUE]`, `CONST_VALUE in x`): its static spelling, the member name a type gives it.
+	function symbolKey(e: Expr, scope: Scope): string | undefined {
+		return (e.type === 'identifier' || e.type === 'member') && T.typeofName(checkerTypeOf(e, scope), scope) === 'symbol' ? T.memberKey({ computed: e }) : undefined;
+	}
+	// `symbolKey` where it names a member: one the receiver's type declares (`{ [CV]: T }`), or any on an `any`. A symbol key the type does not
+	// declare (`Record<symbol, V>`) is found by its value at run time (`#ext`).
+	function symbolMember(recv: Expr, key: Expr, ctx: FunctionContext): string | undefined {
+		const name = symbolKey(key, ctx.scope), t = ctx.narrowedTypeOf(recv);
+		return name !== undefined && (T.isAny(t) || T.lookupMember(T.nonNullable(t, ctx.scope), name, ctx.scope)) ? name : undefined;
+	}
+
 	function matchObjectShape(e: JS.ObjectExpr<Type>, ctx: FunctionContext, anon = true): ClassInfo | undefined {
 		const props = new Map<string, ShapeProp>();
 		for (const p of e.properties) {
@@ -3045,9 +3061,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					return undefined;
 				for (const k of keys)
 					props.set(k, { fits: declared => T.unionMembers(ctx.narrowedTypeOf(p.operand), ctx.scope).every(m => (got => !got || holdsLayout(declared, got))(T.lookupMember(m, k, ctx.scope))) });
-			} else if (p.type === 'field' && typeof p.key !== 'object' && p.value) {
+			} else if (p.type === 'field' && staticKeyName(p.key, ctx.scope) !== undefined && p.value) {
 				const value = p.value;
-				props.set(String(p.key), { fits: declared => T.isAssignable(checkerTypeOf(unwrapAs(value), ctx.scope), declared, ctx.scope), literals: writtenLiteral(value) });
+				props.set(staticKeyName(p.key, ctx.scope)!, { fits: declared => T.isAssignable(checkerTypeOf(unwrapAs(value), ctx.scope), declared, ctx.scope), literals: writtenLiteral(value) });
 			} else {
 				return undefined;
 			}
@@ -3079,10 +3095,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	function findObjectShapeByType(t: TS.ObjectType, orElse: () => ClassInfo | undefined): ClassInfo | undefined {
 		const props = new Map<string, ShapeProp>();
 		for (const m of t.members) {
-			if (m.type !== 'property' || typeof m.key === 'object')
+			const key = m.type === 'property' ? T.memberKey(m.key) : undefined;
+			if (m.type !== 'property' || key === undefined)
 				return undefined;
 			const pt = m.typeAnnotation;
-			props.set(String(m.key), { fits: declared => T.isAssignable(pt, declared, global) && holdsLayout(declared, pt), literals: T.literalValues(pt) });
+			props.set(key, { fits: declared => T.isAssignable(pt, declared, global) && holdsLayout(declared, pt), literals: T.literalValues(pt) });
 		}
 		return declaredShape(props, new Set(t.members.flatMap(m => m.type === 'property' && !hasMod(m, 'optional') ? [T.memberKey(m.key)] : [])), orElse);
 	}
@@ -3319,9 +3336,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			// A spread is never excess-checked (as in TS): only the fields written out must fit and discriminate.
 			if (p.type === 'spread')
 				continue;
-			if (typeof p.key === 'object' || p.type === 'field' && !p.value)
+			const key = staticKeyName(p.key, ctx.scope);
+			if (key === undefined || p.type === 'field' && !p.value)
 				return undefined;
-			props.set(String(p.key), p.type === 'field' ? p.value : undefined);
+			props.set(key, p.type === 'field' ? p.value : undefined);
 		}
 		// ...but it does supply required fields. Unknown keys may supply any: the context can't make `{ modifiers }` a `Method`.
 		const spreads	= e.properties.flatMap(p => p.type === 'spread' ? [spreadKeys(p.operand, ctx)] : []);
@@ -4933,6 +4951,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		}
 
 		if (target.type === 'index') {
+			const symbol = symbolMember(target.object, target.index, ctx);
+			if (symbol !== undefined)
+				return resolvePlace(JS.Member(target.object, symbol), ctx, write);
 			const cls		= classOfForIndexing(target.object, ctx);
 			const getter	= cls && indexAccessor(cls, target.object, 'get', ctx);
 			const getSig 	= cls && getter && methodSig(cls, getter, ctx);
@@ -5927,8 +5948,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					// Each `set`/`spread` returns the object, the next one's receiver. A struct operand is held once, its fields read off it.
 					for (const p of e.properties) {
 						const srcCls = p.type === 'spread' ? ownerOf(p.operand, ctx) : undefined;
-						if (p.type === 'field' && typeof p.key !== 'object' && p.value) {
-							emitMethodCall(owner, 'set', [Literal(String(p.key)), p.value], ctx);
+						// A computed key that is no static name is the run-time string it evaluates to, as JS writes it.
+						if (p.type === 'field' && p.value) {
+							const key = staticKeyName(p.key, ctx.scope);
+							emitMethodCall(owner, 'set', [key !== undefined ? Literal(key) : (p.key as { computed: Expr }).computed, p.value], ctx);
 						} else if (p.type !== 'spread') {
 							throw `object literal for '${owner.name}' can only have plain 'key: value' properties (no methods or computed keys)`;
 						} else if (!srcCls || isDynamicObject(srcCls)) {
@@ -5988,10 +6011,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						continue;
 					}
 					const src: FieldSource | undefined = p.type === 'field' ? p.value && { expr: p.value } : { method: p };
-					if (typeof p.key === 'object' || !src)
-						throw `object literal for '${owner.name}' can only have plain 'key: value' properties, methods, accessors or a spread (no computed keys)`;
+					const name = staticKeyName(p.key, ctx.scope);
+					if (name === undefined || !src)
+						throw `object literal for '${owner.name}' can only have plain 'key: value' properties, methods, accessors or a spread (no run-time computed keys)`;
 					// An accessor is a closure in the key's `#get:`/`#set:` companion, which every read and write of the key consults.
-					const slot = p.type === 'get' || p.type === 'set' ? `#${p.type}:${p.key}` : String(p.key);
+					const slot = p.type === 'get' || p.type === 'set' ? `#${p.type}:${name}` : name;
 					if (!owner.fieldIndex.has(slot))
 						throw `object literal for '${owner.name}' has unknown property '${p.key}'`;
 					addSource(slot, src);
@@ -6336,7 +6360,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					case 'in': {
 						// On a union, `'k' in u` is a TYPE test: which member `u` is. A member declaring `k` optionally counts, as in TS's narrowing: a field is
 						// always physically present, so an omitted optional property cannot be told from a set one.
-						const key = left.type === 'literal' && typeof left.value === 'string' ? left.value : undefined;
+						const key = left.type === 'literal' && typeof left.value === 'string' ? left.value : symbolMember(right, left, ctx);
 						const flat = key === undefined ? [] : T.unionMembers(checkerTypeOf(unwrapAs(right), ctx.scope), ctx.scope)
 							.filter(m => !T.isNullish(m, ctx.scope));
 						if (key !== undefined && flat.length > 1) {
@@ -6374,7 +6398,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 							throw "'in' is only supported over a dynamic object (a structural '{[k: string]: V}'-typed value)";
 						}
 						emitAs(right, ctx, cls.thisWtype!);
-						return emitMethodCall(cls, 'has', [left], ctx);
+						return emitMethodCall(cls, 'has', [key !== undefined ? Literal(key) : left], ctx);
 					}
 
 					case '==': case '===': case '!=': case '!==': {

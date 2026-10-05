@@ -4630,6 +4630,15 @@ async function main() {
 			export function inv(): number { const v: number = -8; const name = INV[v as keyof typeof INV]; return name === 'i8' ? 1 : 0; }
 		`);
 		check('an inverted table read by a number key', inv(), 1);
+		// binary's `Const`: a `symbol`-keyed property (`[CONST_VALUE]: t`) is a field by its static spelling, which `x[CV]` and `CV in x` name too.
+		const { sym } = await compile(`
+			const CV = Symbol('const');
+			interface T0<T> { get(s: number): T; put(s: number, v: T): void; }
+			function Const<const T>(t: T): T0<T> { return { get: _s => t, put: _s => undefined, [CV]: t } as T0<T> & { [CV]: T }; }
+			function constOf(type: any): any { return type && CV in type ? type[CV] : undefined; }
+			export function sym(): number { const c = Const(7); return c.get(0) + (constOf(c) === 7 ? 10 : 0) + (constOf({ get: 1 }) === undefined ? 100 : 0); }
+		`);
+		check('a symbol-keyed property', sym(), 117);
 		// binary's `ViewMaker` and `adapter`: a class held as a value constructs, reads its statics, and has a `prototype` whose `constructor` is it.
 		const { classValue, adapters } = await compile(`
 			type Maker<T> = (new (a: number, b: number) => T) & { SIZE?: number };
