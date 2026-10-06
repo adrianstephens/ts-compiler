@@ -2941,6 +2941,42 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// A destructuring bound one level at a time, each held in a temp: an array pattern indexes an array or tuple and iterates
 	// anything else, by that level's own type.
+	// A destructuring assignment (`[a, b] = v`, `({ a, b: c.d } = v)`): `v` held, destructured into temps as a declaration is (`lowerPattern`), then each
+	// target assigned its temp, in order. Its value is `v`. Targets are names or member paths, so reading every part first changes nothing JS observes.
+	function emitDestructuringAssign(target: Expr, value: Expr, ctx: FunctionContext, want: W.Type | undefined): W.Type {
+		return ctx.inScope((): W.Type => {
+			const { temp, emit, check } = lowering(ctx);
+			const leaves: [Expr, string][] = [];
+			const pattern = (t: Expr): BindingTarget => {
+				if (t.type === 'array') {
+					const last	= t.elements.at(-1);
+					const rest	= last?.type === 'spread' ? pattern(last.operand) : undefined;
+					return JS.ArrayPattern((rest ? t.elements.slice(0, -1) : t.elements).map(el => !el ? undefined
+						: el.type === 'assign' && !el.operator ? { target: pattern(el.target), default: el.value } : { target: pattern(el) }), rest);
+				}
+				if (t.type === 'object')
+					return JS.ObjectPattern(t.properties.map(p => {
+						if (p.type !== 'field' || typeof p.key === 'object')
+							throw "a destructuring assignment's object pattern takes plain 'key' or 'key: target' properties";
+						const v = p.value ?? Identifier(String(p.key));
+						return v.type === 'assign' && !v.operator ? { key: p.key, value: pattern(v.target), default: v.value } : { key: p.key, value: pattern(v) };
+					}));
+				if (!isPurePath(t))
+					throw "a destructuring assignment's target must be a name or a member path";
+				const name = temp('assigned');
+				leaves.push([t, name]);
+				return name;
+			};
+			const held = temp('destructured');
+			// As the checker typed the right side, which is what the pattern reads it as (a literal's `[b, a]` is `number[]`, not its elements' machine ints).
+			emit(JS.VarDecl('const', JS.Var(held, value, T.widenLiterals(checkerTypeOf(value, ctx.scope)))));
+			lowerPattern('const', pattern(target), Identifier(held), undefined, { temp, scope: ctx.scope, iterates: e => iteratesByProtocol(e, ctx), absent: e => readsPastEnd(e, ctx) }, emit);
+			for (const [t, name] of leaves)
+				emit(JS.ExprStmt(Assign<Expr, never>(t, Identifier(name))));
+			return want === 'void' ? 'void' : emitExpr(check(Identifier(held)), ctx, want);
+		});
+	}
+
 	function emitPatternBinding(kind: JS.DeclarationKind, target: BindingTarget, value: Expr, typeAnnotation: Type | undefined, ctx: FunctionContext, scope: Scope): void {
 		const { temp, emit } = lowering(ctx, scope);
 		lowerPattern(kind, target, value, typeAnnotation, { temp, scope: ctx.scope, iterates: e => iteratesByProtocol(e, ctx), absent: e => readsPastEnd(e, ctx) }, emit);
@@ -6578,6 +6614,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 			case 'assign': {
 				const { operator, target, value } = e;
+				if (!operator && (target.type === 'array' || target.type === 'object'))
+					return emitDestructuringAssign(target, value, ctx, want);
 				if (operator && operator !== '&&' && operator !== '||' && operator !== '??') {
 					const { temp, emit, check } = lowering(ctx);
 					return emitExpr(check(lowerCompound(e, operator, temp, emit)), ctx, want);

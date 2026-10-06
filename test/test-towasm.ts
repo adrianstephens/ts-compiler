@@ -4932,6 +4932,31 @@ async function main() {
 	}
 
 	{
+		// Destructuring ASSIGNMENT to existing names and member paths (wasm-backend.ts's `[scope, current] = saved`): swaps, defaults, holes, a rest,
+		// an object pattern, in a loop body, and its value.
+		const { destructuringAssign } = await compile(`
+			class P { x = 0; y = 0; }
+			export function destructuringAssign(): number {
+				let a = 1, b = 2;
+				[a, b] = [b, a];
+				const p = new P();
+				[p.x, p.y] = [7, 8];
+				let c = 0, d = 0;
+				({ x: c, y: d } = p);
+				let e = 0, rest: (number | undefined)[] = [];
+				const src: (number | undefined)[] = [undefined, 9, 10, 11];
+				[e = 5, , ...rest] = src;
+				const pairs: [string, number][] = [['k', 3]];
+				let k = '', v = 0;
+				for (const pair of pairs) [k, v] = pair;
+				const r = ([a, b] = [40, 50]);
+				return a * 1000000 + b * 10000 + p.x * 1000 + p.y * 100 + c * 10 + d + e + rest.length * 1000 + v + k.length + r[0];
+			}
+		`);
+		check('destructuring assignment', destructuringAssign(), 40509927);
+	}
+
+	{
 		// Block scoping: a nested function capturing an outer `built` while a block of its own declares another (wasm-backend.ts's `noteSlot`).
 		const { blockShadow, blockShadowOwn } = await compile(`
 			export function blockShadow(): number {
