@@ -568,7 +568,7 @@ function classShapes(c: TS.Class, scope: Scope): { instance: Type; value: Type; 
 	const superType: Type | undefined = superRef && !superRef.typeArgs && !superRef.name.includes('.') && !scope.type(superRef.name)
 		? T.stampScope(TS.RefType('InstanceType', [{ type: 'typeof', name: superRef.name }]), scope)
 		: superRef ?? (c.superClass && T.ANY);
-	const instance		= superType ? TS.IntersectionType([obj, superType]) : obj;
+	const instance		= superType ? { ...TS.IntersectionType([obj, superType]), derived: true } : obj;
 	// The named ref carries its own type params as type arguments (`new(...): Box<T>`), or `new Box<number>(...)` has none.
 	const ctorReturn	= c.name ? TS.RefType(c.name, c.typeParams?.map(p => TS.RefType(p.name))) : instance;
 	const makeCtorSig	= (params: TS.Params) => T.withScope(TS.CallSig(params, ctorReturn, c.typeParams), scope);

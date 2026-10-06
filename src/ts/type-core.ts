@@ -2102,7 +2102,8 @@ export function lookupMember(t: Type, prop: string, scope: Scope, depth = 10, sk
 					}
 					return undefined;
 				}
-				if (matches.length === 1)
+				// A class's own declaration overrides its base's (`declare superClass?: Sub` re-narrowing an inherited field).
+				if (matches.length === 1 || t.derived)
 					return matches[0];
 				// Declaration merging usually declares `prop` identically in several parts: deduped first. A machine type keys as `number` (an ambient interface
 				// says `number`, its implementing class `i32`; the class, hoisted later, survives), WITH declaring scopes (two modules' `ClassInfo`s differ).

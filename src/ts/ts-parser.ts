@@ -37,7 +37,8 @@ export function  RefType<T extends string>(name: T, typeArgs?: Type[] ): RefType
 export interface UnionType { type: 'union'; types: Type[] }
 export function  UnionType(types: Type[]): UnionType { return { type: 'union', types }; }
 
-export interface IntersectionType { type: 'intersection'; types: Type[] }
+// `derived`: a class instance, its own members then its base's (`classShapes`), where an own declaration overrides the base's, as in TS.
+export interface IntersectionType { type: 'intersection'; types: Type[]; derived?: boolean }
 export function  IntersectionType(types: Type[]): IntersectionType { return { type: 'intersection', types }; }
 
 export interface FunctionType extends CallSig { type: 'function'; }
