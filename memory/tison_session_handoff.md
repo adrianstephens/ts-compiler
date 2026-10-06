@@ -47,9 +47,16 @@ Then: Node's global `process` IS `node:process` (user's choice, host-backed): `i
 (free-names.ts, the backend's free-variable analysis moved out and taught classes; now a survey target) finds it free;
 `markAbsenceTests` matches a tested name to its BINDING (closure by closure), not module-wide by name; wat-parser.ts:95 returned a bare
 object from an array-returning `substInstr` (user approved the source fix). codegen.ts makeAsm compiles.
-**Next**: wasm-backend.ts isAsm: "a slot with no value ... needs a nullable or scalar type" in `<any spread>`; self-check checker
-false positives (checker.ts 1213/1215 `Type | undefined` after a narrowing; transform.ts 337 SwitchCase rest; wasm-backend's ERRs);
-wasm.ts's "closure parameter 'v'" (7 rows). Re-run the survey (ask first) before trusting rows.
+Then (2026-10-06): `{...any}` copies `#own:`/enumerable `#ext`, a callable's spread is its plain shape (`ensurePlainShapes` before the late
+worklist); any-dispatch honours `#own:`; aliased discriminants only for a plain access of a DISCRIMINANT (`T.isDiscriminant`).
+**Class factories** (user's choice: static instantiation): `liftClassHeritage` (transform) rewrites `class X extends f(a)` to
+`const X$base = f(a); class X extends X$base`; the checker types a value base as `InstanceType<typeof X$base>` (no more `any` base), a
+named class expression binds its name, `constructSignatures` drives `infer` over construct types, a union's `never` member constrains no
+member/key (binary's `ReadType` merges now resolve). Backend: `ensureFactoryClass` (class expr -> named class, params as lazy globals
+in `classScope`, the cast's instance members as fields), `returnsThis` ctors, static `this` per receiver (`staticThis`). Optional params
+before a rest default. wasm-backend.ts isAsm/ClassInfo/FunctionContext/contextOf compile; wasm.ts whole + WasmModule compile.
+**Next**: wasm-backend.ts TStoWasm's next blocker (probe it); transform.ts 337 SwitchCase rest (checker FP); wasm-backend's 6 self-check
+ERRs. Re-run the survey (ask first) before trusting rows.
 Known gaps found: a generic instantiation is its own class (statics per instantiation); a literal with a method into a class-typed
 slot (`object literal for 'A' has unknown property`); `unknown + unknown` accepted; method values (`obj.m`) have no identity;
 `[].values().next().value` types `number | TResult` (a leaked type parameter); wasm lib has no `localeCompare` (wasm-backend.ts:1931,
