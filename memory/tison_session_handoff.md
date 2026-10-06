@@ -35,10 +35,10 @@ Fixed since (2026-10-05, later): overload-trial undo; deferred conditionals by t
 isNaN/isFinite; sibling functions materialized out of order (nearer binding, pinned holders); nested self-reference; ArrayBuffer.isView;
 `for...of` over `any` by protocol; well-known symbol keys through `as any`; method values through `any` (bound); held-closure arms by
 kind. binary itself: DataViewTypedArray has its own typed-array methods (its Array.prototype borrowing was broken under node too).
-**Next blocker**: `Array<i32>.slice` -- `Array._raw(result)` with `result: i32[]` instantiates `_raw<number>`: inference widens the
-machine-int range `i32` to `number` (`widenLiterals`), so `Array<i32>` meets `Array<number>`. Probe with
-`SNAP=<snapshot> probe-decl.ts <snapshot>/binary-libs/src/wasm.ts insertFactory` (snapshot = committed sources; refresh it after
-committing binary).
+Then: an array's element keeps its machine type in inference (`Array<i32>.slice`); a closure fits a closure slot only if its result
+converts; TS 4.4 aliased discriminants (`const op = i.op; switch (op)` narrows `i`, via `scope.addSource`).
+**binary-libs wasm.ts now compiles WHOLE** (`WHOLE_FIRST=1 SNAP=<snapshot> probe-decl.ts <snapshot>/binary-libs/src/wasm.ts WasmModule`;
+snapshot = committed sources, refresh after committing binary). **Next**: re-run the survey (ask first) for the next failing rows.
 Known gaps found: a generic instantiation is its own class (statics per instantiation); a literal with a method into a class-typed
 slot (`object literal for 'A' has unknown property`); `unknown + unknown` accepted; method values (`obj.m`) have no identity;
 `[].values().next().value` types `number | TResult` (a leaked type parameter); wasm lib has no `localeCompare` (wasm-backend.ts:1931,
