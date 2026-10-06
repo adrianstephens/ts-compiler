@@ -5,7 +5,7 @@ import * as JS from './js-parser';
 import * as T from './type-utils';
 import * as W from '../wasm/codegen';
 import { Literal, Identifier, Binary, Assign, hasMod, Module as CModule } from '@isopodlabs/tison/ast';
-import { type Contextual, checkHoisted, checkImported, superClassRef, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, restampFlow, checkedTypeOf, expectedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr, checkMethodInstance } from './checker';
+import { type Contextual, checkBlock, checkHoisted, checkImported, superClassRef, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, restampFlow, checkedTypeOf, expectedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr, checkMethodInstance } from './checker';
 import { Walker, walker, walkerB } from './walker';
 import { type Closure, paramNames, ownBoundNames, freeIn, closureFree } from './free-names';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
@@ -303,6 +303,8 @@ class FunctionContext extends W.FunctionContext {
 	readonly vars		= new Set<string>();
 	// Declarators whose initializers are compiling right now, innermost last -- see `ensureForwardHolder`.
 	initializing?:		JS.Var<Type>[];
+	// A static method's `this`: the class it was called on, one compile per such class where the body reads `this` (`ensureMethod`).
+	staticThis?:		ClassInfo;
 
 
 	constructor(name: string, public scope: Scope, public onReturn: ReturnHandler, public owner?: ClassInfo, public homeModule = '.') {
@@ -754,6 +756,12 @@ function unwrapAs(e: Expr): Expr {
 	while (e.type === 'as')
 		e = e.expression;
 	return e;
+}
+// A constructor's `return e` that gives back the object being built (`this`, `Object.assign(this, data)`, which returns its target): JS
+// keeps that object, so it is an early exit, not a replacement result.
+function returnsThis(e: Expr): boolean {
+	const x = unwrapAs(e);
+	return x.type === 'this' || (objectIntrinsic(x) === 'assign' && x.type === 'call' && !!x.arguments[0] && unwrapAs(x.arguments[0]).type === 'this');
 }
 
 function describeBinding(t: BindingTarget): string {
@@ -2430,6 +2438,71 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 	// The module-level `const`/`let` (with an initializer) `name` resolves to in `scope`, imports included.
+	// Where a class's bodies resolve names: its declaring module, or for a factory's class the scope binding the factory's parameters.
+	const factoryScopes	= new Map<TS.Class, Scope>();
+	const classScope	= (c: ClassInfo) => factoryScopes.get(c.decl) ?? moduleScopeOf(c.homeModule) ?? c.declScope ?? libGlobal;
+
+	// A call to a class factory: a module function whose whole body returns a class expression (`bin.Class(spec)`), maybe cast.
+	function factoryCallOf(e: Expr, scope: Scope) {
+		const call		= unwrapAs(e);
+		const callee	= call.type === 'call' ? call.callee : undefined;
+		const ns		= callee?.type === 'member' && callee.object.type === 'identifier' ? scope.namespace(callee.object.name) : undefined;
+		const fn		= callee?.type === 'identifier' ? functionOf(callee.name, scope) : callee?.type === 'member' && ns ? functionOf(callee.property, ns) : undefined;
+		const body		= fn?.decl.body;
+		const returned	= Array.isArray(body) && body.length === 1 && body[0].type === 'return' ? body[0].argument : undefined;
+		const ret		= returned && unwrapAs(returned);
+		// The cast the class is returned as (`as new (s) => ReadType<T> & ...`) declares what its instances hold.
+		const cast		= returned?.type === 'as' ? returned.typeAnnotation : undefined;
+		return call.type === 'call' && fn && ret?.type === 'class' ? { call, fn: fn.decl, home: fn.home, ce: ret, cast } : undefined;
+	}
+	// A module `const` bound to a factory call, with its name and module.
+	function factoryBinding(name: string, scope: Scope) {
+		const b = moduleVarOf(name, scope);
+		const f = b?.d.init && factoryCallOf(b.d.init, moduleScopeOf(b.home) ?? scope);
+		return f && b && { ...f, binding: b.name, bindingHome: b.home };
+	}
+	// The class one factory call makes, instantiated statically (the user's choice): the class expression, the call's type arguments
+	// substituted, re-checked where each factory parameter is a module binding initialized with the call's argument, as the call evaluates it.
+	const factoryClasses = new Map<string, ClassInfo | undefined>();
+	function ensureFactoryClass(f: NonNullable<ReturnType<typeof factoryBinding>>): ClassInfo | undefined {
+		const key = homeKey(f.bindingHome, f.binding);
+		if (factoryClasses.has(key))
+			return factoryClasses.get(key);
+		const { call, fn, home, ce } = f;
+		const name		= f.binding + moduleTag(f.bindingHome);
+		const typeArgs	= checkedCallOf(call)?.typeArgs;
+		const map		= new Map<string, Type>((fn.typeParams ?? []).map(p => [p.name, typeArgs?.get(p.name) ?? p.constraint ?? T.UNKNOWN]));
+		if (ce.name)
+			map.set(ce.name, TS.RefType(name));
+		if (fn.rest)
+			throw `class factory '${fn.name}': a rest parameter is not supported`;
+		const scope = new Scope(moduleScopeOf(home) ?? libGlobal);
+		fn.params.forEach((p, i) => {
+			const arg = call.arguments[i];
+			if (typeof p.key !== 'string' || !arg || arg.type === 'spread')
+				throw `class factory '${fn.name}': each parameter must be a plain name given an argument`;
+			const t = T.substituteType(p.typeAnnotation ?? T.ANY, map);
+			const v = JS.Var<Type>(`${f.binding}$${p.key}`, arg, t);
+			scope.addValue(p.key, t);
+			scope.addDeclarator(p.key, v);
+			moduleBindings.set(v, { d: v, name: v.name as string, home: f.bindingHome });
+		});
+		const decl = substituteTypeParams(map).statement({ ...ce, type: 'class_decl', name }) as JS.ClassDecl<Type>;
+		// What the cast says an instance holds and the class does not declare (its constructor's `Object.assign(this, data)` fills them): fields,
+		// as the checker types `this.x` by the cast.
+		const own		= new Set(decl.body.flatMap(m => m.type === 'method' && m.key === 'constructor' ? m.params.flatMap(p => T.isParamProperty(p) && typeof p.key === 'string' ? [p.key] : [])
+			: 'key' in m && typeof m.key !== 'object' ? [String(m.key)] : []));
+		const instance	= f.cast && T.constructSignatures(T.substituteType(f.cast, map), scope)[0]?.returnType;
+		decl.body		= [...(instance ? T.collectMembers(instance, scope) : []).flatMap(m => m.type === 'property' && typeof m.key !== 'object' && !own.has(String(m.key))
+			? [JS.Field<Type>(m.key, undefined, m.typeAnnotation, hasMod(m, 'optional') ? ['optional'] : [])] : []), ...decl.body];
+		stmtHomeModule.set(decl, home);
+		factoryScopes.set(decl, scope);
+		checkBlock([decl], scope);
+		const info = ensureClass(name, undefined, scope);
+		factoryClasses.set(key, info);
+		return info;
+	}
+
 	function moduleVarOf(name: string, scope: Scope) {
 		const d = scope.declarator(name);
 		return d && moduleBindings.get(d);
@@ -2450,7 +2523,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// runs it at the class's definition: the same value on every read, and writable.
 	function staticGlobal(owner: ClassInfo, f: JS.Field<Type>) {
 		const key		= String(f.key), name = `${owner.name}.${key}`, home = owner.homeModule ?? LIB_MODULE;
-		const scope		= moduleScopeOf(owner.homeModule) ?? owner.declScope ?? libGlobal;
+		const scope		= classScope(owner);
 		const declared	= f.typeAnnotation ?? (f.value && T.widenLiterals(checkerTypeOf(f.value, scope)));
 		const wrapper	= ensureLazyGlobal(name, home, JS.Var(key, f.value, declared), scope, owner, declared);
 		const slot		= lazyGlobalSlots.get(homeKey(home, name));
@@ -2483,6 +2556,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		// `const f = __asm<[...], R>('...')` DECLARES a builtin (`moduleAsmBuiltins`): there is nothing to evaluate.
 		return isAsm(e)
 			|| !!classRefTarget(e, scope)
+			|| !!factoryCallOf(e, scope)
 			|| (e.type === 'identifier' && scope.decl(e.name)?.type === 'function_decl')
 			|| (e.type === 'member' && e.object.type === 'identifier' && !!scope.namespace(e.object.name));
 	}
@@ -4313,6 +4387,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			if (callee.type === 'identifier' && callee.name === 'Proxy' && !ctx.resolvesName(callee.name) && !isModuleValue(callee.name, ctx))
 				return { kind: 'construct', cls: ensureClass('ProxyObject', [T.ANY])!, label: 'Proxy', lowered: true };
 			// A plain identifier naming a lib class (`Map`) has no `Scope.decl` for `classRefTarget` to follow.
+			if (callee.type === 'this' && ctx.staticThis)
+				return { kind: 'construct', cls: ctx.staticThis, label: ctx.staticThis.name, lowered: false };
 			const target	= classTargetOf(callee, ctx);
 			const cls		= target && ensureClass(target.name, newTypeArgs(target.name, e.typeArgs, e, ctx, want), target.scope);
 			if (cls)
@@ -4354,6 +4430,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const w = wtypeOf(obj, ctx);
 				if (!w || typeof w === 'string')
 					throw `'a?.${name}(...)' needs an object-typed value on its left`;
+			} else if (obj.type === 'this' && ctx.staticThis) {
+				return { kind: 'static', owner: ctx.staticThis, name };
 			} else if (obj.type === 'super') {
 				// Never virtual: the ancestor's own implementation, however far up it is declared.
 				const superClass = (ctx.owner && 'fields' in ctx.owner ? ctx.owner as ClassInfo : undefined)?.superClass;
@@ -4963,7 +5041,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (target.type === 'member') {
 			const prop		= target.property;
 			// A class's static field (`C.n = v`): its one storage (`staticGlobal`).
-			const staticOwner	= target.object.type === 'identifier' && !ctx.lookup(target.object.name) ? namespaceOwner(target.object.name, ctx) : undefined;
+			const staticOwner	= target.object.type === 'this' ? ctx.staticThis
+				: target.object.type === 'identifier' && !ctx.lookup(target.object.name) ? namespaceOwner(target.object.name, ctx) : undefined;
 			const staticField	= staticOwner && staticFieldOf(staticOwner, prop);
 			if (staticField) {
 				const { wrapper, slot } = staticGlobal(staticField.owner, staticField.f);
@@ -6032,6 +6111,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			case 'this': {
 				const name = e.type === 'this' ? 'this' : e.name;
 				// On `ensureCtor`'s collect-then-`struct.new` path `this` does not exist until the last field is collected (`ctx.ctorFields`).
+				if (e.type === 'this' && ctx.staticThis)
+					return emitClassValue(ctx.staticThis, want, ctx, e);
 				if (e.type === 'this' && ctx.ctorFields)
 					throw `'this' can't be used yet in '${ctx.owner?.name}'s constructor -- it has at least one object-typed field, which needs every field's real value collected up front (for 'struct.new') before 'this' exists at all; assign every field via a plain 'this.field = value' statement before using 'this' any other way`;
 				const place = resolvePlace(e, ctx);
@@ -8382,6 +8463,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					if (alias)
 						return ensureClass(alias.name, alias.typeArgs, libRoot);
 				}
+				// A `const` bound to a class factory's call (a lifted heritage, `X$base = bin.Class(spec)`) names the class that call instantiates.
+				const factory = !typeArgs?.length ? factoryBinding(name, declScope ?? global) : undefined;
+				if (factory)
+					return ensureFactoryClass(factory);
 				// Before the structural fallback, which would cache a method-less stand-in for a class aliased by a const under this name.
 				// `?? global`: a bare ref often carries no `declScope`, and the alias is a top-level declaration.
 				const aliased = classAliasTarget(name, declScope ?? global);
@@ -8428,7 +8513,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		for (const m of decl.body as TS.ClassMember[]) {
 			if (m.type === 'method' && m.key === 'constructor' && m.body) {
 				const last = m.body[m.body.length - 1];
-				if (last?.type === 'return' && last.argument)
+				if (last?.type === 'return' && last.argument && !returnsThis(last.argument))
 					returnType = checkerTypeOf(unwrapAs(last.argument), m.scope as Scope);
 				break;
 			}
@@ -8729,12 +8814,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const thisWtype		= cls.thisWtype!;
 		const info			= declareFunc(key, ctor, params, thisWtype);
 
-		// A constructor's `return;` carries no value: it stops early, `this` the result.
+		// A constructor's `return;` carries no value: it stops early, `this` the result. So does a `return` of `this` itself, evaluated first.
 		const ctorOnReturn: ReturnHandler = {
 			wtype: () => undefined,
 			emit(ctx, argument) {
-				if (argument)
+				if (argument && !returnsThis(argument))
 					throw 'a constructor cannot return a value';
+				if (argument && emitExpr(argument, ctx) !== 'void')
+					ctx.emit(I.drop);
 				ctx.emit(I.local.get(ctx.ctorThis!.index), I.return);
 			},
 		};
@@ -8742,7 +8829,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		worklist.push(W.withCatch(() => {
 			// The DECLARING module's scope, so the body resolves names only its file declares; not `declScope`, the scope of whatever reference first
 			// built this class (maybe another module). `libGlobal` for a lib class or a synthesized shape.
-			const ctx		= new FunctionContext(key, new Scope(moduleScopeOf(cls.homeModule) ?? cls.declScope ?? libGlobal), plainReturn(thisWtype), cls, cls.homeModule);
+			const ctx		= new FunctionContext(key, new Scope(classScope(cls)), plainReturn(thisWtype), cls, cls.homeModule);
 			beginBody(ctx, ctor.body!, params);
 			const writeField = (field: string, value: Expr) => {
 				const idx = cls.fieldIndex.get(field)!, wtype = cls.fields[idx].wtype;
@@ -8752,7 +8839,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			};
 			// A constructor returning its own value (`thisWtype` says so) compiles as ordinary statements, `ctx.ctorThis` unset.
 			const last = ctor.body?.at(-1);
-			if (last?.type === 'return' && last.argument) {
+			if (last?.type === 'return' && last.argument && !returnsThis(last.argument)) {
 				emitStmts(ctor.body!, ctx);
 
 			// Defaultability is the whole struct's: one object-typed field forces the collect-then-`struct.new` path. An optional one (an expando slot,
@@ -8827,15 +8914,17 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 	// An empty argument list only probes a one-body method's signature.
-	function ensureMethod(owner: ClassInfo, name: string, call: CallSite, callerCtx: FunctionContext, chosen?: MethodMember): FuncInfo | undefined {
+	// `receiver`: the class a static was called on, which a static reading `this` is compiled for (`B.make()` inherited from `A` constructs a `B`).
+	function ensureMethod(owner: ClassInfo, name: string, call: CallSite, callerCtx: FunctionContext, chosen?: MethodMember, receiver = owner): FuncInfo | undefined {
 		const decls		= owner.methodDecls.get(name);
 		const fullName	= `${owner.name}.${name}`;
 		// Not overridden by `owner`: the ancestor's own compiled function, a `(ref Derived)` being callable where `(ref A)` is declared.
 		if (!decls)
-			return owner.superClass && ensureMethod(owner.superClass, name, call, callerCtx, chosen);
+			return owner.superClass && ensureMethod(owner.superClass, name, call, callerCtx, chosen, receiver);
 		let decl = chosen ?? implementationOf(owner, name, decls, call, callerCtx);
+		const staticThis = hasMod(decl, 'static') && closureFree(decl).has('this') ? receiver : undefined;
 		// Qualified, so it shares `funcs` with top-level functions (whose names contain no '.'); suffixed only for a real overload set.
-		let key = decls.length > 1 ? `${fullName}#${decls.indexOf(decl)}` : fullName;
+		let key = (decls.length > 1 ? `${fullName}#${decls.indexOf(decl)}` : fullName) + (staticThis && staticThis !== owner ? `@${staticThis.name}` : '');
 
 		// A generic method's own type params (`map<U>` in `class Box<T>`; `T` already substituted by `ensureClass`), keyed and substituted as
 		// `ensureGenericFunc` does a function's: signature pieces through `T.substituteType`, the body through `substituteTypeParams`.
@@ -8870,7 +8959,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			throw `'${fullName}' needs a body (overload signatures are not supported)`;
 		// Its body re-checked, as `instantiateDecl` re-checks a generic function's: the template's stamps do not hold for these type arguments.
 		if (instance?.length)
-			checkMethodInstance(owner.decl, decl, moduleScopeOf(owner.homeModule) ?? owner.declScope ?? libGlobal);
+			checkMethodInstance(owner.decl, decl, classScope(owner));
 
 		const result = resultTypeOf(decl.returnType);
 		if (!result)
@@ -8883,7 +8972,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const info			= declareFunc(key, decl, params, result, isStatic ? undefined : thisWtype, reassignsThis);
 		worklist.push(W.withCatch(() => {
 			// A method body resolves in its class's declaring module, as a constructor's does.
-			const ctx	= new FunctionContext(key, new Scope(moduleScopeOf(owner.homeModule) ?? owner.declScope ?? libGlobal), plainReturn(result), owner, owner.homeModule);
+			const ctx	= new FunctionContext(key, new Scope(classScope(owner)), plainReturn(result), owner, owner.homeModule);
+			ctx.staticThis = staticThis;
 			if (abstract) {
 				ctx.emit(I.unreachable);
 				info.body = ctx.toFuncBody((isStatic ? 0 : 1) + params.length, toValType);

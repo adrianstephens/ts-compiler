@@ -4847,6 +4847,50 @@ async function main() {
 	}
 
 	{
+		// A static's `this` is the class it was called on: `B.make()` inherited from `A` constructs a `B` and reads `B`'s statics.
+		const { staticThisNew, staticThisField } = await compile(`
+			class A { constructor(public n: number) {} static make(n: number) { return new this(n); } static k = 3; static twice() { return this.k * 2; } }
+			class B extends A { static k = 5; }
+			export function staticThisNew(): number { return A.make(2).n + B.make(3).n * 10; }
+			export function staticThisField(): number { return A.twice() * 100 + B.twice(); }
+		`);
+		check('a static\'s `new this(...)` constructs the class it was called on', staticThisNew(), 32);
+		check('a static\'s `this.k` reads the static of the class it was called on', staticThisField(), 610);
+	}
+
+	{
+		// A class extending a factory call (`extends bin.Class(spec)`): the factory's class instantiated statically, its parameter bound to the argument;
+		// a cast's declared instance members are its fields, which its constructor's `return Object.assign(this, data)` fills.
+		const { factorySimple, factoryStatic, factoryAssign, factoryAssignStatic } = await compile(`
+			function Make<T extends number>(spec: T) {
+				return class Base {
+					static make(n: number) { return new this(n); }
+					constructor(public n: number) {}
+					get(): number { return this.n + spec; }
+				};
+			}
+			class Derived extends Make(5) { twice(): number { return this.get() * 2; } }
+			interface Data { a: number; b: number }
+			function Klass<T extends Data>(spec: T) {
+				return class Klass {
+					static get(n: number) { return new this({ a: n + spec.a, b: n * 2 } as T); }
+					constructor(data: T) { return Object.assign(this, data); }
+					sum(): number { return spec.b; }
+				} as (new (data: T) => T & { sum(): number }) & { get(n: number): T & { sum(): number } };
+			}
+			class Mod extends Klass({ a: 1, b: 2 }) { total(): number { return this.a * 100 + this.b * 10 + this.sum(); } }
+			export function factorySimple(): number { return new Derived(1).twice(); }
+			export function factoryStatic(): number { return Derived.make(2).get(); }
+			export function factoryAssign(): number { return new Mod({ a: 3, b: 4 }).total(); }
+			export function factoryAssignStatic(): number { return Mod.get(5).total(); }
+		`);
+		check('a class extending a factory call', factorySimple(), 12);
+		check('a factory class\'s static `new this` constructs the subclass', factoryStatic(), 7);
+		check('a factory cast\'s instance members are fields its constructor assigns', factoryAssign(), 342);
+		check('a factory class built through its static', factoryAssignStatic(), 702);
+	}
+
+	{
 		// `new Set()` infers its element from an interface context (wasm-backend.ts's `openReads: ReadonlySet<Expr> = new Set()`).
 		const { readonlyContext } = await compile(`
 			let seen: ReadonlySet<string> = new Set();
