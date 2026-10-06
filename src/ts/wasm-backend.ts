@@ -1092,6 +1092,10 @@ function collectOpenShapes(
 					noteSlot(s.element, el, scope, depth - 1, true);
 			return;
 		}
+		// An assertion (`v as S`) converts nothing: what reaches the slot is whichever member of the operand's type it picks out, each its own struct.
+		if (value.type === 'as')
+			for (const m of T.unionMembers(checkerTypeOf(unwrapAs(value), scope), scope).filter(m => T.isAssignable(m, slot, scope)))
+				noteTypes(slot, m, scope, depth, id);
 		// Typed in the slot's context, as it is built: an uncontextual `new Map` is `Map<any, any>`, and a literal may fit only in context.
 		// A call's type arguments may come from that context (`xs.find(isCtor)` as a `CallSig`), yet it returns what it was given.
 		noteTypes(slot, checkerTypeOf(unwrapAs(value), scope, true, slot), scope, depth, id);
@@ -3081,17 +3085,20 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			if (!e.properties.slice(0, i).every(q => q.type === 'spread' ? pure(q.operand) : q.type === 'field' && (!q.value || pure(q.value))))
 				break;
 			if (p.type === 'spread') {
-				const members	= T.unionMembers(T.resolve(ctx.scope, ctx.narrowedTypeOf(p.operand)), ctx.scope).filter(m => !T.isNullish(m, ctx.scope));
+				// An asserted operand (`x as S`) converts nothing: it is whichever member of `x`'s type fits `S`, each its own struct.
+				const asserted	= p.operand.type === 'as' ? p.operand.typeAnnotation : undefined;
+				const operand	= asserted ? unwrapAs(p.operand) : p.operand;
+				const members	= T.unionMembers(T.resolve(ctx.scope, ctx.narrowedTypeOf(operand)), ctx.scope).filter(m => !T.isNullish(m, ctx.scope) && (!asserted || T.isAssignable(m, asserted, ctx.scope)));
 				const owners	= members.map(m => ownerFor(m));
 				// A member held as `any` (an OPEN shape) has no struct to test for, so it can only be the arm no other test picked:
 				// one such member is the `else`, two are indistinguishable at run time.
 				const openAt	= owners.findIndex(o => !o || o.typeIndex === -1);
-				if (members.length < 2 || owners.filter(o => !o || o.typeIndex === -1).length > 1)
+				if (members.length < (asserted ? 1 : 2) || owners.filter(o => !o || o.typeIndex === -1).length > 1)
 					continue;
 				// The operand held once; each arm spreads it as the member its test picked (`src as M`, a downcast).
 				const { temp, emit, check } = lowering(ctx);
 				const src	= temp('union');
-				emit(JS.VarDecl('const', JS.Var(src, p.operand)));
+				emit(JS.VarDecl('const', JS.Var(src, operand)));
 				const buildArm = (k: number) => () => {
 					const member = temp('member'), downcast: Expr = { type: 'as', expression: Identifier(src), typeAnnotation: members[k] };
 					emit(JS.VarDecl('const', JS.Var(member, downcast)));

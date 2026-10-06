@@ -4859,6 +4859,26 @@ async function main() {
 	}
 
 	{
+		// An assertion converts nothing (wasm-backend.ts's `{ ...(map.thisWtype! as { ref: string }), nullable: true }`): the value keeps the struct of the
+		// union member it is, whether held in a slot of the asserted shape or spread.
+		const { assertedSlot, assertedSpread } = await compile(`
+			type WT = 'i32' | 'f64' | { ref: string; nullable?: boolean } | { arr: string; nullable?: boolean };
+			interface F { name: string; wtype: WT; optional?: boolean }
+			class M { thisWtype?: WT = { ref: 'Map' }; }
+			export function assertedSlot(): number { const m = new M(); const src = m.thisWtype! as { ref: string }; return src.ref.length; }
+			export function assertedSpread(): number {
+				const m = new M();
+				const fields: F[] = [];
+				fields.push({ name: '#ext', wtype: { ...(m.thisWtype! as { ref: string }), nullable: true }, optional: true });
+				const w = fields[0].wtype;
+				return typeof w === 'object' && 'ref' in w && w.nullable ? w.ref.length : -1;
+			}
+		`);
+		check('a slot of an asserted shape holds the member it is', assertedSlot(), 3);
+		check('a spread of an asserted operand spreads the member it is', assertedSpread(), 3);
+	}
+
+	{
 		// A subclass reads and writes an accessor its base declares.
 		const { inheritedAccessor } = await compile(`
 			class A { v = 2; get x(): number { return this.v * 10; } set x(n: number) { this.v = n; } }
