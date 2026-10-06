@@ -1445,7 +1445,7 @@ function hoist(block: Stmt[], scope: Scope) {
 		if (stmt.type === 'export_decl')
 			stmt = stmt.declaration;
 		if (stmt.type === 'type_alias_decl') {
-			scope.addType(stmt.name, T.stampScope(stmt.value, scope), stmt.typeParams);
+			scope.addType(stmt.name, T.stampScope(T.markModifiersTypes(stmt.value, stmt.typeParams as TS.TypeParam[]), scope), stmt.typeParams);
 		} else if (stmt.type === 'interface_decl') {
 			const obj = T.stampScope(TS.ObjectType(stmt.body), scope);
 			T.declaredShapes.add(obj);

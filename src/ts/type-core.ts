@@ -1169,6 +1169,22 @@ function oneStepIndexed(t: Type, scope: Scope): Type {
 	return idx.type === 'literal' && typeof idx.value === 'string' ? lookupMember(obj, idx.value, scope) ?? t : t;
 }
 
+// TS's getModifiersTypeFromMappedType: `{[P in K]: ...}` over a type parameter `K extends keyof T` keeps `T`'s property modifiers after `K` is
+// instantiated, as `[P in keyof T]` does. Mutates `t`'s mapped types.
+export function markModifiersTypes(t: Type, typeParams: TS.TypeParam[] | undefined): Type {
+	if (typeParams?.length)
+		walkerB(undefined, undefined, (x, process) => {
+			if (x.type === 'mapped' && x.constraint.type === 'ref' && !x.constraint.typeArgs) {
+				const name	= x.constraint.name;
+				const c		= typeParams.find(p => p.name === name)?.constraint;
+				if (c?.type === 'keyof')
+					x.modifiersType = c.argument;
+			}
+			return process(x);
+		}).type(t);
+	return t;
+}
+
 // A homomorphic mapped type's `readonly`/`-readonly`/`optional`/`-optional` override the source member's; others pass through.
 function mapMemberModifiers(sourceMods: string[] | undefined, mapMods: string[] | undefined): string[] | undefined {
 	const result = new Set(sourceMods);
@@ -1471,7 +1487,7 @@ export function resolve(scope: Scope, t: Type, depth = 10, stopAtRef = false): T
 				};
 				// Homomorphic (`[P in keyof T]`): each property starts from that key's own modifiers on `T`.
 				const constraintParts	= t.constraint.type === 'intersection' ? t.constraint.types : [t.constraint];
-				const keyofArg			= constraintParts.find(m => m.type === 'keyof')?.argument;
+				const keyofArg			= constraintParts.find(m => m.type === 'keyof')?.argument ?? t.modifiersType;
 				const modifiersFor		= (key: string | number) => {
 					const source = keyofArg && resolveObjectType(keyofArg, scope);
 					return source ? mapMemberModifiers(findTypeMember(source.members, String(key))?.modifiers, t.modifiers) : t.modifiers;

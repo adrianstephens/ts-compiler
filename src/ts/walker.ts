@@ -380,7 +380,8 @@ export function walker(
 			case 'mapped':				return keep(type, {
 					constraint: 	mapTypeA,
 					nameType:		mapType,
-					valueType:		mapTypeA
+					valueType:		mapTypeA,
+					modifiersType:	mapType
 				});
 			case 'predicate':			return keep(type, {assertedType: mapTypeA});
 
@@ -679,7 +680,7 @@ export function walkerB(
 			case 'indexed_access':		return walkType(t.object) || walkType(t.index);
 			case 'conditional':			return walkType(t.checkType) || walkType(t.extendsType) || walkType(t.trueType) || walkType(t.falseType);
 			case 'infer':				return walkType(t.constraint);
-			case 'mapped':				return walkType(t.constraint) || walkType(t.nameType) || walkType(t.valueType);
+			case 'mapped':				return walkType(t.constraint) || walkType(t.nameType) || walkType(t.valueType) || walkType(t.modifiersType);
 			case 'predicate':			return walkType(t.assertedType);
 			// 'this': no nested Type position.
 			default:					return false;

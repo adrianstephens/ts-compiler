@@ -82,7 +82,9 @@ export function TypeIndex(paramName: string, paramType: Type, typeAnnotation: Ty
 export function TypeCall(sig: CallSig)		{ return TypeMember('call', sig); }
 export function TypeConstruct(sig: CallSig)	{ return TypeMember('construct', sig); }
 
-export interface MappedType { type: 'mapped'; keyName: string; constraint: Type; nameType?: Type; valueType: Type; modifiers?: string[]; }
+// `modifiersType`: TS's getModifiersTypeFromMappedType, the type whose property modifiers each key starts from where the constraint is not
+// literally `keyof X` (`Pick`'s `K extends keyof T`, instantiated).
+export interface MappedType { type: 'mapped'; keyName: string; constraint: Type; nameType?: Type; valueType: Type; modifiers?: string[]; modifiersType?: Type; }
 export function  MappedType(keyName: string, constraint: Type, nameType: Type|undefined, valueType: Type, modifiers?: string[]): MappedType { return { type: 'mapped', keyName, constraint, nameType, valueType, modifiers }; }
 
 export type TupleElement = Type
