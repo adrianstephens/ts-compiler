@@ -4857,6 +4857,22 @@ async function main() {
 	}
 
 	{
+		// A class without a constructor takes one per base overload, forwarding to it (codegen.ts's `Types extends Array<SubType>`); a `super(...)`
+		// spread fills the base's rest parameter.
+		const { arraySubclassEmpty, arraySubclassItems, overloadedBase } = await compile(`
+			class T2 extends Array<number> { x = 1; sum(): number { let s = 0; for (const v of this) s += v; return s; } }
+			class Base { tag: string; constructor(n: number); constructor(s: string); constructor(v: number | string) { this.tag = typeof v === 'number' ? 'n' + v : 's' + v; } }
+			class Kid extends Base { k = 2; }
+			export function arraySubclassEmpty(): number { const t = new T2(); t.push(3); t.push(4); return t.length * 100 + t.sum() + t.x; }
+			export function arraySubclassItems(): number { const t = new T2(5, 6, 7); return t.length * 100 + t.sum() + t.x; }
+			export function overloadedBase(): number { return new Kid(4).tag.length * 10 + new Kid('xyz').tag.length + new Kid(1).k * 100; }
+		`);
+		check('a subclass of Array with no constructor', arraySubclassEmpty(), 208);
+		check('a subclass of Array built from items (the base rest overload)', arraySubclassItems(), 319);
+		check('a subclass with no constructor takes each base overload', overloadedBase(), 224);
+	}
+
+	{
 		// A constructor assigning its fields in branches (codegen.ts's `Error`): the object is built up front, its fields written in place.
 		const { ctorBranchFields } = await compile(`
 			class E { msg: string; pos: number[]; constructor(err: string | E) { if (err instanceof E) { this.msg = err.msg + '!'; this.pos = err.pos; } else { this.msg = err; this.pos = [7]; } } }

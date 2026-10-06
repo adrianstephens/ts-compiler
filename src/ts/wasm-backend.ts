@@ -960,6 +960,8 @@ function templateCall(e: object): CheckedCall | undefined {
 
 // A generic class instance's members are copies (`substituteClassTypeParam`); a signature's `origin` may name a copy or the template.
 const memberTemplate	= new WeakMap<object, unknown>();
+// A derived class's implicit constructor, by the base overload it forwards to (`ensureClass`).
+const implicitOf		= new WeakMap<object, MethodMember>();
 const templateOf		= (m: unknown) => (typeof m === 'object' && m && memberTemplate.get(m)) || m;
 
 // Parameters only, as an ambient declaration restates an implementation's (`declare var Math` over `class Math`).
@@ -8643,18 +8645,20 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			}
 		}
 
-		// An implicit constructor, as TS synthesizes one: empty for a base class, for a derived one the base's parameters forwarded through `super(...)`.
+		// An implicit constructor, as TS synthesizes one: empty for a base class; for a derived one, one per base overload, its parameters forwarded
+		// through `super(...)`, which calls that overload (`checkedCall`).
 		if (!info.methodDecls.has('constructor')) {
-			const superCtor = info.superClass?.methodDecls.get('constructor');
-			const params	= superCtor?.length === 1 ? superCtor[0].params : [];
-			addMethod('constructor', {
-				type:	'method',
-				key:	'constructor',
-				params,
-				body:	info.superClass
-					? [JS.ExprStmt(JS.Call({ type: 'super' } as Expr, params.map(p => Identifier(p.key as string))))]
-					: [],
-			} as unknown as MethodMember);
+			const bases = info.superClass?.methodDecls.get('constructor')?.filter(d => d.body);
+			for (const base of bases?.length ? bases : [undefined]) {
+				const params	= base?.params ?? [];
+				const call		= JS.Call({ type: 'super' } as Expr, [...params.map(p => Identifier(p.key as string)), ...base?.rest ? [JS.Spread(Identifier(base.rest.key as string))] : []]);
+				if (base)
+					Object.assign(call, { checkedCall: { sig: { ...T.FixSig(base, T.ANY), origin: base } } });
+				const implicit = { type: 'method', key: 'constructor', params, rest: base?.rest, body: info.superClass ? [JS.ExprStmt(call)] : [] } as unknown as MethodMember;
+				if (base)
+					implicitOf.set(implicit, base);
+				addMethod('constructor', implicit);
+			}
 		}
 
 		// The placeholder registered above takes its real field list.
@@ -8742,14 +8746,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const superClass = cls.superClass;
 				if (!superClass)
 					throw `no superclass -- 'super(...)' is not supported here`;
-				if (call.arguments.some(a => a.type === 'spread'))
-					throw `'super(...)': a spread argument is not supported`;
 				const superDecls = superClass.methodDecls.get('constructor');
 				if (!superDecls)
 					throw `superclass '${superClass.name}' needs an explicit constructor for 'super(...)' to call`;
 				const superCtor = implementationOf(superClass, undefined, superDecls, call, ctx);
 				if (!superCtor.body)
 					throw `needs a body (overload signatures are not supported)`;
+				if (call.arguments.slice(0, superCtor.params.length).some(a => a.type === 'spread') || (!superCtor.rest && call.arguments.some(a => a.type === 'spread')))
+					throw `'super(...)': a spread argument can only fill the base constructor's rest parameter`;
 
 				// The base ctor's params bound to this call's arguments as `var_decl`s, in a scope that closes once the base body has run.
 				ctx.inScope(() => {
@@ -8761,6 +8765,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 							throw `'super(...)': missing argument parameter '${describeBinding(p.key)}'`;
 						bind(JS.VarDecl('const', JS.Var(p.key, argExpr, p.typeAnnotation && T.optional(p.typeAnnotation, optional))));
 					});
+					// The rest takes every argument after the fixed ones, spreads included, as one array.
+					if (superCtor.rest)
+						bind(JS.VarDecl('const', JS.Var(superCtor.rest.key, JS.ArrayLit(call.arguments.slice(superCtor.params.length)), superCtor.rest.typeAnnotation)));
 					emitCtorStatements(superCtor, superClass, ctx, setField);
 				});
 				emitParamPropertyInits();
@@ -8795,6 +8802,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const bodied = decls.filter(d => d.body);
 		if (bodied.length < 2)
 			return bodied[0] ?? decls[0];
+		// An implicit constructor per base overload: the one forwarding to the overload these arguments take, as the base's own call picks it.
+		if (owner.superClass && bodied.every(d => implicitOf.has(d))) {
+			const args = argsOf(call);
+			const base = args.some(a => a.type === 'spread') ? bodied.find(d => implicitOf.get(d)!.rest) : overloadByTypes(owner.superClass, 'constructor', args.map(a => ctx.narrowedTypeOf(a)));
+			return bodied.find(d => d === base || implicitOf.get(d) === base) ?? bodied[0];
+		}
 		const chosen	= namedBody(bodied, resolvedCall(owner, name, call, ctx), `${owner.name}.${name ?? 'constructor'}`);
 		const args		= argsOf(call);
 		const dynamic	= args.map((a, i) => T.isAny(ctx.narrowedTypeOf(a)) ? i : -1).filter(i => i >= 0);
