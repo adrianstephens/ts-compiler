@@ -49,13 +49,14 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 - [don't simplify deps for self-hosting](feedback_no_simplifying_deps_for_selfhosting.md) — hard constructs need a real compiler feature
 - [no JSON.stringify on AST/Type](feedback_no_json_stringify_ast.md) — bigints throw; print with `T.typeKey` / `T.exprKey` / `T.stmtKey`
 - [no unimplemented-throws tests](feedback_no_unimplemented_throws_tests.md) — `checkThrows` is for permanent enforced behavior only
+- [survey in CI](tison_survey_ci.md) — the survey as a GitHub Actions workflow: plan / slice matrix / merge; sees only PUSHED commits; results in the `survey-results` artifact
 - [SESSION HANDOFF](tison_session_handoff.md) — **read this at cold start**: live state (survey 399/421 at `11aa1d6`, top blockers), user decisions, what's deliberately unfixed, what the user hasn't decided
 - [harness portability](tison_harness_portability.md) — for running tison under a DIFFERENT agent harness: cwd, gate order, the acceptance numbers at `ec2a21f`, which instruments gate by EXIT CODE (difftest and vsdg-check do; the survey is a probe to be read), and what does not travel (the transcript)
 - [session boundaries](feedback_session_boundaries.md) — when the user asks "continue or start fresh?", recommend; default fresh after a committed fix, always after a compaction
 - [build and tests](compiler_build_and_tests.md) — tests import the BUILT `dist/`; `build` vs `build:emit`; the `dist/ts/lib` copy traps
 - [two-tier gates](feedback_two_tier_gates.md) — fast gates while iterating, full set once before the commit; measured 10.1 gate runs per commit. **`test-towasm.ts` and `test-checker.ts` read `dist/` — `npm run build:emit` first, on both sides of an A/B**
 - [index wasm-backend.ts before hunting](feedback_towasm_symbol_index.md) — one-off `grep -n` symbol index; the file was named in 575 separate read/grep calls over 8 sessions
-- **Scratch and instruments live in `compiler/assistant/`** (2026-09-14, d8f407c; the workspace root is not a project). Older memories write instrument paths as `assistant/…` — read those as `compiler/assistant/…`. They are still RUN from the workspace root, where `node_modules` is: `bash compiler/assistant/selfhost-survey.sh`. Generated markdown gets `.md`, not `.txt`.
+- **Scratch and instruments live in `compiler/assistant/`** (2026-09-14, d8f407c; the workspace root is not a project). Older memories write instrument paths as `assistant/…` — read those as `compiler/assistant/…`. They are still RUN from the workspace root, where `node_modules` is. The survey itself is tracked in `compiler/survey/` (`bash compiler/survey/selfhost-survey.sh`; outputs still in `compiler/assistant/`), and runs in CI too: [survey in CI](tison_survey_ci.md). Generated markdown gets `.md`, not `.txt`.
 
 ## Semantic conformance (current method)
 

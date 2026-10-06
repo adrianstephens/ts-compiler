@@ -44,4 +44,6 @@ root. Anything to keep under source control goes in `test/` or wherever is appro
 `assistant/`. Generated markdown gets an `.md` extension, not `.txt`.
 
 The instruments live there too and are run from the WORKSPACE ROOT, which is where `node_modules`
-is: `compiler/assistant/{selfhost-survey,corpus-ab,difftest,self-errors}.sh`.
+is: `compiler/assistant/{corpus-ab,difftest,self-errors}.sh`. The survey is kept under source control in
+`compiler/survey/` (`selfhost-survey.sh`); its outputs still go to `compiler/assistant/`, and CI runs it too
+(`.github/workflows/survey.yml`).

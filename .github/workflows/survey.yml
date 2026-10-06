@@ -1,0 +1,150 @@
+name: Self-hosting survey
+
+# The self-hosting survey (compiler/survey/selfhost-survey.ts) spread over many runners: one job plans its slices, a
+# matrix runs each slice (a worker probing a few top-level declarations) on a runner of its own, and a last job merges
+# them into the tables a local run prints -- on the run's summary page, and as the `survey-results` artifact.
+on:
+  workflow_dispatch:
+    inputs:
+      snapshot:
+        description: "Source to survey: the previous run's snapshot (so the delta measures the compiler), or every repo's HEAD"
+        type: choice
+        options: [previous, heads]
+        default: previous
+
+permissions:
+  contents: read
+  actions: read  # to fetch the previous run's results
+
+concurrency:
+  group: survey
+  cancel-in-progress: false
+
+env:
+  SURVEY_OUT: ${{ github.workspace }}/out
+  SURVEY_SNAPSHOT: ${{ github.workspace }}/out/selfhost-snapshot
+  SURVEY_SLICE_S: 240  # a slice's target time: shorter slices, more runners
+  NODE_OPTIONS: --max-old-space-size=12288  # a runner has 16 GB, and one worker
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      slices: ${{ steps.plan.outputs.slices }}
+    steps:
+      - name: Check out the packages root
+        uses: actions/checkout@v4
+        with: { repository: adrianstephens/packages, path: ws }
+      - name: Check out the compiler
+        uses: actions/checkout@v4
+        with: { path: ws/compiler, fetch-depth: 0 }
+      - name: Check out tison
+        uses: actions/checkout@v4
+        with: { repository: adrianstephens/ts-bison, path: ws/tison, fetch-depth: 0 }
+      - name: Check out binary
+        uses: actions/checkout@v4
+        with: { repository: adrianstephens/ts-binary, path: ws/binary, fetch-depth: 0 }
+      - name: Check out binary-libs
+        uses: actions/checkout@v4
+        with: { repository: adrianstephens/ts-binary-libs, path: ws/binary-libs, fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm, cache-dependency-path: ws/package-lock.json }
+      - name: Install and build the workspace
+        working-directory: ws
+        run: |
+          npm ci --no-audit --no-fund
+          sh compiler/survey/ci-workspace.sh link
+          sh compiler/survey/ci-workspace.sh build
+      - name: Fetch the previous run's results
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          mkdir -p "$SURVEY_OUT"
+          id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow survey.yml --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          if [ -n "$id" ]; then
+            gh run download "$id" --repo "$GITHUB_REPOSITORY" --name survey-results --dir "$SURVEY_OUT"
+          else
+            echo "no previous successful run: no delta, and the snapshot is every repo's HEAD"
+          fi
+      - name: Snapshot the source
+        working-directory: ws
+        env: { SNAPSHOT_FROM: "${{ inputs.snapshot || 'previous' }}" }
+        run: |
+          # the previous run's revisions, unless HEADs were asked for (or there is no previous run)
+          if [ "$SNAPSHOT_FROM" = previous ] && [ -f "$SURVEY_SNAPSHOT/SNAPSHOT.json" ]; then
+            eval "$(node -e 'for (const [k, v] of Object.entries(require(process.env.SURVEY_SNAPSHOT + "/SNAPSHOT.json"))) if (k !== "taken") console.log(`export REV_${k.replace(/-/g, "_")}=${v}`)')"
+          fi
+          sh compiler/survey/selfhost-snapshot.sh
+      - name: Plan the slices
+        id: plan
+        working-directory: ws
+        run: echo "slices=$(sh compiler/survey/selfhost-survey.sh --plan)" >> "$GITHUB_OUTPUT"
+      - name: Pack the workspace
+        # node_modules is reinstalled where it is used; only the compiler's history is kept, for the report's provenance
+        run: tar --exclude=node_modules --exclude=ws/.git --exclude=ws/tison/.git --exclude=ws/binary/.git --exclude=ws/binary-libs/.git -czf workspace.tgz ws out
+      - uses: actions/upload-artifact@v4
+        with: { name: workspace, path: workspace.tgz, retention-days: 1 }
+
+  slice:
+    needs: plan
+    name: ${{ matrix.file }} [${{ matrix.start }}]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.slices) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: workspace }
+      - run: tar -xzf workspace.tgz
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm, cache-dependency-path: ws/package-lock.json }
+      - name: Install the workspace
+        working-directory: ws
+        run: |
+          npm ci --no-audit --no-fund
+          sh compiler/survey/ci-workspace.sh link
+      - name: Survey the slice
+        working-directory: ws
+        env: { FILE: "${{ matrix.file }}", SLICE: "${{ matrix.start }}:${{ matrix.count }}" }
+        run: sh compiler/survey/selfhost-survey.sh --worker "$FILE" --slice "$SLICE"
+      - uses: actions/upload-artifact@v4
+        with: { name: "part-${{ strategy.job-index }}", path: out/selfhost-survey/*.part*.json, retention-days: 1, if-no-files-found: error }
+
+  merge:
+    needs: [plan, slice]
+    # a crashed slice still leaves a report: its file is marked unmeasured, and the run fails after publishing
+    if: ${{ always() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: workspace }
+      - run: tar -xzf workspace.tgz
+      - uses: actions/download-artifact@v4
+        with: { pattern: "part-*", merge-multiple: true, path: out/selfhost-survey }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm, cache-dependency-path: ws/package-lock.json }
+      - name: Install the workspace
+        working-directory: ws
+        run: |
+          npm ci --no-audit --no-fund
+          sh compiler/survey/ci-workspace.sh link
+      - name: Merge the slices
+        id: merge
+        working-directory: ws
+        run: |
+          set +e
+          sh compiler/survey/selfhost-survey.sh --merge > "$SURVEY_OUT/selfhost-survey.md"
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+          cat "$SURVEY_OUT/selfhost-survey.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: survey-results
+          retention-days: 90
+          path: |
+            out/selfhost-survey.md
+            out/selfhost-survey.json
+            out/selfhost-survey/*.json
+            out/selfhost-snapshot/SNAPSHOT.json
+      - name: Fail if a slice crashed
+        if: steps.merge.outputs.status != '0'
+        run: exit 1

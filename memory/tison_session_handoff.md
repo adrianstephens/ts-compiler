@@ -13,7 +13,7 @@ topic.** This file is live state: **rewrite it wholesale, do not append.** Targe
 **2026-09-30 STRUCTURE CHANGE**: `tison/src/examples/` was split out into the `compiler` package (`compiler/`; this memory
 dir, `assistant/`, `test/` moved with it; tison keeps only the parser generator + `ast.ts`/`walker.ts`). Old paths in older
 memories resolve through the rename ledger in MEMORY.md. Run everything from the WORKSPACE ROOT (`node_modules` is there),
-e.g. `bash compiler/assistant/selfhost-survey.sh`. The survey compiles `compiler/src/...` and `tison/src/...` targets from a
+e.g. `bash compiler/survey/selfhost-survey.sh` (or the CI workflow, see `tison_survey_ci.md`). The survey compiles `compiler/src/...` and `tison/src/...` targets from a
 snapshot (`selfhost-snapshot.sh` takes tison, compiler, binary-libs, binary). Verified after the split: all suites, corpus gate
 838 = baseline, `vsdg-check.sh`, survey end to end. **The survey's worker heap defaults to 6144 MB** (2026-10-06; it was 2048, and a run
 launched without `SURVEY_HEAP_MB=6144` OOMed every wasm-backend.ts and binary-libs wasm.ts slice: a wasm-backend probe keeps ~2.1 GB
@@ -24,7 +24,7 @@ runs ~2 workers here -- slower, but the machine stays usable. Ask before a full 
 ## State at 2026-10-05 (session end)
 
 Survey at `11aa1d6` gave 399/421; since then the binary-libs wasm.ts work, probed with `probe-decl.ts binary-libs/src/wasm.ts
-insertFactory` (instruments resolve `@isopodlabs/binary` to SOURCE via `assistant/sibling-paths.ts`). Fixed 2026-10-05, among others:
+insertFactory` (instruments resolve `@isopodlabs/binary` to SOURCE via `survey/sibling-paths.ts`). Fixed 2026-10-05, among others:
 member-less subclasses; primitive-settled `instanceof` guards (`staticGuard` + `exits`); **function/class value IDENTITY** (user's
 choice: one identity env per declaration, `Types.identityEnv`/`viewEnv`, `ensureClosureIdentity` in `===`); `x.constructor`, `Object`
 as a value; `arr.map(Number)`; spread overload arity (TS2556); lib TextEncoder/TextDecoder, codePointAt, at, padStart/padEnd; strings
