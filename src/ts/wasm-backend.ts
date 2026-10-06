@@ -4301,8 +4301,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			args.forEach((a, i) => emitArg(i, a));
 		} else {
 			const fixedCount = params.length - 1;
-			if (args.length < fixedCount)
+			// An omitted optional or defaulted parameter before the rest takes its default, as without a rest.
+			const missing = args.some(a => a.type === 'spread') ? [] : defaults?.slice(args.length, fixedCount) ?? [];
+			if (args.length + missing.length < fixedCount || missing.some(d => !d))
 				throw `'${label}' needs at least ${fixedCount} argument(s)`;
+			if (missing.some(d => !isReemittableDefault(d!)))
+				throw `'${label}': an omitted parameter with a default that reads another parameter, before a rest parameter, is not supported`;
+			args = [...args, ...missing as Expr[]];
 			const fixedArgs = args.slice(0, fixedCount);
 			if (fixedArgs.some(a => a.type === 'spread'))
 				throw `'${label}': a spread argument can only appear among the trailing rest arguments -- its length isn't known at compile time, so it can't fill a fixed parameter position`;

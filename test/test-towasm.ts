@@ -4847,6 +4847,16 @@ async function main() {
 	}
 
 	{
+		// An omitted optional parameter before a rest takes its default (codegen.ts's `new W.Error(msg)` against `(err, node?, ...scope)`).
+		const { optionalBeforeRest } = await compile(`
+			class E { n: number; constructor(err: string, node?: number, ...scope: string[]) { this.n = scope.length + (node === undefined ? 10 : 20); } }
+			function g(a: string, b?: number, ...r: string[]): number { return r.length + (b === undefined ? 1 : 2); }
+			export function optionalBeforeRest(): number { return new E('x').n + new E('y', 1, 'a', 'b').n * 100 + g('z') * 10000; }
+		`);
+		check('an omitted optional parameter before a rest takes its default', optionalBeforeRest(), 12210);
+	}
+
+	{
 		// A static's `this` is the class it was called on: `B.make()` inherited from `A` constructs a `B` and reads `B`'s statics.
 		const { staticThisNew, staticThisField } = await compile(`
 			class A { constructor(public n: number) {} static make(n: number) { return new this(n); } static k = 3; static twice() { return this.k * 2; } }
