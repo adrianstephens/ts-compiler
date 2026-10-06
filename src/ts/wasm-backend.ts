@@ -6480,6 +6480,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					return 'i32';
 				}
 
+				// `void x`: `x` for its effects, then `undefined`.
+				if (e.operator === 'void') {
+					emitDiscarded(e.operand, ctx);
+					const w = want && want !== 'void' ? want : W.REF_ANY_NULLABLE;
+					emitAs(Identifier('undefined'), ctx, w);
+					return w;
+				}
 				const info = operandInfo(e.operand, ctx);
 				const nativeBig = emitNativeBigint(e.operator === '-' ? 'neg' : undefined, [{ expr: e.operand, wtype: info.wtype }], e, ctx);
 				if (nativeBig)

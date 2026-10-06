@@ -4859,6 +4859,16 @@ async function main() {
 	}
 
 	{
+		// `void x` evaluates `x` for its effects and is `undefined`, as a statement or a value.
+		const { voidOperator } = await compile(`
+			let n = 0;
+			function bump(): number { return ++n; }
+			export function voidOperator(): number { void bump(); const v = void bump(); return (v === undefined ? 10 : 0) + n; }
+		`);
+		check('void evaluates its operand and is undefined', voidOperator(), 12);
+	}
+
+	{
 		// An assertion converts nothing (wasm-backend.ts's `{ ...(map.thisWtype! as { ref: string }), nullable: true }`): the value keeps the struct of the
 		// union member it is, whether held in a slot of the asserted shape or spread.
 		const { assertedSlot, assertedSpread } = await compile(`
