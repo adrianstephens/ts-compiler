@@ -15,8 +15,9 @@ dir, `assistant/`, `test/` moved with it; tison keeps only the parser generator 
 memories resolve through the rename ledger in MEMORY.md. Run everything from the WORKSPACE ROOT (`node_modules` is there),
 e.g. `bash compiler/assistant/selfhost-survey.sh`. The survey compiles `compiler/src/...` and `tison/src/...` targets from a
 snapshot (`selfhost-snapshot.sh` takes tison, compiler, binary-libs, binary). Verified after the split: all suites, corpus gate
-838 = baseline, `vsdg-check.sh`, survey end to end. **Run the survey with `SURVEY_HEAP_MB=6144`** -- `wasm/codegen.ts --whole` and
-wasm-backend.ts slice 0 peak above the 2 GB default and report CRASHED otherwise. **6144 x the default 8 workers swapped this
+838 = baseline, `vsdg-check.sh`, survey end to end. **The survey's worker heap defaults to 6144 MB** (2026-10-06; it was 2048, and a run
+launched without `SURVEY_HEAP_MB=6144` OOMed every wasm-backend.ts and binary-libs wasm.ts slice: a wasm-backend probe keeps ~2.1 GB
+after GC, half of it the imports' checks). A crashed worker's log line now carries V8's FATAL message. **6144 x the default 8 workers swapped this
 16 GB Mac to a halt (2026-10-01)**: the scheduler now costs every job at >= half the heap cap (V8's garbage ceiling), so 6144
 runs ~2 workers here -- slower, but the machine stays usable. Ask before a full run; `SURVEY_JOBS` caps it further.
 
@@ -206,7 +207,7 @@ cannot be a string. Options put to the user: (1) offset+length packed in an `i64
 Slow (~20-35 min) and causes friction: run it deliberately, not after every commit (2026-09-22 ran it per commit -- don't). Gates are
 difftest, the corpus A/B (for checker/lib changes) and the suites. It catches what suites miss (it found the `x as T` operand gap), so
 run it after a change to how the backend READS types. Read `REGRESSED` against a run with no **NOT A BASELINE** banner (it hashes
-`compiler/src` at start and end). Use `SURVEY_HEAP_MB=6144`.
+`compiler/src` at start and end).
 
 ## Open, NOT fixed
 
