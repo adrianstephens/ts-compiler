@@ -92,7 +92,7 @@ function expandMacro(ctx: ParseCtx, macro: MacroDef, args: WatInstr[][]): WatIns
 		if (i.op === '__local' && i.id) {
 			const newid = `${i.id}__${++ctx.macroUid}`;
 			renames.set(i.id, newid);
-			return {...i, id: newid };
+			return [{ ...i, id: newid }];
 		}
 
 		if (typeof i.localIndex === 'string') {
