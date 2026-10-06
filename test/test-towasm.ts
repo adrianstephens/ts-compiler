@@ -4927,6 +4927,20 @@ async function main() {
 	}
 
 	{
+		// `a && f()` as a VALUE with a `void` `f`: the call, then `undefined` (wasm-backend.ts's `match = (d, r) => d && r && T.inferTypeArgs(...)`).
+		const { voidAndValue } = await compile(`
+			let hits = 0;
+			function note(x: number): void { hits += x; }
+			export function voidAndValue(): number {
+				const m = (a: number | undefined, b: number | undefined) => a && b && note(a + b);
+				m(1, 2); m(undefined, 5); const r = m(3, 4);
+				return hits * 10 + (r === undefined ? 1 : 0);
+			}
+		`);
+		check('a && f() with a void f, as a value', voidAndValue(), 101);
+	}
+
+	{
 		// `void x` evaluates `x` for its effects and is `undefined`, as a statement or a value.
 		const { voidOperator } = await compile(`
 			let n = 0;

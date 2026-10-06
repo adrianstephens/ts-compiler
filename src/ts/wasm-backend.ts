@@ -6624,11 +6624,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						}
 						const leftWtype		= wtypeOf(left, ctx);
 						const rightWtype	= operator === '??' ? undefined : wtypeOf(right, ctx);
-						if (!leftWtype || leftWtype === 'void' || rightWtype === 'void')
+						if (!leftWtype || leftWtype === 'void')
 							throw `'${operator}' needs both operands to have a representable value type`;
+						// A `void` right (`a && f()`) is the call, then `undefined`, as JS gives its value.
+						const voidRight = rightWtype === 'void';
 						// Both sides' form when they agree, else the whole expression's type (the checker's can be narrower than both operands). A right with no
 						// representation of its own (a bare `undefined`) is emitted into it.
-						const self = rightWtype && W.typeEq(leftWtype, rightWtype) ? leftWtype : wtypeOf(e, ctx);
+						const whole	= rightWtype && !voidRight && W.typeEq(leftWtype, rightWtype) ? leftWtype : wtypeOf(e, ctx);
+						const self	= voidRight && (!whole || whole === 'void') ? W.REF_ANY_NULLABLE : whole;
 						if (!self)
 							throw `'${operator}' has an unsupported result type`;
 						// An object-shaped result is BUILT at the caller's type: struct fields are invariant, so a literal operand can't be converted afterwards.
@@ -6640,7 +6643,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						}
 						emitAs(left, ctx, leftWtype);
 						const leftT = ctx.narrowedTypeOf(left);
-						emitShortCircuit(operator, leftWtype, leftT, wtype, () => emitAs(right, ctx, wtype), held => {
+						const emitRight = () => voidRight ? (emitDiscarded(right, ctx), void emitAs(Identifier('undefined'), ctx, wtype)) : void emitAs(right, ctx, wtype);
+						emitShortCircuit(operator, leftWtype, leftT, wtype, emitRight, held => {
 							// When the kept part of the left is only null/undefined, the result is its type's own `undefined`, not the left's physical value.
 							if (T.isNullish(T.logicalLeftPart(leftT, operator, ctx.scope), ctx.scope))
 								return void emitAs(Identifier('undefined'), ctx, wtype);
