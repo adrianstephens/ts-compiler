@@ -6310,7 +6310,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 							const src: FieldSource = { spreadLocal, unionCls, dynamic: anyOperand ? [] : dynamic, nullable: anyOperand || solid.length < parts.length };
 							const keys = unionCls ? unionCls.flatMap(m => m.fields.map(f => f.name))
 								: anyOperand ? owner.fields.filter(f => !f.name.startsWith('#')).map(f => f.name)
-								: dynamic!.flatMap(m => m.members.map(k => k.type === 'property' && T.memberKey(k.key)).filter((k): k is string => !!k));
+								// A shape's method member is an own function-valued property, copied as a field is (`spreadKeys`); a class's is on its prototype.
+								: dynamic!.flatMap((m, i) => m.members.map(k => (k.type === 'property' || (k.type === 'method' && !T.isClassRef(solid[i], ctx.scope))) && T.memberKey(k.key)).filter((k): k is string => !!k));
 							for (const name of new Set(keys))
 								addSource(name, src);
 							continue;

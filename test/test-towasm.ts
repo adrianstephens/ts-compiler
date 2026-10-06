@@ -4939,6 +4939,16 @@ async function main() {
 			export function spreadMethodMember(): number { const v = mk(4); const u: H = { ...v, t: 'x' }; return u.push() * 10 + u.w + (u.t === 'x' ? 100 : 0); }
 		`);
 		check("a spread copies an interface's method member", spreadMethodMember(), 184);
+		// ...and so does a spread of an operand read by name (an open shape: a callback's parameter, into an array literal's element).
+		const { spreadMethodMemberDynamic } = await compile(`
+			export function spreadMethodMemberDynamic(): number {
+				interface H { w: number; push(): number; t?: string }
+				const call = (args: H[]) => args.reduce((s, a) => s + a.push() + (a.t === 'x' ? 100 : 0), 0);
+				const store = (f: (value: H) => number) => f({ w: 4, push: () => 8 });
+				return store(value => call([{ w: 1, push: () => 1 }, { ...value, t: 'x' }]));
+			}
+		`);
+		check("a spread read by name copies a method member", spreadMethodMemberDynamic(), 109);
 	}
 
 	{
