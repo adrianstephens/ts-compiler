@@ -4530,9 +4530,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			case 'callMethod':
 				return emitFunctionCallMethod(c.fn, e.arguments, ctx, want);
 			case 'self': {
-				const { funcIndex, params, result, hasRest } = ctx.selfCall!;
+				const { funcIndex, params, result, hasRest, defaults, resolvedParams } = ctx.selfCall!;
 				ctx.emit(I.local.get(ctx.closureEnv!.envLocal.index));
-				emitCallArgs(c.name, params, undefined, !!hasRest, e.arguments, ctx);
+				// An omitted optional or defaulted argument as any call of the closure passes it (`defaults`).
+				emitCallArgs(c.name, params, defaults, !!hasRest, e.arguments, ctx, resolvedParams);
 				ctx.emit(I.call(funcIndex));
 				return result;
 			}

@@ -4932,6 +4932,19 @@ async function main() {
 	}
 
 	{
+		// A nested function's direct self-call omitting a defaulted or optional argument (wasm-backend.ts's `noteTypes(se, ve, scope, depth - 1)`).
+		const { selfCallDefaults } = await compile(`
+			export function selfCallDefaults(): number {
+				let hits = 0;
+				function walk(n: number, depth = 4, tag?: string): void { hits += depth + (tag ? 100 : 0); if (n > 0) walk(n - 1, depth - 1); }
+				walk(2, 4, 'x');
+				return hits;
+			}
+		`);
+		check('a self-call omitting a defaulted or optional argument', selfCallDefaults(), 109);
+	}
+
+	{
 		// A conditional of `void` calls (an arrow's body: `() => neg ? ctx.emit(...) : (f(), ctx.emit(...))`) runs only the chosen branch.
 		const { voidConditional } = await compile(`
 			let n = 0;
