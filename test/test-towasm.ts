@@ -4859,6 +4859,18 @@ async function main() {
 	}
 
 	{
+		// An `any` narrowed to an array (`Array.isArray`) may hold any array's storage: its reads dispatch at run time, in a closure too.
+		const { isArrayAny, isArrayAnyClosure } = await compile(`
+			function len(v: any): number { if (Array.isArray(v)) return v.length * 10 + (v[1] as number); return -1; }
+			function lenC(v: any): number { if (Array.isArray(v)) { const f = () => v.length; return f(); } return -1; }
+			export function isArrayAny(): number { const a: number[] = [5, 6]; return len(a); }
+			export function isArrayAnyClosure(): number { const a: number[] = [5, 6, 7]; return lenC(a); }
+		`);
+		check('an any narrowed by Array.isArray reads a number array', isArrayAny(), 26);
+		check('an any narrowed by Array.isArray reads a number array in a closure', isArrayAnyClosure(), 3);
+	}
+
+	{
 		// `Array`'s `keys()`/`values()`/`entries()`, live as its iterator is.
 		const { arrayIterators } = await compile(`
 			export function arrayIterators(): number { const a = [5, 6, 7]; let s = 0; for (const [i, v] of a.entries()) s += i * v; for (const k of a.keys()) s += k * 100; for (const v of a.values()) s += v * 1000; return s; }

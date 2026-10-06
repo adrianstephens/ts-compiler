@@ -2901,6 +2901,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		// must stay `void`, or the union dispatch compiling it asks every arm for a boxed value it never had.
 		const narrowed = ctx.narrowedTypeOf(e);
 		const isVoid   = T.isRef(T.resolveOwn(narrowed, ctx.scope), 'void');
+		// An erased value narrowed to an array (`Array.isArray(v)`) may be any array's storage, which no type says: still `any`, its reads dispatched.
+		if (T.isAny(base) && T.unionMembers(narrowed, ctx.scope).some(m => arrayPartOf(m, ctx.scope)))
+			return W.REF_ANY;
 		return typeOf(isVoid || !T.isNullish(narrowed, ctx.scope) ? narrowed : base);
 	}
 
