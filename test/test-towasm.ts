@@ -1764,6 +1764,17 @@ async function main() {
 		}, 'main');
 		check("super(...) inlines a base constructor naming its own module's bindings", superOtherModule(), 50);
 		check("super(...) inlines a factory class's constructor reading its parameter", superFactory(), 8);
+		// A type parameter's default names its own module's types, wherever it is filled in (`ClassDecl<Type>`'s `M = ClassMember<T>`).
+		const { defaultTypeArg } = await compileMulti({
+			lib:	`interface Mx<T> { type: 'method'; t?: T; n: number }
+				interface Fx<T> { type: 'field'; t?: T; v: number }
+				export type CM<T> = Mx<T> | Fx<T>;
+				export interface Cls<T, M = CM<T>> { body: M[] }`,
+			main:	`import * as L from './lib';
+				function count(c: L.Cls<string>): number { return c.body.map(m => m).length; }
+				export function defaultTypeArg(): number { return count({ body: [{ type: 'method', n: 1 }, { type: 'field', v: 2 }] }); }`,
+		}, 'main');
+		check("a type parameter's default resolves in its own module", defaultTypeArg(), 2);
 		// Node's global `process` is the `node:process` module, imported where a module reads it free; a parameter or method's `process` is not it.
 		const { nodeProcess } = await compileMulti({
 			lib:	`export function shadow(process: number): number { return process + 1; } export class K { m(process: number) { return process * 2; } }`,

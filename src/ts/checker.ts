@@ -1432,6 +1432,18 @@ function globalObject(stmts: Stmt[], scope: Scope): Type {
 	return outer ? TS.IntersectionType([outer, own]) : own;
 }
 
+// A declaration's type parameters' defaults and constraints name types of its own module: a default filled in where the type is used
+// (`Cls<string>` for `Cls<T, M = CM<T>>`) must still resolve there. Its own parameters stay unstamped, bound per use.
+function stampTypeParams(tps: TS.TypeParam[] | undefined, scope: Scope) {
+	const own = new Set(tps?.map(p => p.name));
+	for (const p of tps ?? []) {
+		if (p.default)
+			T.stampScope(p.default, scope, own);
+		if (p.constraint)
+			T.stampScope(p.constraint, scope, own);
+	}
+}
+
 function hoist(block: Stmt[], scope: Scope) {
 	const fnGroups = new Map<string, JS.FunctionDecl<any>[]>();
 	// `declare global` in a block that is already global (the lib's root, a script) declares here; a module's is not merged yet.
@@ -1445,8 +1457,10 @@ function hoist(block: Stmt[], scope: Scope) {
 		if (stmt.type === 'export_decl')
 			stmt = stmt.declaration;
 		if (stmt.type === 'type_alias_decl') {
+			stampTypeParams(stmt.typeParams as TS.TypeParam[], scope);
 			scope.addType(stmt.name, T.stampScope(T.markModifiersTypes(stmt.value, stmt.typeParams as TS.TypeParam[]), scope), stmt.typeParams);
 		} else if (stmt.type === 'interface_decl') {
+			stampTypeParams(stmt.typeParams as TS.TypeParam[], scope);
 			const obj = T.stampScope(TS.ObjectType(stmt.body), scope);
 			T.declaredShapes.add(obj);
 			// Inherited parts FIRST, own members LAST: the order `mergeType` uses, which `lookupMember`'s reversal turns into override precedence.
@@ -1463,6 +1477,7 @@ function hoist(block: Stmt[], scope: Scope) {
 
 			case 'class_decl': {
 				// `stmt` was reassigned twice above, beyond this checker's narrowing.
+				stampTypeParams(stmt.typeParams as TS.TypeParam[], scope);
 				const { instance, value } = classShapes(stmt as TS.Class, scope);
 				scope.mergeType(stmt.name, instance, stmt.typeParams as TS.TypeParam[]);
 				// `mergeValue`, as `mergeType` above: a primitive wrapper is declared twice on purpose, and overwriting would lose its ambient call signature.
