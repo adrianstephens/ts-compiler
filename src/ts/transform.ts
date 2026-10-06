@@ -448,6 +448,8 @@ export interface PatternLowering {
 	temp?:		(role: string) => string;
 	iterates?:	(value: TS.Expr) => T.IterationTypes | undefined;
 	absent?:	(element: TS.Expr) => boolean;
+	// The keys an object rest takes where the value's type has one known set (a shape, a class instance's fields), less `omitted`.
+	restKeys?:	(value: TS.Expr, omitted: string[]) => string[] | undefined;
 	scope?:		Scope;
 }
 
@@ -497,11 +499,12 @@ export function lowerPattern(kind: JS.DeclarationKind, target: BindingTarget, va
 		sub(prop.value, prop.default ? Binary('??', propExpr, prop.default) : propExpr);
 		return key;
 	});
-	// `...rest`: every own key but the pattern's, as JS copies them: the value spread into a new object (rebuilt as its run-time class where it
-	// has no one layout), the pattern's keys deleted. Typed `any`, as the checker binds it.
+	// `...rest`: every own key but the pattern's, as JS copies them. Of one known set of keys, an object of the others; otherwise the value spread
+	// into a new object (rebuilt as its run-time class: a generic's, a union's), the pattern's keys deleted. Typed `any`, as the checker binds it.
 	if (target.rest) {
-		emit(JS.VarDecl(kind, JS.Var(target.rest, JS.ObjectExpr([JS.Spread(v())]), T.ANY)));
-		for (const key of keys)
+		const others = how.restKeys?.(v(), keys);
+		emit(JS.VarDecl(kind, JS.Var(target.rest, JS.ObjectExpr(others ? others.map(k => JS.Field(k, JS.Member(v(), k))) : [JS.Spread(v())]), T.ANY)));
+		for (const key of others ? [] : keys)
 			emit(ExprStmt(JS.JSUnary('delete', JS.Member(Identifier(target.rest), key))));
 	}
 }

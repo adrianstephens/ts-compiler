@@ -803,14 +803,18 @@ async function main() {
 		check('object pattern default (value undefined, default used)', objDefaultMissing(), 99);
 	}
 
-	await checkThrows('rest property in an object pattern is rejected', () => compile(`
-		class Point { x: number; y: number; constructor(x: number, y: number) { this.x = x; this.y = y; } }
-		export function f(): number {
-			const p = new Point(1, 2);
-			const { x, ...rest } = p;
-			return x;
-		}
-	`), /rest/);
+	{
+		// A rest property of a class instance: the other fields, copied.
+		const { classObjectRest } = await compile(`
+			class Point { x: number; y: number; constructor(x: number, y: number) { this.x = x; this.y = y; } }
+			export function classObjectRest(): number {
+				const p = new Point(1, 2);
+				const { x, ...rest } = p;
+				return x * 10 + rest.y;
+			}
+		`);
+		check('a rest property of a class instance', classObjectRest(), 12);
+	}
 
 	await checkThrows("a bare 'return' before every object-typed field is assigned is rejected", () => compile(`
 		class Inner { v: number; constructor() { this.v = 0; } }

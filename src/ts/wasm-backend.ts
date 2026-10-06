@@ -2970,16 +2970,26 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const held = temp('destructured');
 			// As the checker typed the right side, which is what the pattern reads it as (a literal's `[b, a]` is `number[]`, not its elements' machine ints).
 			emit(JS.VarDecl('const', JS.Var(held, value, T.widenLiterals(checkerTypeOf(value, ctx.scope)))));
-			lowerPattern('const', pattern(target), Identifier(held), undefined, { temp, scope: ctx.scope, iterates: e => iteratesByProtocol(e, ctx), absent: e => readsPastEnd(e, ctx) }, emit);
+			lowerPattern('const', pattern(target), Identifier(held), undefined, { temp, scope: ctx.scope, iterates: e => iteratesByProtocol(e, ctx), absent: e => readsPastEnd(e, ctx), restKeys: (e, omitted) => restKeysOf(e, omitted, ctx) }, emit);
 			for (const [t, name] of leaves)
 				emit(JS.ExprStmt(Assign<Expr, never>(t, Identifier(name))));
 			return want === 'void' ? 'void' : emitExpr(check(Identifier(held)), ctx, want);
 		});
 	}
 
+	// An object rest's keys where the value's type has one known set: a shape's or class instance's data properties, less `omitted`. Not for a
+	// union or a type parameter, whose value may hold more than any one member names.
+	function restKeysOf(e: Expr, omitted: string[], ctx: FunctionContext): string[] | undefined {
+		const t = T.nonNullable(ctx.narrowedTypeOf(e), ctx.scope);
+		const r = T.resolve(ctx.scope, t);
+		if (T.isAny(r) || r.type === 'union' || T.typeParamConstraint(t, ctx.scope) || !['object', 'intersection'].includes(T.resolveMembers(r, ctx.scope).type))
+			return undefined;
+		return T.collectMembers(r, ctx.scope).flatMap(m => m.type === 'property' && T.memberKey(m.key) !== undefined && !omitted.includes(T.memberKey(m.key)!) ? [T.memberKey(m.key)!] : []);
+	}
+
 	function emitPatternBinding(kind: JS.DeclarationKind, target: BindingTarget, value: Expr, typeAnnotation: Type | undefined, ctx: FunctionContext, scope: Scope): void {
 		const { temp, emit } = lowering(ctx, scope);
-		lowerPattern(kind, target, value, typeAnnotation, { temp, scope: ctx.scope, iterates: e => iteratesByProtocol(e, ctx), absent: e => readsPastEnd(e, ctx) }, emit);
+		lowerPattern(kind, target, value, typeAnnotation, { temp, scope: ctx.scope, iterates: e => iteratesByProtocol(e, ctx), absent: e => readsPastEnd(e, ctx), restKeys: (e, omitted) => restKeysOf(e, omitted, ctx) }, emit);
 	}
 
 	// Type arguments for a `new C(...)` that spells none out: the checker's, solved from the constructor's arguments, and the context's
