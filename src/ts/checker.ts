@@ -1610,6 +1610,9 @@ function hoistVar(scope: Scope, d: JS.Var<Type>, widen: boolean, typeAnnotation 
 		// TS 4.4 aliased conditions: a `const`'s initializer stays true for its lifetime, so narrowing the const narrows through what its initializer narrows.
 		if (!widen && d.init)
 			scope.addAlias(d);
+		// ...and an unannotated `const op = x.op` of a union-typed `x` IS `x.op`, as a destructured `const {op} = x` is (`bindPattern`).
+		if (!widen && !typeAnnotation && (d.init?.type === 'member' || d.init?.type === 'index') && T.pathKey(d.init) && T.resolve(scope, typeOf(d.init.object, scope, false)).type === 'union')
+			home.addSource(d.name, d.init);
 		// TS's assignment narrowing: a union-typed `const` reads as the members its initializer can be (`const e: E = E.ONE` is `E.ONE`). Not a `let`,
 		// whose narrowings reassignment never invalidates.
 		if (!widen && d.init && typeAnnotation) {

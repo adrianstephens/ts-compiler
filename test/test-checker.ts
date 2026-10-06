@@ -217,6 +217,8 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 	['an expando assignment declares, not narrows', 'const E = function () {}; E.prop = { x: 2 }; E.prop = { y: "" }; const n = E.prop.x || 0;', []],
 	// TS narrows a discriminant compared with a value typed as a union of literals, on the matching branch only.
 	['a discriminant compared with a literal-union value narrows', 'type A = { type: "a"; x: 1 } | { type: "b"; y: 2 } | { type: "c"; z: 3 }; function f(m: A, k: "a" | "b") { if (m.type === k) { const n: { type: "a"; x: 1 } | { type: "b"; y: 2 } = m; } }', []],
+	// TS 4.4 aliased discriminants: testing `const op = i.op` narrows `i`.
+	['a const aliasing a discriminant narrows its union', 'type I = { op: "a"; l: number[] } | { op: "b"; x: string }; function f(i: I) { const op = i.op; switch (op) { case "a": { const s: string = i.l; break; } } const o = { i }; const k = o.i.op; if (k === "b") { const n: number = o.i.x; } }', [NOT_ASSIGNABLE('number[]', 'string'), NOT_ASSIGNABLE('string', 'number')]],
 	['a literal-union comparand does not narrow the other branch', 'type A = { type: "a"; x: 1 } | { type: "b"; y: 2 } | { type: "c"; z: 3 }; function f(m: A, k: "a" | "b") { if (m.type !== k) { const o: { type: "c"; z: 3 } = m; } }', ['is not assignable']],
 	// A guard's false branch drops only members ASSIGNABLE to the guarded type: `R` (its `T` defaulted to `string`) is not an
 	// `R<'never'>`, so it stays. Dropping it narrowed `src.type === 'ref'` to `never` (type-utils.ts `isAssignable`'s `recurse`).
