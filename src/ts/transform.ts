@@ -489,14 +489,20 @@ export function lowerPattern(kind: JS.DeclarationKind, target: BindingTarget, va
 			sub(target.rest, JS.Call(JS.Member(v(), 'slice'), [Literal(target.elements.length)]));
 		return;
 	}
-	if (target.rest)
-		throw "a rest property ('...') in an object destructuring pattern is not supported -- it needs a new object type holding 'all fields but these'";
-	for (const prop of target.properties) {
+	const keys = target.properties.map(prop => {
 		const key = JS.keyName(prop.key);
 		if (key === undefined)
 			throw "a computed key ('[expr]') in an object destructuring pattern is not supported";
 		const propExpr = JS.Member(v(), key);
 		sub(prop.value, prop.default ? Binary('??', propExpr, prop.default) : propExpr);
+		return key;
+	});
+	// `...rest`: every own key but the pattern's, as JS copies them: the value spread into a new object (rebuilt as its run-time class where it
+	// has no one layout), the pattern's keys deleted. Typed `any`, as the checker binds it.
+	if (target.rest) {
+		emit(JS.VarDecl(kind, JS.Var(target.rest, JS.ObjectExpr([JS.Spread(v())]), T.ANY)));
+		for (const key of keys)
+			emit(ExprStmt(JS.JSUnary('delete', JS.Member(Identifier(target.rest), key))));
 	}
 }
 

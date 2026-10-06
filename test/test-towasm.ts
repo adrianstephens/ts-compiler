@@ -4932,6 +4932,23 @@ async function main() {
 	}
 
 	{
+		// An object rest (`{ scope, checkedType, ...rest } = n`, wasm-backend.ts's `unstamped`): a copy of the value without the pattern's keys.
+		const { objectRest } = await compile(`
+			interface N { kind: string; scope?: number; checkedType?: string; v: number; extra?: number[] }
+			function strip<T extends object>(n: T): T {
+				const { scope, checkedType, ...rest } = n as T & { scope?: unknown; checkedType?: unknown };
+				return rest as T;
+			}
+			export function objectRest(): number {
+				const n: N = { kind: 'k', scope: 3, checkedType: 'x', v: 7, extra: [1] };
+				const r = strip(n);
+				return (r.scope === undefined ? 1 : 0) + (r.checkedType === undefined ? 10 : 0) + r.v * 100 + r.kind.length * 1000 + (r.extra?.length ?? 0) * 10000 + (n.scope ?? 0) * 100000;
+			}
+		`);
+		check('an object rest copies every key but the pattern\'s', objectRest(), 311711);
+	}
+
+	{
 		// `localeCompare`: the root collation for printable ASCII, every pair as node orders it (a hash of 784 comparisons).
 		const { localeCompareAscii } = await compile(`
 			const WORDS = ['a', 'B', 'A', 'b', 'ab', 'Ab', 'aB', 'a-b', 'a_b', 'a1', 'a b', '10', '9', '', 'Z', 'z', 'zz', '#x', '$', '~', 'apple', 'Apple', 'APPLE', 'appl', 'a.b', 'a,b', 'x=1', 'x<1'];
