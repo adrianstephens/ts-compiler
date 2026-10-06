@@ -8787,7 +8787,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					// The rest takes every argument after the fixed ones, spreads included, as one array.
 					if (superCtor.rest)
 						bind(JS.VarDecl('const', JS.Var(superCtor.rest.key, JS.ArrayLit(call.arguments.slice(superCtor.params.length)), superCtor.rest.typeAnnotation)));
+					// The arguments were this class's; the base's body names what its own module (or factory binding) declares.
+					const outer = { scope: ctx.scope, home: ctx.homeModule };
+					ctx.scope		= new Scope(classScope(superClass));
+					ctx.homeModule	= superClass.homeModule ?? outer.home;
 					emitCtorStatements(superCtor, superClass, ctx, setField);
+					ctx.scope		= outer.scope;
+					ctx.homeModule	= outer.home;
 				});
 				emitParamPropertyInits();
 				emitOwnFieldInits();

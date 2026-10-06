@@ -1749,6 +1749,21 @@ async function main() {
 				export function nsInstanceof(): number { return isScope(new T.Scope(7)) * 10 + isScope(new T.Other()); }`,
 		}, 'main');
 		check("nsInstanceof() (instanceof NS.Class)", nsInstanceof(), 70);
+		// A base constructor inlined by `super(...)` names its OWN module's bindings (binary's `Class` reads `sync._stream`), and a factory class's its
+		// parameter, whichever module the subclass is in.
+		const { superOtherModule, superFactory } = await compileMulti({
+			k:		`export class Box { constructor(public n: number) {} }`,
+			lib:	`import * as K from './k';
+				export class Base { v: number; constructor(x: K.Box | number) { this.v = x instanceof K.Box ? x.n * 10 : x; } }
+				export function Make<T extends number>(spec: T) { return class { w: number; constructor(x: number) { this.w = x + spec; } }; }`,
+			main:	`import { Base, Make } from './lib'; import { Box } from './k';
+				class D extends Base { constructor(b: Box) { super(b); } }
+				class F extends Make(7) { constructor() { super(1); } }
+				export function superOtherModule(): number { return new D(new Box(5)).v; }
+				export function superFactory(): number { return new F().w; }`,
+		}, 'main');
+		check("super(...) inlines a base constructor naming its own module's bindings", superOtherModule(), 50);
+		check("super(...) inlines a factory class's constructor reading its parameter", superFactory(), 8);
 		// Node's global `process` is the `node:process` module, imported where a module reads it free; a parameter or method's `process` is not it.
 		const { nodeProcess } = await compileMulti({
 			lib:	`export function shadow(process: number): number { return process + 1; } export class K { m(process: number) { return process * 2; } }`,
