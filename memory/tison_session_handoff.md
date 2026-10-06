@@ -63,8 +63,16 @@ declaration overrides inherited (`IntersectionType.derived`); `void` operator; A
 own scope (`classScope`); type-param defaults stamped (`stampTypeParams`); `a && voidCall()` as a value; `void` locals; spread copies a
 shape's method members; void conditional; self-call defaults; BLOCK SCOPING in free-names (`freeIn` scoped, `ClosureEnv.frame`, locals
 before captures); destructuring assignment (`emitDestructuringAssign`); all-open union literal built as its own shape.
-**Next**: TStoWasm stops at `String.localeCompare` (wasm-backend.ts:1866 `layoutArgKey` sort): needs a collation decision from the user.
-Also transform.ts 337 SwitchCase rest (checker FP); wasm-backend's self-check ERRs. Re-run the survey (ask first) before trusting rows.
+Then: localeCompare (user's choice: root collation for ASCII, code-unit order beyond; `COLLATION_ORDER` from node); object rest in patterns
+(`restKeys` hook: one known key set -> literal of the others, else spread clone + deletes); computed `string` key reads a string index
+signature (`stringIndexSignatureOf`; was `any`).
+**Next (open)**: TStoWasm stops at "unknown field 'length'" on `v` typed `R` in a closure of binary's generic `Array(len, type)` instance:
+`R` is that function's LOCAL type alias (`type R = ReadType<T>[]`, the closure's param typed via `as put<R>`). The ref's stamped declScope
+holds the body's values (`x`, `len`) and module names but NOT the type `R`; a closure's ctx scope is the module's, so only the stamp could
+resolve it. Local aliases work in the checker and in every small repro tried (generic, cross-module, intersection callbacks, double cast):
+it depends on how the whole wasm-backend program reaches the instance. Next step: find who stamps the closure param's `R` (applyContextualParams
+in the instance re-check vs a template stamp kept by `substituteTypeParams`). Also transform.ts 337 SwitchCase rest (checker FP).
+Known checker leniency noted: an object rest binds `any` (TS: `Omit<T, keys>`). Re-run the survey (ask first) before trusting rows.
 Known gaps found: a generic instantiation is its own class (statics per instantiation); a literal with a method into a class-typed
 slot (`object literal for 'A' has unknown property`); `unknown + unknown` accepted; method values (`obj.m`) have no identity;
 `[].values().next().value` types `number | TResult` (a leaked type parameter); wasm lib has no `localeCompare` (wasm-backend.ts:1931,
