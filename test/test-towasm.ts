@@ -4847,6 +4847,15 @@ async function main() {
 	}
 
 	{
+		// A constructor assigning its fields in branches (codegen.ts's `Error`): the object is built up front, its fields written in place.
+		const { ctorBranchFields } = await compile(`
+			class E { msg: string; pos: number[]; constructor(err: string | E) { if (err instanceof E) { this.msg = err.msg + '!'; this.pos = err.pos; } else { this.msg = err; this.pos = [7]; } } }
+			export function ctorBranchFields(): number { const b = new E(new E('ab')); return b.msg.length * 10 + b.pos[0]; }
+		`);
+		check('a constructor assigning its fields in branches', ctorBranchFields(), 37);
+	}
+
+	{
 		// A nested function reading names a LATER destructuring binds (wasm-backend.ts's `const { accessorKeys, ... } = collectExpandoFields(...)`).
 		const { forwardDestructured } = await compile(`
 			function make() { return { a: 3, b: [1, 2] }; }

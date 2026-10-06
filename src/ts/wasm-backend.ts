@@ -774,8 +774,11 @@ function ctorNeedsEarlyThis(decl: TS.Class): boolean {
 	const mentionsThis	= (x: Expr) => walkerB(undefined, (y, process) => y.type === 'this' || process(y)).expression(x);
 	const fields		= decl.body.filter((m): m is JS.Field<Type> => m.type === 'field' && !m.modifiers?.includes('static'));
 	const dataFields	= new Set(fields.flatMap(f => typeof f.key !== 'object' ? [String(f.key)] : []));
+	// A plain field write other than a top-level `this.f = v` statement (one in a branch) needs the object: only those are collected. A compound
+	// one reads the field first, which the collect path checks is assigned.
 	const check			= () => walkerB(undefined, (x, process) =>
 			x.type === 'arrow' || x.type === 'function'		? mentionsThis(x)
+		:	x.type === 'assign' && !x.operator && x.target.type === 'member' && x.target.object.type === 'this' ? true
 		:	x.type === 'member' && x.object.type === 'this'	? !(typeof x.property === 'string' && dataFields.has(x.property))
 		:	x.type === 'this' || process(x));
 	if (fields.some(f => f.value && check().expression(f.value)))
