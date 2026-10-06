@@ -4932,6 +4932,18 @@ async function main() {
 	}
 
 	{
+		// A conditional of `void` calls (an arrow's body: `() => neg ? ctx.emit(...) : (f(), ctx.emit(...))`) runs only the chosen branch.
+		const { voidConditional } = await compile(`
+			let n = 0;
+			function a(): void { n += 1; }
+			function b(): void { n += 10; }
+			function run(f: () => void) { f(); }
+			export function voidConditional(): number { run(() => n > 0 ? a() : (b(), b())); run(() => n > 0 ? a() : b()); return n; }
+		`);
+		check('a conditional of void calls', voidConditional(), 21);
+	}
+
+	{
 		// A spread copies an interface's method member, an own function-valued property (wasm-backend.ts's `{ ...value, t: elementT }` of a `HeldArg`).
 		const { spreadMethodMember } = await compile(`
 			interface H { w: number; push(): number; t?: string }

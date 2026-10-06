@@ -6845,6 +6845,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				if (!wtype)
 					throw 'conditional expression has an unsupported type';
 				emitTruthy(e.test, ctx);
+				// Of `void` (`c ? f() : g()` as an arrow's body): only the chosen branch's effects.
+				if (wtype === 'void') {
+					ctx.emitIf(undefined, () => emitDiscarded(e.consequent, ctx), () => emitDiscarded(e.alternate, ctx));
+					return 'void';
+				}
 				ctx.emitIf(toValType(wtype),
 					() => emitAs(e.consequent, ctx, wtype),
 					() => emitAs(e.alternate, ctx, wtype));
