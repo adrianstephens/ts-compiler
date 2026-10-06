@@ -4132,6 +4132,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// `value`'s elements (on the stack as `got`: other raw storage, an indexable class, or a boxed `any`), read through its `length` and index,
 	// converted to `want`, into new storage in `dst`; read now, so a later element (`[...a, a.pop()]`) cannot change them.
 	function copyElements(value: Expr, got: W.Type, ctx: FunctionContext, want: W.Type, typeIndex: number, dst: number): void {
+		// A spread of `null`/`undefined` throws in JS: an `any` operand is held non-null, the cast trapping.
+		if (W.isAny(got)) {
+			coerceTop(got, ctx, W.REF_ANY);
+			got = W.REF_ANY;
+		}
 		const n			= ctx.tempCounter++;
 		const from		= ctx.temp(`$spread$from$${n}`, got), i = ctx.temp(`$spread$at$${n}`, 'i32');
 		// A string's storage is read as a string, through its class.

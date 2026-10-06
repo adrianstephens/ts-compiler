@@ -4853,6 +4853,12 @@ async function main() {
 			export function ctorBranchFields(): number { const b = new E(new E('ab')); return b.msg.length * 10 + b.pos[0]; }
 		`);
 		check('a constructor assigning its fields in branches', ctorBranchFields(), 37);
+		// `[...v]` of an `any` value reads it non-null (a nullish one throws, as JS's spread does).
+		const { spreadAny } = await compile(`
+			function g(v: any): number { const a: string[] = [...v, 'z']; return a.length; }
+			export function spreadAny(): number { return g(['x', 'y']); }
+		`);
+		check('a spread of an any value', spreadAny(), 3);
 	}
 
 	{
