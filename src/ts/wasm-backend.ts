@@ -1398,10 +1398,11 @@ function collectExpandoFields(
 			const prior = pendingExtensions.get(name);
 			if (prior === 'dynamic')
 				continue;
+			// A key some `defineProperty` may make non-enumerable lives in `#ext`, whose map keeps enumerability; a field has none.
 			if (key === undefined)
 				pendingExtensions.set(name, 'dynamic');
 			else if (!(shape ? shape.members.some(m => 'key' in m && m.key === key) : T.lookupMember(part, key, scope)))
-				pendingExtensions.set(name, [...new Set([...(prior ?? []), key])]);
+				pendingExtensions.set(name, hiddenKeys.has(key) ? 'dynamic' : [...new Set([...(prior ?? []), key])]);
 		}
 	};
 	// A key written onto a receiver whose static type names no struct (a type parameter, `any`, `object`) lands on what it holds at run time: the receiver is
@@ -1418,6 +1419,7 @@ function collectExpandoFields(
 	const calls: Call[]			= [];
 	const assigns: { target: Site; value: Site }[]	= [];
 	const writes: { s: Site; key?: string; accessor?: boolean; built?: boolean }[]	= [];
+	const hiddenKeys = new Set<string>();
 
 	const bindingIn = (node: object): Binding => bindingAt.get(node) ?? (b => (bindingAt.set(node, b), b))({ values: [] });
 	const enter = (node: object, sig: TS.CallSig, scope: Scope): Fn => {
@@ -1497,8 +1499,13 @@ function collectExpandoFields(
 					calls.push({ callee: site(e.callee), args: e.arguments.map(a => a.type === 'spread' ? undefined : site(a)) });
 					if (isDefinePropertyCall(e) && e.arguments[0]) {
 						const key = e.arguments[1], desc = e.arguments[2];
-						writes.push({ s: site(e.arguments[0]), key: key?.type === 'literal' && typeof key.value === 'string' ? key.value : undefined,
-							accessor: desc?.type === 'object' && desc.properties.some(q => (q.type === 'field' || q.type === 'method') && (q.key === 'get' || q.key === 'set')) });
+						const name		= key?.type === 'literal' && typeof key.value === 'string' ? key.value : undefined;
+						const member	= (k: string) => desc?.type === 'object' ? desc.properties.find(q => (q.type === 'field' || q.type === 'method') && q.key === k) : undefined;
+						const accessor	= !!member('get') || !!member('set');
+						const shown		= member('enumerable');
+						writes.push({ s: site(e.arguments[0]), key: name, accessor });
+						if (name !== undefined && !accessor && !(shown?.type === 'field' && shown.value?.type === 'literal' && shown.value.value === true))
+							hiddenKeys.add(name);
 					}
 					const assign = objectAssignCall(e);
 					for (const w of assign?.writes ?? [])
@@ -2911,6 +2918,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// One shared cloner per written-key list (`undefined` marks the spread, so parameters follow evaluation order). Each arm rebuilds the class the value
 	// turns out to be, written keys overridden. On the LATE worklist: the candidates are every class that can hold these keys, known only at the end.
 	function ensureAnySpreadClone(slots: (string | undefined)[]): FuncInfo {
+		anySpreadCloned = true;
 		return synthesize(`<any spread>.${slots.map(k => k ?? '...').join(',')}`, () => ({
 			params: slots.map((k, i) => k === undefined ? param('src') : param(`val$${i}`, W.REF_ANY_NULLABLE)), result: W.REF_ANY,
 		}), (dctx, locals, { result }) => {
@@ -2927,23 +2935,44 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			emitTypeCascade(dctx, locals[spreadAt], owners.map(({ heap, cls }) => ({ heap, emit: () => {
 				const src = dctx.temp(`$spreadsrc$${heap}`, cls.thisWtype!);
 				dctx.emit(I.local.set(src));
-				for (const f of cls.fields) {
-					const val = vals.get(f.name);
+				const out = cls.callable ? plainShapeOf(cls) : cls;
+				for (const f of out.fields) {
+					const val = vals.get(f.name), from = cls.fieldIndex.get(f.name);
 					if (val !== undefined) {
 						dctx.emit(I.local.get(val));
 						coerceTop(W.REF_ANY_NULLABLE, dctx, f.wtype);
-					} else if (f.name.startsWith('#')) {
+					} else if (from !== undefined && f.name === '#ext') {
+						// Its enumerable keys only, as JS copies own enumerable properties.
+						emitWithExt(cls, src, dctx, m => coerceTop(emitCallOn(m, 'spreadCopy', [], dctx), dctx, f.wtype), () => dctx.emitDefaultValue(f.wtype, types, toValType), f.wtype);
+					} else if (from === undefined || f.name.startsWith('#get:') || f.name.startsWith('#set:')) {
 						// A spread copies VALUES, so an accessor companion never carries over -- the field's own read already called it.
 						dctx.emitDefaultValue(f.wtype, types, toValType);
 					} else {
 						dctx.emit(I.local.get(src));
-						emitFieldRead(cls, cls.fieldIndex.get(f.name)!, dctx);
+						coerceTop(emitFieldRead(cls, from, dctx), dctx, f.wtype);
 					}
 				}
-				dctx.emit(I.struct.new(heap as number));
-				coerceTop(cls.thisWtype!, dctx, result);
+				dctx.emit(I.struct.new(out.typeIndex));
+				coerceTop(out.thisWtype!, dctx, result);
 			} })), trap(dctx), result);
 		});
+	}
+
+	// What `{...fn}` of a callable object is: a plain object of its properties, since JS copies no callability. Made before the late
+	// worklist (`ensurePlainShapes`), whose cascades take the final candidate set.
+	const plainShapeType = (cls: ClassInfo) => TS.ObjectType(T.collectMembers(cls.thisTsType, cls.declScope ?? libGlobal).filter(m => m.type !== 'call' && m.type !== 'construct'));
+	function plainShapeOf(cls: ClassInfo): ClassInfo {
+		const plain = classes.get(T.typeKey(plainShapeType(cls)));
+		if (!plain)
+			throw `the properties of callable '${cls.name}' have no plain object shape, which '{...fn}' of one builds`;
+		return plain;
+	}
+	let anySpreadCloned = false;
+	function ensurePlainShapes() {
+		if (anySpreadCloned)
+			for (const cls of new Set(classes.values()))
+				if (cls.callable)
+					ensureAnonObjectShape(plainShapeType(cls));
 	}
 
 	// A literal whose SHAPE is a run-time fact: a spread of a union (`{ ...e }`), or a discriminant holding a union of literals (`{ type, ...sig }`).
@@ -9641,7 +9670,23 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				...methods.map(c => ({ heap: c.heap, emit: () => {
 					if (c.boxed)
 						dctx.emit(I.struct.get(c.heap as number, 0));
-					dispatchArm(dctx, args, argWtypes, c.funcInfo.params, c.funcInfo.defaults ?? [], want, push => (push(), dctx.emit(I.call(c.funcInfo.funcIndex)), c.funcInfo.result), name);
+					const method	= () => dispatchArm(dctx, args, argWtypes, c.funcInfo.params, c.funcInfo.defaults ?? [], want, push => (push(), dctx.emit(I.call(c.funcInfo.funcIndex)), c.funcInfo.result), name);
+					const own		= c.boxed ? undefined : c.cls.fieldIndex.get(`#own:${name}`);
+					if (own === undefined)
+						return method();
+					// This instance's own override when its slot is set, else the method, as `emitMethodCall` calls one.
+					const slot = c.cls.fields[own].wtype;
+					const recv = dctx.temp(`$own$recv$${c.heap}`, c.cls.thisWtype!), fn = dctx.temp(`$own$fn$${c.heap}`, slot);
+					dctx.emit(I.local.tee(recv), I.struct.get(c.cls.typeIndex, own), I.local.tee(fn), I.ref.is_null);
+					dctx.emitIf(want === 'void' ? undefined : toValType(want), () => {
+						dctx.emit(I.local.get(recv));
+						method();
+					}, () => {
+						const callable: W.ClosureType = { ...closurePart(slot)!, nullable: false };
+						dctx.emit(I.local.get(fn));
+						coerceTop(slot, dctx, callable);
+						emitHeldCall(dctx, callable, args, argWtypes, want);
+					});
 				} })),
 				...held.map(({ cls, idx, wt }) => ({ heap: cls.typeIndex, emit: () => {
 					const callable: W.ClosureType = { ...wt, nullable: false };
@@ -10050,6 +10095,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 	// `lateWorklist` (any-dispatch cascades) needs the final candidate set, so it starts once `worklist` drains, and drains it again after each item.
+	ensurePlainShapes();
+	while (worklist.length)
+		worklist.shift()!();
 	while (lateWorklist.length) {
 		lateWorklist.shift()!();
 		while (worklist.length)

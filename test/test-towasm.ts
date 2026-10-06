@@ -5398,6 +5398,37 @@ async function main() {
 	}
 
 	{
+		// `{...v}` of an `any`: an instance's own method override carries over (and a call through `any` honours it); a non-enumerable defined key
+		// does not; a callable object's spread is a plain object of its properties.
+		const { spreadOwn, spreadFn, anyOwnCall } = await compile(`
+			class S { n = 1; hook(x: number): number { return x; } }
+			interface Fn { (x: number): number; tag: number }
+			function clone(v: any): any { return { ...v }; }
+			function id(v: any): any { return v; }
+			function make(): S {
+				const s = new S();
+				s.hook = (x: number) => x * 10;
+				Object.defineProperty(s, 'hidden', { value: 5 });
+				Object.defineProperty(s, 'shown', { value: 6, enumerable: true });
+				return s;
+			}
+			export function spreadOwn(): number {
+				const c = clone(make());
+				return c.n * 1000 + c.hook(2) * 10 + (c.hidden === undefined ? 1 : 0) + c.shown * 100;
+			}
+			export function spreadFn(): number {
+				const f: Fn = Object.assign((x: number) => x + 1, { tag: 7 });
+				const c = clone(f);
+				return c.tag * 10 + (typeof c === 'object' ? 1 : 0);
+			}
+			export function anyOwnCall(): number { const r: number = id(make()).hook(3); return r; }
+		`);
+		check('{...any} keeps an own method override and drops a non-enumerable key', spreadOwn(), 1801);
+		check('{...any} of a callable object is a plain object of its properties', spreadFn(), 71);
+		check('a method call through any honours an instance\'s own override', anyOwnCall(), 30);
+	}
+
+	{
 		// Callbacks the checker's own code passes: a no-rest closure where a rest is offered (checker.ts's `MUTED: Err`), an unannotated rest
 		// bound from its context, a closure to a parameter typed by its default, and `joinFlow`'s spread over an inferred-predicate filter.
 		const { tagCallbacks, defaultTypedParam, filteredSpread } = await compile(`

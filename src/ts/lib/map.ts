@@ -98,6 +98,14 @@ class Map<K, V> {
 	enumerable(key: K): boolean {
 		return !this.hidden_?.has(key);
 	}
+	// `{...o}`'s copy of these entries as an object's own keys: the enumerable ones, each an ordinary entry.
+	spreadCopy(): Map<K, V> {
+		const out = new Map<K, V>();
+		for (let i = 0; i < this.keys_.length; i++)
+			if (this.enumerable(this.keys_[i]))
+				out.set(this.keys_[i], this.values_[i]);
+		return out;
+	}
 
 	// Snapshots (plain arrays), not live iterators; iterating the Map itself (`[Symbol.iterator]`) is the live path.
 	keys(): K[]			{ return this.keys_.slice(); }
