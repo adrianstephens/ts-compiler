@@ -4932,6 +4932,21 @@ async function main() {
 	}
 
 	{
+		// `localeCompare`: the root collation for printable ASCII, every pair as node orders it (a hash of 784 comparisons).
+		const { localeCompareAscii } = await compile(`
+			const WORDS = ['a', 'B', 'A', 'b', 'ab', 'Ab', 'aB', 'a-b', 'a_b', 'a1', 'a b', '10', '9', '', 'Z', 'z', 'zz', '#x', '$', '~', 'apple', 'Apple', 'APPLE', 'appl', 'a.b', 'a,b', 'x=1', 'x<1'];
+			export function localeCompareAscii(): number {
+				let h = 0;
+				for (let i = 0; i < WORDS.length; i++)
+					for (let j = 0; j < WORDS.length; j++)
+						h = (h * 3 + WORDS[i].localeCompare(WORDS[j]) + 1) % 1000000007;
+				return h;
+			}
+		`);
+		check('localeCompare orders ASCII as node does', localeCompareAscii(), 941242530);
+	}
+
+	{
 		// Destructuring ASSIGNMENT to existing names and member paths (wasm-backend.ts's `[scope, current] = saved`): swaps, defaults, holes, a rest,
 		// an object pattern, in a loop body, and its value.
 		const { destructuringAssign } = await compile(`

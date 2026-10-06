@@ -453,4 +453,31 @@ export class String {
 	ge(b: string): boolean { return this.compare(b) >= 0; }
 	eq(b: string): boolean { return this.compare(b) === 0; }
 	ne(b: string): boolean { return this.compare(b) !== 0; }
+
+	// The default (root) collation for printable ASCII, as node orders it: symbols, digits, then letters, case-blind first, a shorter string
+	// first, then lowercase before uppercase at the first difference. Beyond ASCII, code-unit order: a documented gap (no collation tables).
+	localeCompare(that: string): number {
+		const n = Math.min(this.length, that.length);
+		for (let i = 0; i < n; i++) {
+			const a = collationWeight(this.charCodeAt(i)), b = collationWeight(that.charCodeAt(i));
+			if (a !== b)
+				return a < b ? -1 : 1;
+		}
+		if (this.length !== that.length)
+			return this.length < that.length ? -1 : 1;
+		for (let i = 0; i < n; i++) {
+			const c = this.charCodeAt(i);
+			if (c !== that.charCodeAt(i))
+				return c >= 97 && c <= 122 ? -1 : 1;
+		}
+		return 0;
+	}
+}
+
+// Printable ASCII in the root collation's order (`[...ascii].sort((a, b) => a.localeCompare(b))` under node), each letter's case pair together.
+const COLLATION_ORDER = " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ";
+// A code unit's primary weight: its place in that order, an uppercase letter its lowercase's; past ASCII, after it, in code-unit order.
+function collationWeight(c: number): number {
+	const i = c >= 32 && c < 127 ? COLLATION_ORDER.indexOf(String.fromCharCode(c >= 65 && c <= 90 ? c + 32 : c)) : -1;
+	return i >= 0 ? i : 1000 + c;
 }

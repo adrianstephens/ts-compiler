@@ -249,7 +249,7 @@ interface String {
 	concat(...strings: string[]): string;
 	indexOf(searchString: string, position?: number): number;
 	lastIndexOf(searchString: string, position?: number): number;
-//	localeCompare(that: string): number;
+	localeCompare(that: string): number;
 	match(regexp: string | RegExp): RegExpMatchArray | null;
 	replace(searchValue: string | RegExp, replaceValue: string): string;
 	replace(searchValue: string | RegExp, replacer: (substring: string, ...args: any[]) => string): string;
