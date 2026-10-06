@@ -43,8 +43,12 @@ snapshot = committed sources, refresh after committing binary).
 regression were fixed after it: a hoisted signature takes a non-literal default's type (`refreshParams` after the body; 166 rows);
 defineProperty honours `enumerable` (user's choice; `Map.define`/`hidden_`, `KeyOp` 'define' through every keyed op; 21+ rows); the
 backend re-types an original node against its stamped `expectedTypeOf` (`new Set()` into `ReadonlySet<T>`; 69 rows).
-**Next**: wasm-backend.ts's `process.env` (unresolved `process`: a host-environment decision for the user); self-check checker false
-positives (checker.ts 1213/1215 `Type | undefined` after a narrowing; transform.ts 337 SwitchCase rest; wasm-backend's 8 ERRs);
+Then: Node's global `process` IS `node:process` (user's choice, host-backed): `importNodeGlobals` adds the import where `moduleFree`
+(free-names.ts, the backend's free-variable analysis moved out and taught classes; now a survey target) finds it free;
+`markAbsenceTests` matches a tested name to its BINDING (closure by closure), not module-wide by name; wat-parser.ts:95 returned a bare
+object from an array-returning `substInstr` (user approved the source fix). codegen.ts makeAsm compiles.
+**Next**: wasm-backend.ts isAsm: "a slot with no value ... needs a nullable or scalar type" in `<any spread>`; self-check checker
+false positives (checker.ts 1213/1215 `Type | undefined` after a narrowing; transform.ts 337 SwitchCase rest; wasm-backend's ERRs);
 wasm.ts's "closure parameter 'v'" (7 rows). Re-run the survey (ask first) before trusting rows.
 Known gaps found: a generic instantiation is its own class (statics per instantiation); a literal with a method into a class-typed
 slot (`object literal for 'A' has unknown property`); `unknown + unknown` accepted; method values (`obj.m`) have no identity;
