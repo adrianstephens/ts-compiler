@@ -2448,18 +2448,21 @@ function constituents(t: Type, scope: Scope): Type[] {
 	});
 }
 const isUnit = (t: Type) => t.type === 'literal' || isRef(t, 'undefined') || isRef(t, 'null');
+// TS's discriminant property of a union: one some member types as a unit type (or a union of them).
+export function isDiscriminant(union: TS.UnionType, key: string, scope: Scope): boolean {
+	return union.types.some(t => { const p = lookupMember(t, key, scope); return !!p && constituents(p, scope).every(isUnit); });
+}
 
 // `src` once per combination of its discriminant properties' constituents (a property `dst`'s members discriminate on by a
 // unit type), as TS relates an object to a discriminated union; undefined when nothing splits or past TS's 25 combinations.
 function splitDiscriminants(src: TS.ObjectType | Extract<Type, { type: 'tuple' }>, dst: TS.UnionType, scope: Scope): Type[] | undefined {
-	const isDiscriminant = (key: string) => dst.types.some(t => { const p = lookupMember(t, key, scope); return !!p && constituents(p, scope).every(isUnit); });
 	// A tuple's positions are its properties (`["a" | "b", 1]` against `["a", number] | ["b", number]`).
 	const slots: [key: string, t: Type | undefined][] = src.type === 'tuple'
 		? src.elements.map((el, i) => [String(i), el.type === 'spread' ? undefined : tupleElementType(el)])
 		: src.members.map(m => [m.type === 'property' ? JS.keyName(m.key) ?? '' : '', m.type === 'property' ? m.typeAnnotation : undefined]);
 	const splits: { i: number; units: Type[] }[] = [];
 	slots.forEach(([key, t], i) => {
-		const units = t && key && isDiscriminant(key) ? constituents(t, scope) : [];
+		const units = t && key && isDiscriminant(dst, key, scope) ? constituents(t, scope) : [];
 		if (units.length > 1)
 			splits.push({ i, units });
 	});
