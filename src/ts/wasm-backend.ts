@@ -2976,11 +2976,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// The keys a spread operand may provide: what its TYPE says a value carries -- of a union, any member's. Not a struct's field
 	// list, which may hold more (an optional field the type lacks, an accessor's `#get:` companion) that no value ever supplies.
+	// A shape's method member (`push(): void` in an interface) is an own property holding a function, so it is copied; a class's lives on its prototype.
 	function spreadKeys(operand: Expr, ctx: FunctionContext): string[] | undefined {
 		const parts		= T.unionMembers(ctx.narrowedTypeOf(operand), ctx.scope).filter(m => !T.isNullish(m, ctx.scope));
-		const members	= parts.flatMap(m => T.collectMembers(m, ctx.scope));
-		return parts.every(m => ['object', 'intersection'].includes(T.resolveMembers(m, ctx.scope).type)) && !members.some(m => m.type === 'index')
-			? [...new Set(members.flatMap(m => m.type === 'property' ? [T.memberKey(m.key)] : []))].filter((k): k is string => !!k)
+		const members	= parts.flatMap(m => T.collectMembers(m, ctx.scope).map(member => ({ member, own: !T.isClassRef(m, ctx.scope) })));
+		return parts.every(m => ['object', 'intersection'].includes(T.resolveMembers(m, ctx.scope).type)) && !members.some(({ member }) => member.type === 'index')
+			? [...new Set(members.flatMap(({ member, own }) => member.type === 'property' || (own && member.type === 'method') ? [T.memberKey(member.key)] : []))].filter((k): k is string => !!k)
 			: undefined;
 	}
 

@@ -4932,6 +4932,16 @@ async function main() {
 	}
 
 	{
+		// A spread copies an interface's method member, an own function-valued property (wasm-backend.ts's `{ ...value, t: elementT }` of a `HeldArg`).
+		const { spreadMethodMember } = await compile(`
+			interface H { w: number; push(): number; t?: string }
+			function mk(w: number): H { return { w, push: () => w * 2 }; }
+			export function spreadMethodMember(): number { const v = mk(4); const u: H = { ...v, t: 'x' }; return u.push() * 10 + u.w + (u.t === 'x' ? 100 : 0); }
+		`);
+		check("a spread copies an interface's method member", spreadMethodMember(), 184);
+	}
+
+	{
 		// A generic instantiated at `void` (codegen.ts's `inScope<void>`): its `void` local holds `undefined`, its initializer run for effects.
 		const { voidLocal } = await compile(`
 			let n = 0;
