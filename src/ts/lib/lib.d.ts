@@ -382,6 +382,9 @@ interface Array<T> {
 	reduceRight(callbackfn: (previousValue: T, currentValue: T, currentIndex: number, array: T[]) => T, initialValue: T): T;
 	reduceRight<U>(callbackfn: (previousValue: U, currentValue: T, currentIndex: number, array: T[]) => U, initialValue: U): U;
 	[Symbol.iterator](): Generator<T, void, unknown>;
+	keys(): Generator<number, void, unknown>;
+	values(): Generator<T, void, unknown>;
+	entries(): Generator<[number, T], void, unknown>;
 }
 
 // As TS's `ArrayConstructor`: `Array` is callable WITHOUT `new` as well (`Array(n).fill(x)`, the standard
@@ -447,6 +450,9 @@ interface ReadonlyArray<T> {
 	reduceRight(callbackfn: (previousValue: T, currentValue: T, currentIndex: number, array: readonly T[]) => T, initialValue: T): T;
 	reduceRight<U>(callbackfn: (previousValue: U, currentValue: T, currentIndex: number, array: readonly T[]) => U, initialValue: U): U;
 	[Symbol.iterator](): Generator<T, void, unknown>;
+	keys(): Generator<number, void, unknown>;
+	values(): Generator<T, void, unknown>;
+	entries(): Generator<[number, T], void, unknown>;
 }
 
 // As TS's `MapConstructor`: a bare `new Map()` is `Map<any, any>`; the backend still builds it at its contextual instantiation (`newTypeArgs`),

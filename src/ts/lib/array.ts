@@ -354,6 +354,16 @@ export class Array<T> extends ArrayBase {
 	[Symbol.iterator](): Generator<T, void, unknown> {
 		return __towasm_indexed<T>(() => this.length, i => this[i]);
 	}
+	// Live, as the iterator above: each step reads the current length.
+	keys(): Generator<number, void, unknown> {
+		return __towasm_indexed<number>(() => this.length, i => i);
+	}
+	values(): Generator<T, void, unknown> {
+		return __towasm_indexed<T>(() => this.length, i => this[i]);
+	}
+	entries(): Generator<[number, T], void, unknown> {
+		return __towasm_indexed<[number, T]>(() => this.length, i => [i, this[i]]);
+	}
 	join(separator = ','): string {
 		let result = '';
 		for (let i = 0; i < this.length; i++) {

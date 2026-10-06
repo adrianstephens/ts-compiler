@@ -4859,6 +4859,14 @@ async function main() {
 	}
 
 	{
+		// `Array`'s `keys()`/`values()`/`entries()`, live as its iterator is.
+		const { arrayIterators } = await compile(`
+			export function arrayIterators(): number { const a = [5, 6, 7]; let s = 0; for (const [i, v] of a.entries()) s += i * v; for (const k of a.keys()) s += k * 100; for (const v of a.values()) s += v * 1000; return s; }
+		`);
+		check('Array keys/values/entries', arrayIterators(), 18320);
+	}
+
+	{
 		// `void x` evaluates `x` for its effects and is `undefined`, as a statement or a value.
 		const { voidOperator } = await compile(`
 			let n = 0;
