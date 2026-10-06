@@ -3534,6 +3534,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			return owners[0];
 		// Several fit (`{params, rest}` for `CallSig | Params`): the one that is a SUBTYPE of all the others is
 		// acceptable to every consumer (`interface CallSig extends Params` makes its struct a `Params` too).
+		// Every member that fits is OPEN (held as `any`, read by name): any struct serves, and the literal's own keys are the faithful one (`'k' in x`).
+		if (matches.length && matches.every(m => isOpen(m.raw))) {
+			const own = checkedTypeOf(e) && T.resolve(ctx.scope, T.widenLiterals(checkedTypeOf(e)!));
+			return (own?.type === 'object' ? ensureAnonObjectShape(own) : undefined) ?? owners[0];
+		}
 		return owners.find(o => o && owners.every(q => q && isSubclassOf(o.name, q.name)));
 	}
 
