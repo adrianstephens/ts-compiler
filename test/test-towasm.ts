@@ -4050,13 +4050,18 @@ async function main() {
 		check("returning a 'void' call from a 'void' arrow", voidCallReturned(), 2);
 	}
 
-	await checkThrows('void local is rejected', () => compile(`
-		export function noop(): void {}
-		export function f(): number {
-			const x = noop();
-			return 1;
-		}
-	`), /void/);
+	{
+		// A `void` local is legal TS (`x` is `undefined`): its initializer runs, and it holds `undefined`.
+		const { voidLocalPlain } = await compile(`
+			let n = 0;
+			export function noop(): void { n++; }
+			export function voidLocalPlain(): number {
+				const x = noop();
+				return n * 10 + (x === undefined ? 1 : 0);
+			}
+		`);
+		check('a void local holds undefined after running its initializer', voidLocalPlain(), 11);
+	}
 
 	await checkThrows("returning a value from a 'void' function is rejected", () => compile(`
 		export function f(): void { return 5; }
