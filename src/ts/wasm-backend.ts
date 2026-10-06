@@ -4772,7 +4772,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		});
 	}
 
-	// `Object.defineProperty(target, key, {value | get/set, ...})`: `enumerable`/`configurable`/`writable` have no effect without field reflection.
+	// `Object.defineProperty(target, key, {value | get/set, ...})`: `enumerable` holds where a map keeps the key (`#ext`, a dynamic object; `Map.define`),
+	// a declared field staying enumerable; `configurable`/`writable` have no effect.
 	// `target` must be a plain local, which `case 'var_decl'`'s extension redirect leaves a real slot to write into.
 	function emitObjectDefineProperty(args: Expr[], ctx: FunctionContext): W.Type {
 		if (args.length !== 3)
@@ -4789,7 +4790,16 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			throw "'Object.defineProperty': a descriptor's `value` must be a plain property";
 		if (!valueExpr && !getProp && !setProp)
 			throw "'Object.defineProperty': the descriptor needs a `value`, a `get` or a `set`";
-		// A key known only at run time (`typeId`'s symbol memo) has no slot of its own: it lands in the run-time struct's `#ext`.
+		const enumProp	= member('enumerable');
+		const enumExpr	= !enumProp ? Identifier('undefined') : enumProp.type === 'field' && enumProp.value;
+		if (!enumExpr)
+			throw "'Object.defineProperty': a descriptor's `enumerable` must be a plain property";
+		// The value and `enumerable` of a data definition through `any`, after the receiver (and key).
+		const pushDefined = (value: Expr) => {
+			emitAs(value, ctx, W.REF_ANY_NULLABLE);
+			emitAs(enumExpr, ctx, optBoolean());
+		};
+		// A key known only at run time (`typeId`'s symbol memo): the run-time receiver's, a string's by name and a symbol's in `#ext`.
 		if (keyExpr.type !== 'literal' || typeof keyExpr.value !== 'string') {
 			if (!valueExpr)
 				throw "'Object.defineProperty': an accessor needs a compile-time literal string key";
@@ -4798,8 +4808,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			ctx.emit(I.local.tee(held));
 			coerceTop(tw, ctx, W.REF_ANY);
 			emitAs(keyExpr, ctx, W.REF_ANY_NULLABLE);
-			emitAs(valueExpr, ctx, W.REF_ANY_NULLABLE);
-			ctx.emit(I.call(ensureExtKey('set').funcIndex), I.local.get(held));
+			pushDefined(valueExpr);
+			ctx.emit(I.call(ensureAnyProp('define').funcIndex), I.local.get(held));
 			return tw;
 		}
 		if (targetExpr.type !== 'identifier')
@@ -4824,8 +4834,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (!owner && W.isAny(wt)) {
 			if (valueExpr) {
 				emitAs(targetExpr, ctx, W.REF_ANY);
-				emitAs(valueExpr, ctx, W.REF_ANY_NULLABLE);
-				ctx.emit(I.call(ensureAnyFieldWrite(key).funcIndex));
+				pushDefined(valueExpr);
+				ctx.emit(I.call(ensureAnyFieldWrite(key, 'define').funcIndex));
 			}
 			for (const [half, p, w] of [['get', getProp, getterWtype()], ['set', setProp, setterWtype()]] as const)
 				if (p) {
@@ -4838,6 +4848,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		}
 		if (!owner)
 			throw `'Object.defineProperty': '${targetExpr.name}' needs a known class type`;
+		if (isDynamicObject(owner)) {
+			if (!valueExpr)
+				throw "'Object.defineProperty': an accessor on a dynamic object ('{[k: string]: V}') is not supported";
+			emitAs(targetExpr, ctx, owner.thisWtype!);
+			return emitMethodCall(owner, 'define', [Literal(key), valueExpr, enumExpr], ctx);
+		}
 
 		const scratch = ctx.declareLocal(`$defineProperty$${ctx.tempCounter++}`, owner.thisWtype!);
 		emitAs(targetExpr, ctx, owner.thisWtype!);
@@ -4863,29 +4879,20 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			return owner.thisWtype!;
 		}
 
-		ctx.emit(I.local.get(scratch.index));
 		const fieldIdx = owner.fieldIndex.get(key);
 		if (fieldIdx !== undefined) {
 			// A real field: declared, inherited, or an expando (`collectExpandoFields`).
+			ctx.emit(I.local.get(scratch.index));
 			emitAs(valueExpr, ctx, owner.fields[fieldIdx].wtype);
 			ctx.emit(I.struct.set(owner.typeIndex, fieldIdx));
 		} else {
-			// The catch-all `Map<string, any>` field `#ext`, allocated on first use, then a real `.set`.
-			const extIdx = owner.fieldIndex.get('#ext');
-			if (extIdx === undefined)
+			// The catch-all `#ext` map, allocated on first use.
+			if (!owner.fieldIndex.has('#ext'))
 				throw `'Object.defineProperty': '${owner.name}' has no extension slot for '${key}' -- an internal inconsistency (every real defineProperty target should already have one)`;
-			const mapCls = extMapClass();
-			ctx.emit(I.local.get(scratch.index), I.struct.get(owner.typeIndex, extIdx), I.ref.is_null);
-			const _cond = ctx.swapOut();
-			ctx.emit(I.local.get(scratch.index));
-			const ctor = ensureCtor(mapCls, [], ctx);
-			emitCallArgs(`${mapCls.name}'s constructor`, ctor.params, ctor.defaults, !!ctor.hasRest, [], ctx, ctor.resolvedParams);
-			ctx.emit(I.call(ctor.funcIndex), I.struct.set(owner.typeIndex, extIdx));
-			const _allocBranch = ctx.swapOut();
-			ctx.emit(I.if(undefined, _cond, _allocBranch));
-			ctx.emit(I.local.get(scratch.index), I.struct.get(owner.typeIndex, extIdx), I.ref.as_non_null);
-			emitMethodCall(mapCls, 'set', [Literal(key), valueExpr], ctx);
-			ctx.emit(I.drop);
+			emitWithExt(owner, scratch.index, ctx, m => {
+				emitMethodCall(m, 'define', [Literal(key), valueExpr, enumExpr], ctx);
+				ctx.emit(I.drop);
+			});
 		}
 		ctx.emit(I.local.get(scratch.index));
 		return owner.thisWtype!;
@@ -5104,18 +5111,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const physIdx	= physCls?.fieldIndex.get(prop);
 				if (physCls && physIdx !== undefined)
 					return { wtype: physCls.fields[physIdx].wtype, operands: [], load: () => { ctx.emit(I.local.get(local!.index)); emitFieldRead(physCls, physIdx, ctx); } };
-				const extIdx = physCls?.fieldIndex.get('#ext');
-				const mapCls = extIdx !== undefined && extMapClass();
-				if (physCls && extIdx !== undefined && mapCls) {
-					// The catch-all map may never have been allocated (null): the key is then absent, `undefined`, as `Map.get` gives on an allocated one.
-					return { wtype: W.REF_ANY, operands: [], load: () => {
-						ctx.emit(I.local.get(local!.index), I.struct.get(physCls.typeIndex, extIdx), I.ref.is_null);
-						ctx.emitIf(toValType(W.REF_ANY), () => emitAs(Identifier('undefined'), ctx, W.REF_ANY), () => {
-							ctx.emit(I.local.get(local!.index), I.struct.get(physCls.typeIndex, extIdx), I.ref.as_non_null);
-							emitCallOn(mapCls, 'get', [stringArg(ctx, prop)], ctx);
-						});
-					} };
-				}
+				if (physCls?.fieldIndex.has('#ext'))
+					return { wtype: W.REF_ANY_NULLABLE, operands: [], load: () => emitExtOp(physCls, local!.index, 'get', stringArg(ctx, prop), ctx, [], W.REF_ANY_NULLABLE) };
 				// Every non-nullish member a closure (or callable object): the closure struct stores `CLOSURE_FIELDS` itself.
 				const closureField = CLOSURE_FIELDS.get(prop);
 				if (closureField !== undefined && T.unionMembers(t, ctx.scope).filter(m => !T.isNullish(m, ctx.scope)).every(m => closurePart(typeOf(m)))) {
@@ -9075,6 +9072,15 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	interface HeldArg { wtype: W.Type; push(): void; t?: Type }
 	const localArg	= (ctx: FunctionContext, index: number, wtype: W.Type, t?: Type): HeldArg => ({ wtype, t, push: () => ctx.emit(I.local.get(index)) });
 	const stringArg	= (ctx: FunctionContext, s: string): HeldArg => ({ wtype: W.ARRAY.i16, t: T.STRING, push: () => emitStringConst(s, ctx) });
+	// A keyed operation; `define` is `Object.defineProperty`'s data write, which also sets the key's enumerability (`Map.define`).
+	type KeyOp = 'get' | 'set' | 'define' | 'delete';
+	const writes		= (kind: KeyOp) => kind === 'set' || kind === 'define';
+	const optBoolean	= () => typeOf(T.combineTypes([T.BOOLEAN, T.UNDEFINED]))!;
+	// A synthesized keyed op's parameters past the key, and the same held as the arguments of the map method `kind` names.
+	const keyOpParams	= (kind: KeyOp) => [...writes(kind) ? [param('value', W.REF_ANY_NULLABLE)] : [], ...kind === 'define' ? [param('enumerable', optBoolean())] : []];
+	const keyOpArgs		= (dctx: FunctionContext, kind: KeyOp, value: number, enumerable: number): HeldArg[] =>
+		[...writes(kind) ? [localArg(dctx, value, W.REF_ANY_NULLABLE)] : [], ...kind === 'define' ? [localArg(dctx, enumerable, optBoolean())] : []];
+	const keyOpResult	= (kind: KeyOp): W.Type => kind === 'get' ? W.REF_ANY_NULLABLE : kind === 'delete' ? 'i32' : 'void';
 	// `cls`'s method `name` on the receiver on the stack, the overload its arguments' types fit (`overloadByTypes`).
 	function emitCallOn(cls: ClassInfo, name: string, args: HeldArg[], ctx: FunctionContext): W.Type {
 		const chosen	= overloadByTypes(cls, name, args.map(a => a.t ?? T.ANY));
@@ -9175,30 +9181,30 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// `x[k]` on `any` with a computed string `k`: each class with fields chains its own names. A key no candidate declares reads `undefined`;
 	// a write traps, with no honest place to put it; `delete` stores `undefined` in a field, as a typed one does, and a dynamic object drops its entry.
-	function ensureAnyKey(kind: 'get' | 'set' | 'delete'): FuncInfo {
+	function ensureAnyKey(kind: KeyOp): FuncInfo {
 		return synthesize(`<any key ${kind}>`, () => ({
-			params: [param('recv'), param('key', typeOf(T.STRING)!), ...(kind === 'set' ? [param('value', W.REF_ANY_NULLABLE)] : [])],
-			result: kind === 'get' ? W.REF_ANY_NULLABLE : kind === 'delete' ? 'i32' : 'void' as W.Type,
-		}), (dctx, [recv, key, value], { result }) => {
+			params: [param('recv'), param('key', typeOf(T.STRING)!), ...keyOpParams(kind)], result: keyOpResult(kind),
+		}), (dctx, [recv, key, value, enumerable], { result }) => {
 			const keyArg		= localArg(dctx, key, typeOf(T.STRING)!);
+			const rest			= keyOpArgs(dctx, kind, value, enumerable);
 			const deleted		= () => {
 				if (kind === 'delete')
 					dctx.emit(I.i32.const(1));
 			};
 			const owners		= distinctHeaps(dynamicReceivers(false).filter(r => r.cls.typeIndex !== -1 && r.cls.fields.length && r.cls.thisTsType));
-			const proxy			= proxyArms(cls => emitProxyOp(cls, kind, keyArg, kind === 'set' ? localArg(dctx, value, W.REF_ANY_NULLABLE) : undefined, dctx, result));
+			const proxy			= proxyArms(cls => emitProxyOp(cls, kind, keyArg, rest, dctx, result));
 			const dynamic		= [...proxy, ...dynamicObjectArms(cls => {
-				const got = emitCallOn(cls, kind, kind === 'set' ? [keyArg, localArg(dctx, value, W.REF_ANY_NULLABLE)] : [keyArg], dctx);
+				const got = emitCallOn(cls, kind, [keyArg, ...rest], dctx);
 				if (kind === 'get')
 					coerceTop(got, dctx, result);
 				else
 					dctx.emit(I.drop);
 				deleted();
 			})];
-			const ext = closureExtArm(() => kind === 'set' ? emitClosureExtSet(dctx, keyArg, localArg(dctx, value, W.REF_ANY_NULLABLE))
+			const ext = closureExtArm(() => writes(kind) ? emitClosureExtWrite(dctx, kind, keyArg, rest)
 				: kind === 'get' ? emitClosureExtGet(dctx, keyArg, result) : emitClosureExtDelete(dctx, keyArg));
 			// An element holder keyed by an array index (`arr["0"]`) reads or writes that element, as a number key does.
-			const holders = kind === 'delete' ? [] : elementHolders(kind);
+			const holders = kind === 'delete' ? [] : elementHolders(writes(kind) ? 'set' : 'get');
 			if (kind !== 'delete' && holders.length) {
 				const n = dctx.temp(`$arrayIndex$${dctx.tempCounter++}`, 'f64');
 				dctx.emit(I.local.get(key));
@@ -9206,7 +9212,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				dctx.emit(I.local.tee(n), I.f64.const(0), I.f64.ge);
 				holders.forEach((h, i) => dctx.emit(I.local.get(recv), I.ref.test(h.heap), ...i ? [I.i32.or] : []));
 				dctx.emit(I.i32.and);
-				dctx.emitIf(undefined, () => dctx.emit(I.local.get(recv), I.local.get(n), ...kind === 'set' ? [I.local.get(value)] : [], I.call(ensureAnyIndex(kind).funcIndex), I.return));
+				dctx.emitIf(undefined, () => dctx.emit(I.local.get(recv), I.local.get(n), ...writes(kind) ? [I.local.get(value)] : [], I.call(ensureAnyIndex(writes(kind) ? 'set' : kind).funcIndex), I.return));
 			}
 			emitTypeCascade(dctx, recv, [...dynamic, ...ext, ...owners.map(({ heap, cls }) => ({ heap, emit: () => {
 				const obj = dctx.temp(`$keyobj$${heap}`, cls.thisWtype!);
@@ -9219,7 +9225,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					dctx.emit(I.local.get(obj));
 					if (kind === 'get') {
 						emitBoxedField(cls, idx, dctx, result);
-					} else if (kind === 'set') {
+					} else if (writes(kind)) {
 						dctx.emit(I.local.get(value));
 						emitBoxedFieldWrite(cls, idx, dctx);
 					} else {
@@ -9229,14 +9235,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				}, () => {
 					// A key the class does not declare: its `#ext` map's, else none -- `undefined` read, a write trapping rather than dropped.
 					if (cls.fieldIndex.has('#ext'))
-						emitExtOp(cls, obj, kind, keyArg, dctx, kind === 'set' ? localArg(dctx, value, W.REF_ANY_NULLABLE) : undefined, result);
+						emitExtOp(cls, obj, kind, keyArg, dctx, rest, result);
 					else if (kind === 'get')
 						dctx.emitDefaultValue(result, types, toValType);
-					else if (kind === 'set')
+					else if (writes(kind))
 						dctx.emit(I.unreachable);
 				}, kind === 'get' ? result : undefined);
 				deleted();
-			} }))], kind === 'set' ? trap(dctx) : kind === 'delete' ? deleted : () => dctx.emitDefaultValue(W.REF_ANY_NULLABLE, types, toValType), result);
+			} }))], writes(kind) ? trap(dctx) : kind === 'delete' ? deleted : () => dctx.emitDefaultValue(W.REF_ANY_NULLABLE, types, toValType), result);
 		});
 	}
 
@@ -9311,7 +9317,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		});
 	}
 	// `fn[key] = value` on the closure on the stack, its `#ext` map made on the first write.
-	function emitClosureExtSet(dctx: FunctionContext, key: HeldArg, value: HeldArg): void {
+	function emitClosureExtWrite(dctx: FunctionContext, kind: 'set' | 'define', key: HeldArg, rest: HeldArg[]): void {
 		const map = extMapClass(), base = types.closureBase();
 		const fn = dctx.temp(`$extfn$${dctx.tempCounter++}`, { typeIndex: base });
 		dctx.emit(I.local.tee(fn), I.struct.get(base, W.CLOSURE_CORE), I.ref.is_null);
@@ -9322,7 +9328,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			dctx.emit(I.call(ctor.funcIndex), I.struct.set(base, W.CLOSURE_CORE));
 		});
 		dctx.emit(I.local.get(fn), I.struct.get(base, W.CLOSURE_CORE), I.ref.cast(map.typeIndex));
-		if (emitCallOn(map, 'set', [key, value], dctx) !== 'void')
+		if (emitCallOn(map, kind, [key, ...rest], dctx) !== 'void')
 			dctx.emit(I.drop);
 	}
 	// `delete fn[key]` on the closure on the stack: true, as JS answers for an own configurable key or none.
@@ -9349,8 +9355,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				if (sig)
 					return [{ heap, emit: () => emitBoxed(cls, name, emitMethodCall(cls, accessorKey('get', name), [], dctx), dctx, result) }];
 				// A method read as a value: bound to the receiver, as JS's `x.m` is the function called on `x`. One signature only: an overload set is no one closure.
+				// A `this` in its signature (`add(v): this`) is the receiver's class, as a read off a typed receiver binds it.
 				const method = cls.typeIndex !== -1 && cls.methodDecls.has(name) && !cls.fieldIndex.has(name)
-					? (m => m && T.resolveOwn(m, cls.declScope ?? libGlobal))(T.lookupMember(cls.thisTsType, name, cls.declScope ?? libGlobal)) : undefined;
+					? (m => m && T.resolveOwn(T.substituteThisType(m, cls.thisTsType), cls.declScope ?? libGlobal))(T.lookupMember(cls.thisTsType, name, cls.declScope ?? libGlobal)) : undefined;
 				if (method?.type === 'function' && !method.typeParams?.length)
 					return [{ heap, emit: () => {
 						const obj = dctx.temp(`$mvobj$${heap}`, cls.thisWtype!);
@@ -9361,7 +9368,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				return cls.typeIndex !== -1 && cls.fieldIndex.has('#ext') && !cls.methodDecls.has(name) ? [{ heap, emit: () => {
 					const obj = dctx.temp(`$extobj$${heap}`, cls.thisWtype!);
 					dctx.emit(I.local.set(obj));
-					emitExtOp(cls, obj, 'get', stringArg(dctx, name), dctx, undefined, result);
+					emitExtOp(cls, obj, 'get', stringArg(dctx, name), dctx, [], result);
 				} }] : [];
 			};
 			const arms = [...proxyArms(cls => coerceTop(emitCallOn(cls, '_get', [stringArg(dctx, name)], dctx), dctx, result)), ...name === 'constructor' ? constructorArms(dctx, result)
@@ -9407,22 +9414,21 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// `x.name = v` on a union or `any`: over the struct-backed owners only, the value boxed as an expando holds it. A receiver matching nothing traps:
 	// dropping a write silently is worse.
-	function ensureAnyFieldWrite(name: string): FuncInfo {
-		return synthesize(`<any field write>.${name}`, () => ({ params: [param('recv'), param('value', W.REF_ANY_NULLABLE)], result: 'void' as W.Type }), (dctx, [recv, value]) => {
+	// A `define` (`Object.defineProperty`) also sets the key's enumerability where a map holds it; a declared field is always enumerable.
+	function ensureAnyFieldWrite(name: string, kind: 'set' | 'define' = 'set'): FuncInfo {
+		return synthesize(`<any field ${kind}>.${name}`, () => ({ params: [param('recv'), ...keyOpParams(kind)], result: 'void' as W.Type }), (dctx, [recv, value, enumerable]) => {
 			const owners	= distinctHeaps(dynamicReceivers(false).filter(r => r.cls.typeIndex !== -1 && r.cls.fieldIndex.has(name)));
-			const dynamic	= [...proxyArms(cls => {
-				emitCallOn(cls, '_set', [stringArg(dctx, name), localArg(dctx, value, W.REF_ANY_NULLABLE)], dctx);
-				dctx.emit(I.drop);
-			}), ...dynamicObjectArms(cls => {
-				emitCallOn(cls, 'set', [stringArg(dctx, name), localArg(dctx, value, W.REF_ANY_NULLABLE)], dctx);
+			const rest		= keyOpArgs(dctx, kind, value, enumerable);
+			const dynamic	= [...proxyArms(cls => emitProxyOp(cls, kind, stringArg(dctx, name), rest, dctx, 'void')), ...dynamicObjectArms(cls => {
+				emitCallOn(cls, kind, [stringArg(dctx, name), ...rest], dctx);
 				dctx.emit(I.drop);
 			})];
-			const ext		= closureExtArm(() => emitClosureExtSet(dctx, stringArg(dctx, name), localArg(dctx, value, W.REF_ANY_NULLABLE)));
+			const ext		= closureExtArm(() => emitClosureExtWrite(dctx, kind, stringArg(dctx, name), rest));
 			// A class not declaring the key keeps it in its `#ext` map; after the declaring ones, which a subclass instance must meet first.
 			const extra		= extOwners().filter(r => !r.cls.fieldIndex.has(name)).map(({ heap, cls }) => ({ heap, emit: () => {
 				const obj = dctx.temp(`$extobj$${heap}`, cls.thisWtype!);
 				dctx.emit(I.local.set(obj));
-				emitExtOp(cls, obj, 'set', stringArg(dctx, name), dctx, localArg(dctx, value, W.REF_ANY_NULLABLE));
+				emitExtOp(cls, obj, kind, stringArg(dctx, name), dctx, rest);
 			} }));
 			if (!owners.length && !dynamic.length && !ext.length && !extra.length)
 				throw `no reachable class declares a field '${name}' -- a dynamic write on 'any' needs at least one real candidate`;
@@ -9469,11 +9475,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 	// `map.get(key)`, `map.set(key, value)` or `map.delete(key)` on the `#ext` map `emitWithExt` leaves on the stack: a get's value as `result`,
 	// a delete's or set's own result dropped.
-	function emitExtOp(cls: ClassInfo, obj: number, kind: 'get' | 'set' | 'delete', key: HeldArg, ctx: FunctionContext, value?: HeldArg, result?: W.Type): void {
+	function emitExtOp(cls: ClassInfo, obj: number, kind: KeyOp, key: HeldArg, ctx: FunctionContext, rest: HeldArg[] = [], result?: W.Type): void {
 		if (kind === 'get')
 			return emitWithExt(cls, obj, ctx, m => coerceTop(emitCallOn(m, 'get', [key], ctx), ctx, result!), () => ctx.emitDefaultValue(result!, types, toValType), result);
 		emitWithExt(cls, obj, ctx, m => {
-			if (emitCallOn(m, kind, kind === 'set' ? [key, value!] : [key], ctx) !== 'void')
+			if (emitCallOn(m, kind, [key, ...rest], ctx) !== 'void')
 				ctx.emit(I.drop);
 		}, kind === 'delete' ? () => {} : undefined);
 	}
@@ -9481,39 +9487,38 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// A key known only at run time (a symbol) on a struct: its `#ext` map. A struct without one has no such key: a read is `undefined`,
 	// a write traps, since dropping it is worse.
-	function ensureExtKey(kind: 'get' | 'set' | 'delete'): FuncInfo {
+	function ensureExtKey(kind: KeyOp): FuncInfo {
 		return synthesize(`<ext key ${kind}>`, () => ({
-			params: [param('recv'), param('key', W.REF_ANY_NULLABLE), ...(kind === 'set' ? [param('value', W.REF_ANY_NULLABLE)] : [])],
-			result: kind === 'get' ? W.REF_ANY_NULLABLE : kind === 'delete' ? 'i32' : 'void' as W.Type,
-		}), (dctx, [recv, key, value], { result }) => {
+			params: [param('recv'), param('key', W.REF_ANY_NULLABLE), ...keyOpParams(kind)], result: keyOpResult(kind),
+		}), (dctx, [recv, key, value, enumerable], { result }) => {
+			const rest = keyOpArgs(dctx, kind, value, enumerable);
 			const deleted = () => {
 				if (kind === 'delete')
 					dctx.emit(I.i32.const(1));
 			};
-			emitTypeCascade(dctx, recv, [...proxyArms(cls => emitProxyOp(cls, kind, localArg(dctx, key, W.REF_ANY_NULLABLE), kind === 'set' ? localArg(dctx, value, W.REF_ANY_NULLABLE) : undefined, dctx, result)),
+			emitTypeCascade(dctx, recv, [...proxyArms(cls => emitProxyOp(cls, kind, localArg(dctx, key, W.REF_ANY_NULLABLE), rest, dctx, result)),
 				...extOwners().map(({ heap, cls }) => ({ heap, emit: () => {
 				const obj = dctx.temp(`$extobj$${heap}`, cls.thisWtype!);
 				dctx.emit(I.local.set(obj));
-				emitExtOp(cls, obj, kind, localArg(dctx, key, W.REF_ANY_NULLABLE), dctx, kind === 'set' ? localArg(dctx, value, W.REF_ANY_NULLABLE) : undefined, result);
+				emitExtOp(cls, obj, kind, localArg(dctx, key, W.REF_ANY_NULLABLE), dctx, rest, result);
 				deleted();
 			} }))], kind === 'get' ? () => dctx.emitDefaultValue(result, types, toValType) : kind === 'delete' ? deleted : trap(dctx), kind === 'get' ? result : undefined);
 		});
 	}
 	// A proxy (on the stack) read, written or deleted at `key` through `lib/proxy.ts`: a get's value as `result`, a delete's success as `i32`.
-	function emitProxyOp(cls: ClassInfo, kind: 'get' | 'set' | 'delete', key: HeldArg, value: HeldArg | undefined, ctx: FunctionContext, result: W.Type): void {
-		const got = emitCallOn(cls, kind === 'get' ? '_get' : kind === 'set' ? '_set' : '_delete', kind === 'set' ? [key, value!] : [key], ctx);
-		if (kind === 'set')
+	function emitProxyOp(cls: ClassInfo, kind: KeyOp, key: HeldArg, rest: HeldArg[], ctx: FunctionContext, result: W.Type): void {
+		const got = emitCallOn(cls, `_${kind}`, [key, ...rest], ctx);
+		if (writes(kind))
 			ctx.emit(I.drop);
 		else
 			coerceTop(got, ctx, result);
 	}
 	// A key typed neither a string nor a symbol alone (`p: string | symbol`, `any`): told apart at run time, a string's by name, a symbol's in `#ext`.
-	function ensureAnyProp(kind: 'get' | 'set' | 'delete'): FuncInfo {
+	function ensureAnyProp(kind: KeyOp): FuncInfo {
 		return synthesize(`<any prop ${kind}>`, () => ({
-			params: [param('recv'), param('key', W.REF_ANY_NULLABLE), ...(kind === 'set' ? [param('value', W.REF_ANY_NULLABLE)] : [])],
-			result: kind === 'get' ? W.REF_ANY_NULLABLE : kind === 'delete' ? 'i32' : 'void' as W.Type,
-		}), (dctx, [recv, key, value], { result }) => {
-			const str = typeOf(T.STRING)!, rest = kind === 'set' ? [I.local.get(value)] : [];
+			params: [param('recv'), param('key', W.REF_ANY_NULLABLE), ...keyOpParams(kind)], result: keyOpResult(kind),
+		}), (dctx, [recv, key, ...args], { result }) => {
+			const str = typeOf(T.STRING)!, rest = args.map(a => I.local.get(a));
 			dctx.emit(I.local.get(key), I.ref.test(heapTypeIndexOf(str)));
 			dctx.emitIf(result === 'void' ? undefined : toValType(result),
 				() => dctx.emit(I.local.get(recv), I.local.get(key), I.ref.cast(heapTypeIndexOf(str)), ...rest, I.call(ensureAnyKey(kind).funcIndex)),

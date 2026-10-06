@@ -28,6 +28,14 @@ export class ProxyObject<T extends object> {
 		const h = this.handler_;
 		return h.deleteProperty ? h.deleteProperty(this.target_, p) : delete (this.target_ as any)[p];
 	}
+	// No `defineProperty` trap: a definition goes to the target. An explicit `enumerable: undefined` would mean false, so it is left out.
+	_define(p: string | symbol, value: any, enumerable?: boolean): boolean {
+		if (enumerable === undefined)
+			Object.defineProperty(this.target_, p, { value });
+		else
+			Object.defineProperty(this.target_, p, { value, enumerable });
+		return true;
+	}
 	// `Object.keys/values/entries`: the target's keys (no `ownKeys` trap), each value through `get`.
 	_anyEntries(which: string): RawArray<any> {
 		const keys = Object.keys(this.target_), out = new RawArray<any>(keys.length);

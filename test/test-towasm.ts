@@ -5313,6 +5313,42 @@ async function main() {
 	}
 
 	{
+		// `defineProperty`'s `enumerable` (false when omitted) where a map holds the key: a dynamic object's, a struct's `#ext`, through `any`.
+		const { dynamicDefine, extDefine, anyDefine } = await compile(`
+			class C { x = 1; }
+			function defineOn(o: any, k: string) {
+				Object.defineProperty(o, 'pos', { value: k });
+				Object.defineProperty(o, k, { value: 3, enumerable: true });
+			}
+			export function dynamicDefine(): number {
+				const r: { [k: string]: number } = { a: 1 };
+				Object.defineProperty(r, 'pos', { value: 7, enumerable: false, configurable: true, writable: false });
+				Object.defineProperty(r, 'b', { value: 2, enumerable: true });
+				const s = { ...r };
+				return Object.keys(r).join(',') + '|' + r.pos + '|' + ('pos' in r) + '|' + Object.keys(s).join(',') + '|' + Object.values(r).join(',') === 'a,b|7|true|a,b|1,2' ? 1 : 0;
+			}
+			export function extDefine(): number {
+				const c = new C();
+				Object.defineProperty(c, 'hidden', { value: 5 });
+				Object.defineProperty(c, 'shown', { value: 6, enumerable: true });
+				return Object.keys(c).join(',') + '|' + (c as any).hidden + '|' + (c as any).shown === 'x,shown|5|6' ? 1 : 0;
+			}
+			export function anyDefine(): number {
+				const d: { [k: string]: any } = { a: 1 };
+				defineOn(d, 'z');
+				const c = new C();
+				defineOn(c, 'w');
+				const p = new Proxy(new C(), {}) as any;
+				Object.defineProperty(p, 'q' + 1, { value: 4 });
+				return Object.keys(d).join(',') + '|' + d.pos + '|' + Object.keys(c).join(',') + '|' + (c as any).pos + '|' + Object.keys(p).join(',') + '|' + p.q1 === 'a,z|z|x,w|w|x|4' ? 1 : 0;
+			}
+		`);
+		check('defineProperty on a dynamic object honours enumerable', dynamicDefine(), 1);
+		check('defineProperty into a struct\'s #ext honours enumerable', extDefine(), 1);
+		check('defineProperty through any honours enumerable (dynamic object, #ext, proxy target)', anyDefine(), 1);
+	}
+
+	{
 		// Callbacks the checker's own code passes: a no-rest closure where a rest is offered (checker.ts's `MUTED: Err`), an unannotated rest
 		// bound from its context, a closure to a parameter typed by its default, and `joinFlow`'s spread over an inferred-predicate filter.
 		const { tagCallbacks, defaultTypedParam, filteredSpread } = await compile(`

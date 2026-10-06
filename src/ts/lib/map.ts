@@ -13,6 +13,8 @@
 class Map<K, V> {
 	private keys_: K[] = [];
 	private values_: V[] = [];
+	// As an object's own keys (`#ext`, a dynamic object): those `Object.defineProperty` made non-enumerable, which `anyEntries` skips.
+	private hidden_?: Set<K>;
 
 	// @ts-expect-error - tison extension: multiple constructor implementations
 	constructor(entries: readonly (readonly [K, V])[] = []) {
@@ -76,11 +78,25 @@ class Map<K, V> {
 		}
 		this.keys_.pop();
 		this.values_.pop();
+		this.hidden_?.delete(key);
 		return true;
 	}
 	clear(): void {
 		this.keys_ = [];
 		this.values_ = [];
+		this.hidden_ = undefined;
+	}
+
+	// `Object.defineProperty`'s data property: an omitted `enumerable` keeps an existing key's, and a new key's is false.
+	define(key: K, value: V, enumerable?: boolean): this {
+		if (enumerable ?? (this.indexOf(key) !== -1 && this.enumerable(key)))
+			this.hidden_?.delete(key);
+		else
+			(this.hidden_ ??= new Set<K>()).add(key);
+		return this.set(key, value);
+	}
+	enumerable(key: K): boolean {
+		return !this.hidden_?.has(key);
 	}
 
 	// Snapshots (plain arrays), not live iterators; iterating the Map itself (`[Symbol.iterator]`) is the live path.
@@ -92,9 +108,11 @@ class Map<K, V> {
 	}
 	// These entries as an object's own keys (a dynamic object's, a struct's `#ext`): the raw `any[]` `Object.keys/values/entries` answer with.
 	anyEntries(which: string): RawArray<any> {
-		const n = this.keys_.length, out = new RawArray<any>(n);
-		for (let i = 0; i < n; i++)
-			out[i] = which === 'keys' ? this.keys_[i] : which === 'values' ? this.values_[i] : [this.keys_[i], this.values_[i]];
+		const shown = this.keys_.map((k, i) => i).filter(i => this.enumerable(this.keys_[i])), out = new RawArray<any>(shown.length);
+		for (let j = 0; j < shown.length; j++) {
+			const i = shown[j];
+			out[j] = which === 'keys' ? this.keys_[i] : which === 'values' ? this.values_[i] : [this.keys_[i], this.values_[i]];
+		}
 		return out;
 	}
 
@@ -118,14 +136,15 @@ class DynamicObject<V> {
 	has(key: string): boolean			{ return this.map_.has(key); }
 	set(key: string, value: V): this	{ this.map_.set(key, value); return this; }
 	delete(key: string): boolean		{ return this.map_.delete(key); }
-	keys(): string[]					{ return this.map_.keys(); }
-	values(): V[]						{ return this.map_.values(); }
-	entries(): [string, V][]			{ return this.map_.entries(); }
-	// `{...from}`: each of its entries, in order.
+	define(key: string, value: V, enumerable?: boolean): this { this.map_.define(key, value, enumerable); return this; }
+	// Its own enumerable keys, as `Object.keys/values/entries` and a spread see them.
+	keys(): string[]					{ return this.map_.keys().filter(k => this.map_.enumerable(k)); }
+	values(): V[]						{ return this.entries().map(e => e[1]); }
+	entries(): [string, V][]			{ return this.map_.entries().filter(e => this.map_.enumerable(e[0])); }
+	// `{...from}`: each of its enumerable entries, in order.
 	spread(from: DynamicObject<V>): this {
-		const keys = from.map_.keys(), values = from.map_.values();
-		for (let i = 0; i < keys.length; i++)
-			this.map_.set(keys[i], values[i]);
+		for (const [k, v] of from.entries())
+			this.map_.set(k, v);
 		return this;
 	}
 
