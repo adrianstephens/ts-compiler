@@ -4812,6 +4812,20 @@ async function main() {
 	}
 
 	{
+		// `new Set()` infers its element from an interface context (wasm-backend.ts's `openReads: ReadonlySet<Expr> = new Set()`).
+		const { readonlyContext } = await compile(`
+			let seen: ReadonlySet<string> = new Set();
+			const all: ReadonlyMap<string, number> = new Map();
+			export function readonlyContext(): number {
+				const s = new Set<string>(['a']);
+				seen = s;
+				return (seen.has('a') ? 10 : 0) + seen.size + all.size;
+			}
+		`);
+		check('new Set()/new Map() infer their type arguments from a ReadonlySet/ReadonlyMap context', readonlyContext(), 11);
+	}
+
+	{
 		// Objects built by dynamic writes (binary-libs' instruction builder `I`): `node[k] ??= {}` makes dynamic objects, `Object.assign` from a
 		// source whose keys are known only at run time copies key by key, a function gains properties in a closure `#ext`, and a method read
 		// off such an object is called through `any`.

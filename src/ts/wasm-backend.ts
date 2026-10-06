@@ -145,8 +145,9 @@ function contextOf(e: Expr): Type | undefined {
 	const t = flowSlotOf(e)?.type ?? expectedTypeOf(e);
 	return t && isConstContext(t) ? t.typeArgs?.[0] : t;
 }
-// A node codegen synthesized has no stamp of its own, and is typed over its parts' stamps.
-const checkerTypeOf = (e: Expr, scope: Scope, widen = true, expected?: Type) => checkerQuery(e, scope, widen, expected, undefined, undefined, false, !checkedTypeOf(e));
+// A node codegen synthesized has no stamp of its own, and is typed over its parts' stamps. An original one is re-typed against the
+// context the check pass gave it, unless the caller gives its own: `new Set()` into a `ReadonlySet<string>` infers `string` from it.
+const checkerTypeOf = (e: Expr, scope: Scope, widen = true, expected?: Type) => checkerQuery(e, scope, widen, expected ?? expectedTypeOf(e), undefined, undefined, false, !checkedTypeOf(e));
 
 // A binding's type as its slot: an integer range named as the machine int it fits -- a bare range would widen back to
 // `number` wherever the local is read through the scope.
