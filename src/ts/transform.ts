@@ -3,7 +3,7 @@ import * as JS from './js-parser';
 import * as T from './type-utils';
 import { Module, Location, Identifier, Literal, Binary, Conditional, Assign, Await, Member, ExprStmt, hasMod, dropMod, If, While } from '@isopodlabs/tison/ast';
 import { walker, walkerB, constantFolder } from './walker';
-import { SEVERITY, Err, isPurePath, checkBlock, checkStmt1, exportScope, markAbsenceTests, literalSpecifier, unknownTypeNames, typeOf, typeOf1, inferReturn } from './checker';
+import { SEVERITY, Err, superClassRef, isPurePath, checkBlock, checkStmt1, exportScope, markAbsenceTests, literalSpecifier, unknownTypeNames, typeOf, typeOf1, inferReturn } from './checker';
 import { LoadedModule, ModuleLoader } from './module-loader';
 import { moduleFree } from './free-names';
 
@@ -702,6 +702,7 @@ function checkEntry(ast: Module<Stmt>, scope: Scope, global: Scope, diagnostics:
 	global.hitDepthLimit = fn => depthExhaustion.set(fn, (depthExhaustion.get(fn) ?? 0) + 1);
 	// The expressions a statement holds report through the same `err` as the statement itself, top level included.
 	const err = makeDiagnostic(d => diagnostics.push(d));
+	liftClassHeritage(ast.body);
 	markAbsenceTests(ast.body);
 	const unknownNames = scope.reportsUnknownNames() ? unknownTypeNames(ast.body) : undefined;
 	checkBlock(ast.body, scope, typeOf1(err), checkStmt1(err));
@@ -775,6 +776,36 @@ function importNodeGlobals(body: Stmt[]) {
 		body.unshift({ type: 'import', source: 'node:process', namespace: 'process' });
 }
 
+// `class X extends f(args)` IS `const X$base = f(args); class X extends X$base`: JS evaluates the heritage once, where the class is defined.
+// One name the checker types the base by and codegen instantiates a factory's class for. Mutates `stmts` and every statement list in it.
+export function liftClassHeritage(stmts: Stmt[]) {
+	const lift = (list: Stmt[]) => {
+		for (let i = 0; i < list.length; i++) {
+			const s = list[i], c = s.type === 'export_decl' ? s.declaration : s;
+			if (c.type === 'class_decl' && c.superClass && !superClassRef(c.superClass)) {
+				const name = `${c.name}$base`;
+				list.splice(i++, 0, JS.VarDecl('const', JS.Var<Type>(name, c.superClass)));
+				c.superClass = Identifier(name);
+			}
+		}
+	};
+	walkerB(
+		(s, process) => {
+			if (s.type === 'block' || s.type === 'function_decl' || s.type === 'namespace_decl')
+				s.body && lift(s.body);
+			else if (s.type === 'switch')
+				s.cases.forEach(c => lift(c.consequent));
+			else if (s.type === 'try')
+				[s.body, ...s.handlers.map(h => h.body), s.finalizer ?? []].forEach(lift);
+			return process(s);
+		},
+		(e, process) => ((e.type === 'arrow' || e.type === 'function') && Array.isArray(e.body) && lift(e.body), process(e)),
+		undefined,
+		(m, process) => ('body' in m && Array.isArray(m.body) && lift(m.body), process(m))
+	).statements(stmts);
+	lift(stmts);
+}
+
 export async function TStypeCheckAsync(program: Module<Stmt>, loader: ModuleLoader, global: Scope) {
 	const diagnostics: Diagnostic[] = [];
 
@@ -843,6 +874,7 @@ export async function TStypeCheckAsync(program: Module<Stmt>, loader: ModuleLoad
 		const cached = resolveImports(src, importScope, src.program.body, src.canonical).then(async imports => {
 			let tainted = imports.some(clean => !clean);
 			await resolveDynamicImports(src, src.program.body, src.canonical);
+			liftClassHeritage(src.program.body);
 			markAbsenceTests(src.program.body);
 			const { scope, inner, alias } = exportScope(src.program.body, importScope, src.program.filename);
 			// The module RECORD carries its full internal scope: codegen resolves names declared inside the module through it.

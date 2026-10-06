@@ -563,7 +563,11 @@ function classShapes(c: TS.Class, scope: Scope): { instance: Type; value: Type; 
 	const obj = TS.ObjectType(members);
 	// A base the checker can't name (a mixin call) leaves the instance unsealed; likewise an inherited constructor accepts any arguments.
 	// Own members come first: lookupMember's first match implements override precedence
-	const superType: Type | undefined = superClassRef(c.superClass) ?? (c.superClass && T.ANY);
+	// A base naming no type is a VALUE (a lifted heritage call, `liftClassHeritage`): its construct signature's instance, typed when first needed.
+	const superRef	= superClassRef(c.superClass);
+	const superType: Type | undefined = superRef && !superRef.typeArgs && !superRef.name.includes('.') && !scope.type(superRef.name)
+		? T.stampScope(TS.RefType('InstanceType', [{ type: 'typeof', name: superRef.name }]), scope)
+		: superRef ?? (c.superClass && T.ANY);
 	const instance		= superType ? TS.IntersectionType([obj, superType]) : obj;
 	// The named ref carries its own type params as type arguments (`new(...): Box<T>`), or `new Box<number>(...)` has none.
 	const ctorReturn	= c.name ? TS.RefType(c.name, c.typeParams?.map(p => TS.RefType(p.name))) : instance;
@@ -3024,7 +3028,14 @@ function checkFunctionBody(fn: TS.CallSig, body: JS.Stmt<any>[] | Expr | undefin
 	}
 }
 function checkClass(c: TS.Class, scope: Scope, err?: Err, stamp = false) {
+	// A named class EXPRESSION binds its name only within itself, as its type and its value, which its constructor's result names.
+	if (!isClassDecl(c) && c.name)
+		scope = new Scope(scope);
 	const { instance, value, superType } = classShapes(c, scope);
+	if (!isClassDecl(c) && c.name) {
+		scope.mergeType(c.name, instance, c.typeParams as TS.TypeParam[]);
+		scope.mergeValue(c.name, value);
+	}
 	const scopes = classBodyScopes(c, scope, instance, value, superType);
 	for (const m of c.body)
 		checkMember(m, scopes, err, stamp);

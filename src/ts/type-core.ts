@@ -1633,7 +1633,8 @@ export function resolve(scope: Scope, t: Type, depth = 10, stopAtRef = false): T
 						return combineTypes(t.members.flatMap(m => m.type === 'property' || m.type === 'method' ? isPublicMember(m) && keyType(m.key) || []
 							: m.type === 'index' ? isRef(m.paramType, 'string') ? [m.paramType, NUMBER] : [m.paramType] : []));
 					if (t.type === 'intersection' || t.type === 'union') {
-						const parts = t.types.map(p => keysOf(p, depth - 1));
+						// A union's `never` member (one only its resolution shows) adds no value, so it constrains no key.
+						const parts = (t.type === 'union' ? t.types.filter(p => !isRef(resolveOwn(p, scope), 'never')) : t.types).map(p => keysOf(p, depth - 1));
 						if (parts.every(p => !!p))
 							return t.type === 'intersection' ? combineTypes(parts) : intersectTypes(parts);
 					}
@@ -2115,8 +2116,10 @@ export function lookupMember(t: Type, prop: string, scope: Scope, depth = 10, sk
 				return units ? combineTypes(units.filter(u => distinct.every(p => isAssignable(u, p, scope)))) : TS.IntersectionType(distinct);
 			}
 			case 'union': {
-				const parts = t.types.map(p => lookupMember(p, prop, scope, depth - 1, false, write));
-				return parts.every(p => !!p) ? combineTypes(parts as Type[]) : undefined;
+				// A `never` member adds nothing to a union (TS absorbs it), so it constrains no member.
+				const live	= t.types.filter(p => !isRef(resolveOwn(p, scope), 'never'));
+				const parts	= live.map(p => lookupMember(p, prop, scope, depth - 1, false, write));
+				return parts.every(p => !!p) ? (parts.length ? combineTypes(parts as Type[]) : NEVER) : undefined;
 			}
 			// A primitive auto-boxes for member access (`"x".toUpperCase()`): its boxed lib interface's members.
 			case 'ref': {
@@ -2257,7 +2260,8 @@ export function constructSignatures(t: Type, scope: Scope): TS.CallSig[] {
 	const isMixin = (sigs: TS.CallSig[]) => {
 		const rest = sigs.length === 1 && !sigs[0].params.length && sigs[0].rest?.typeAnnotation;
 		const r = rest && resolveOwn(rest, scope);
-		return !!r && r.type === 'array' && isAny(r.element);
+		// TS's isMixinConstructorType: the rest is `any[]`, or `any` itself.
+		return !!r && (isAny(r) || (r.type === 'array' && isAny(r.element)));
 	};
 	const mixin = parts.map(isMixin);
 	if (mixin.length && mixin.every(m => m))
@@ -3269,8 +3273,8 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 
 		} else if (paramT.type === 'function' || paramT.type === 'constructor') {
 			// The argument's signatures of that kind, its last as TS infers from (a function type, an intersection's callable part as
-			// `Object.assign(fn, {...})` builds, or an object's call member: `arr.map(Number)`).
-			const callable = signaturesOf(a, paramT.type === 'function' ? 'call' : 'construct', scope).at(-1);
+			// `Object.assign(fn, {...})` builds, or an object's call member: `arr.map(Number)`); construct ones as `new` resolves them (mixins).
+			const callable = (paramT.type === 'function' ? signaturesOf(a, 'call', scope) : constructSignatures(a, scope)).at(-1);
 			if (callable) {
 				// A generic argument is instantiated in the context of a parameter that says what it takes (TS's higher-order inference); against one still
 				// naming this call's parameters, at its constraints.
