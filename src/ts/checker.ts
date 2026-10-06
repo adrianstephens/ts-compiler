@@ -4,6 +4,7 @@ import * as JS from './js-parser';
 import { Literal, Binary, hasMod, Location, getPos } from '@isopodlabs/tison/ast';
 import { isTsDeclaration, walker, walkerB } from './walker';
 import * as T from './type-utils';
+import { type Closure, paramNames } from './free-names';
 
 export const SEVERITY = {
 	GAP:		0,	// known missing functionality (see the header's own gap list) -- not a judgment call, just a reminder
@@ -3125,37 +3126,66 @@ export function checkSynthesized(stmts: Stmt[], scope: Scope): void {
 export const checkSynthesizedExpr = (e: Expr, scope: Scope) => typeOf(e, scope, true, undefined, undefined, MUTED, true, true);
 
 // An index read is possibly absent exactly when the program TESTS it (TS types `a[i]` as `T`; JS reads `undefined` past the end): a marked read is
-// `T | undefined`, a BOUNDED read. Matched by NAME before checking: a needless mark costs a bounds check, a missed one answers the test wrongly.
+// `T | undefined`, a BOUNDED read. A tested name is matched to its BINDING: its own closure's declarations, else its nearest enclosing closure's.
 export function markAbsenceTests(stmts: Stmt[]): void {
-	const reads = new Map<string, TS.Expr[]>();
-	const tested = new Set<string>();
-	walkerB(
-		(st, process) => {
-			if (st.type === 'var_decl')
-				for (const d of st.declarations)
-					if (typeof d.name === 'string' && d.init?.type === 'index')
-						reads.set(d.name, [...reads.get(d.name) ?? [], d.init]);
-			return process(st);
-		},
-		(e, process) => {
-			if (e.type === 'binary' && (e.operator === '===' || e.operator === '!==' || e.operator === '==' || e.operator === '!=')) {
-				for (const [a, b] of [[e.left, e.right], [e.right, e.left]] as const) {
-					if (T.isNullLiteral(b)) {
-						if (a.type === 'index')
-							(a as { testedForAbsence?: boolean }).testedForAbsence = true;
-						else if (a.type === 'identifier')
-							tested.add(a.name);
+	type Reads = (name: string) => TS.Expr[] | undefined;
+	const scan = (body: Stmt[] | Expr, outer: Reads, params: string[]) => {
+		// A closure's blocks are not told apart: a tested name marks each same-named read in it, at the cost of a needless bounds check.
+		const own		= new Map<string, TS.Expr[]>(params.map(p => [p, []]));
+		const reads: Reads = n => own.get(n) ?? outer(n);
+		const tested	= new Set<string>();
+		// Scanned once this closure's own declarations are all known, as a nested function sees every one of them.
+		const nested: Closure[] = [];
+		const declare	= (target: JS.BindingTarget, read?: TS.Expr) => T.bindingNames(target).forEach(n => own.set(n, [...own.get(n) ?? [], ...read ? [read] : []]));
+		const w = walkerB(
+			(st, process) => {
+				if (st.type === 'function_decl')
+					return (nested.push(st), false);
+				if (st.type === 'var_decl')
+					st.declarations.forEach(d => declare(d.name, typeof d.name === 'string' && d.init?.type === 'index' ? d.init : undefined));
+				if (st.type === 'try')
+					st.handlers.forEach(h => h.param && declare(h.param));
+				return process(st);
+			},
+			(e, process) => {
+				if (e.type === 'arrow' || e.type === 'function')
+					return (nested.push(e), false);
+				if (e.type === 'object') {
+					e.properties.forEach(p => p.type === 'spread' ? w.expression(p.operand)
+						: p.type === 'field' ? (typeof p.key === 'object' && w.expression(p.key.computed), p.value && w.expression(p.value))
+						: nested.push(p));
+					return false;
+				}
+				if (e.type === 'binary' && (e.operator === '===' || e.operator === '!==' || e.operator === '==' || e.operator === '!=')) {
+					for (const [a, b] of [[e.left, e.right], [e.right, e.left]] as const) {
+						if (T.isNullLiteral(b)) {
+							if (a.type === 'index')
+								(a as { testedForAbsence?: boolean }).testedForAbsence = true;
+							else if (a.type === 'identifier')
+								tested.add(a.name);
+						}
 					}
 				}
+				return process(e);
+			},
+			undefined,
+			// A class member's code is a closure of its own: a method's parameters, a field's or static block's own locals.
+			m => {
+				if (m.type === 'method' || m.type === 'get' || m.type === 'set')
+					nested.push(m);
+				else if (m.type === 'field' && m.value)
+					nested.push({ params: [], body: m.value });
+				else if (m.type === 'static_block')
+					nested.push({ params: [], body: m.body });
+				return false;
 			}
-			return process(e);
-		}
-	).statements(stmts);
-	// EVERY same-named read, since the match is by name: two functions may each bind `byte` to a read of
-	// their own, and only one of them being tested does not make the other's unchecked read correct.
-	for (const name of tested)
-		for (const read of reads.get(name) ?? [])
-			(read as { testedForAbsence?: boolean }).testedForAbsence = true;
+		);
+		w.body(body);
+		nested.forEach(fn => fn.body && scan(fn.body, reads, paramNames(fn.params, fn.rest)));
+		for (const name of tested)
+			reads(name)?.forEach(read => (read as { testedForAbsence?: boolean }).testedForAbsence = true);
+	};
+	scan(stmts, () => undefined, []);
 }
 
 // TS2304 for a type: a ref naming nothing in the scope it was written in. Collected BEFORE checking, which writes contextual
