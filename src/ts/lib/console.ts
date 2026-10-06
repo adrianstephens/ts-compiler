@@ -36,8 +36,8 @@ export function __allocRelease(mark: i32): void {
 // subset, not a wrong encoding -- real UTF-8's variable-width encoding isn't needed by anything yet.
 
 // Copies `s`'s code units into a fresh linear-memory buffer, builds a 2-field (ptr, len) WASI iovec right
-// after it, and writes it via `fd_write` to fd 1 (stdout).
-function __writeString(s: string): void {
+// after it, and writes it via `fd_write` to `fd` (1 stdout, 2 stderr).
+function __writeString(s: string, fd: i32 = 1): void {
 	const mark = __allocMark();
 
 	const len = s.length;
@@ -50,19 +50,27 @@ function __writeString(s: string): void {
 	__asm<[i32, i32], void>('i32.store')(iov + 4, len);
 
 	const nwritten = __alloc(4, 4);
-	fd_write(1, iov, 1, nwritten);
+	fd_write(fd, iov, 1, nwritten);
 
 	__allocRelease(mark);
 }
 
-export class console {
-	static log(...x: any[]): void {
-		let result = '';
-		for (let i = 0; i < x.length; ++i) {
-			if (i)
-				result += ' ';
-			result += x[i].toString();
-		}
-		__writeString(result + '\n');
+// The arguments space-separated on one line, to `fd`.
+function __writeLine(x: any[], fd: i32): void {
+	let result = '';
+	for (let i = 0; i < x.length; ++i) {
+		if (i)
+			result += ' ';
+		result += x[i].toString();
 	}
+	__writeString(result + '\n', fd);
+}
+
+// As node's: `error`/`warn` to stderr, the rest to stdout.
+export class console {
+	static log(...x: any[]): void	{ __writeLine(x, 1); }
+	static info(...x: any[]): void	{ __writeLine(x, 1); }
+	static debug(...x: any[]): void	{ __writeLine(x, 1); }
+	static error(...x: any[]): void	{ __writeLine(x, 2); }
+	static warn(...x: any[]): void	{ __writeLine(x, 2); }
 };

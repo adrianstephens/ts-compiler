@@ -92,10 +92,11 @@ const TEST_ARGV	= ['towasm', 'arg1'];
 const TEST_ENV	= ['TOWASM_ENV=on', 'EMPTY='];
 
 async function instantiate(bytes: Uint8Array) {
-	const consoleOutput: string[] = [];
+	// Each write's text, and the descriptor it went to.
+	const consoleOutput: string[] = [], consoleFds: number[] = [];
 	const importObject = {
 		wasi_snapshot_preview1: {
-			fd_write: (_fd: number, iovsPtr: number, iovsLen: number, nwrittenPtr: number) => {
+			fd_write: (fd: number, iovsPtr: number, iovsLen: number, nwrittenPtr: number) => {
 				const mem = new DataView((instance.exports.memory as WebAssembly.Memory).buffer);
 				let total = 0;
 				for (let i = 0; i < iovsLen; i++) {
@@ -103,6 +104,7 @@ async function instantiate(bytes: Uint8Array) {
 					const len	= mem.getUint32(iovsPtr + i * 8 + 4, true);
 					const text	= String.fromCharCode(...new Uint8Array(mem.buffer, ptr, len));
 					consoleOutput.push(text);
+					consoleFds.push(fd);
 					process.stdout.write(text);
 					total += len;
 				}
@@ -134,7 +136,7 @@ async function instantiate(bytes: Uint8Array) {
 		return 0;
 	};
 	const instance = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.from(bytes)), importObject);
-	return { ...(instance.exports as Record<string, (...args: number[]) => number>), __consoleOutput: consoleOutput } as Record<string, (...args: number[]) => number> & { __consoleOutput: string[] };
+	return { ...(instance.exports as Record<string, (...args: number[]) => number>), __consoleOutput: consoleOutput, __consoleFds: consoleFds } as Record<string, (...args: number[]) => number> & { __consoleOutput: string[]; __consoleFds: number[] };
 }
 
 async function main() {
@@ -4329,6 +4331,16 @@ async function main() {
 		// codegen (real toString()/dynamic-any-dispatch included) every other interpolation already uses.
 		check('console.log(a string)', __consoleOutput[3], 'hi\n');
 		check('console.log(a class instance, real toString())', __consoleOutput[4], 'Point(5)\n');
+
+		{
+			// `console.error`/`warn` write to stderr (fd 2), `info`/`debug` to stdout, as node's do.
+			const { logLevels, __consoleOutput: out, __consoleFds: fds } = await compile(`
+				export function logLevels(): number { console.error('e', 1); console.warn('w'); console.info('i'); console.debug('d'); return 0; }
+			`);
+			logLevels();
+			check('console.error/warn/info/debug write their lines', out.join(''), 'e 1\nw\ni\nd\n');
+			check('console.error/warn go to stderr, info/debug to stdout', fds.join(','), '2,2,1,1');
+		}
 
 		// A program that never calls console.log at all must still instantiate with no imports required.
 		const { noLog } = await compile(`export function noLog(): number { return 5; }`);
