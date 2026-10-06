@@ -5040,7 +5040,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const holderType = (holder.wtype as { typeIndex: number }).typeIndex;
 				return { wtype: inner, operands: [holder], load: () => ctx.emitHolderRead(holderType, inner), store: () => ctx.emit(I.struct.set(holderType, 0)) };
 			};
-			const captured = ctx.closureEnv?.fields.get(name);
+			// A local this function declares is nearer than a capture of the same name wherever it is in scope (a block's own `const built`).
+			const local		= ctx.lookup(name);
+			const captured	= local ? undefined : ctx.closureEnv?.fields.get(name);
 			if (captured) {
 				const { envLocal, envTypeIndex } = ctx.closureEnv!;
 				const pushEnv = () => ctx.emit(I.local.get(envLocal.index));
@@ -5050,7 +5052,6 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					load:	() => ctx.emit(I.struct.get(envTypeIndex, captured.index)),
 					store:	() => ctx.emit(I.struct.set(envTypeIndex, captured.index)) };
 			}
-			const local = ctx.lookup(name);
 			if (local?.holderInner)
 				return viaHolder(fixed(local.wtype, () => ctx.emit(I.local.get(local.index))), local.holderInner);
 			if (local)
@@ -5530,7 +5531,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			// `holderInner` lets every read unbox it.
 			envTypeIndex = types.add({ final: true, supertypes: [envBase], type: { kind: 'struct', fields: capturedNames.map((name, i) => {
 				const wt = isHeld(name) ? thisHolder!.holder.wtype : ctx.rawWtype(name)!;
-				const holderInner = isHeld(name) ? thisHolder!.holder.holderInner : ctx.closureEnv?.fields.get(name)?.holderInner ?? ctx.lookup(name)?.holderInner;
+				// The name's nearest binding, as `rawWtype` and `rawSlot` read it: a local before a capture of the same name.
+				const holderInner = isHeld(name) ? thisHolder!.holder.holderInner : ctx.lookup(name) ? ctx.lookup(name)!.holderInner : ctx.closureEnv?.fields.get(name)?.holderInner;
 				fields.set(name, { index: i, wtype: wt, holderInner, tsType: isHeld(name) ? thisHolder!.tsType : ctx.scope.value(name) });
 				return { type: toValType(wt), mut: true };
 			}) } });
@@ -6937,7 +6939,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (!wtype || wtype === 'void')
 			throw `local '${name}' has an unsupported type`;
 		const defaultable = typeof wtype === 'string' || W.isNullable(wtype) || W.isAny(wtype);
-		const hoisted = ctx.closureEnv?.fields.get(name);
+		const hoisted = ctx.closureEnv?.frame ? ctx.closureEnv.fields.get(name) : undefined;
 		if (hoisted) {
 			if (defaultable) {
 				ctx.emit(I.local.get(ctx.closureEnv!.envLocal.index));
@@ -7051,7 +7053,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						continue;
 					}
 					// A generator's hoisted local is a frame struct field, as a closure capture is (`declareCaptured` registered its type).
-					const hoisted = ctx.closureEnv?.fields.get(d.name);
+					const hoisted = ctx.closureEnv?.frame ? ctx.closureEnv.fields.get(d.name) : undefined;
 					const initializing = (ctx.initializing ??= []);
 					initializing.push(d);
 					try {
@@ -7784,7 +7786,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		suspend:			(next: SuspendBoundary, resumeId: number, loopMark: number, setFrame: (state: number) => void) => void;
 		complete:			() => void;
 	}): void {
-		fnCtx.closureEnv	= { envLocal: frameLocal, envTypeIndex: frame.typeIndex, fields: frame.localFields };
+		fnCtx.closureEnv	= { envLocal: frameLocal, envTypeIndex: frame.typeIndex, fields: frame.localFields, frame: true };
 		for (const [localName, { tsType }] of frame.localFields)
 			fnCtx.declareCaptured(localName, tsType);
 		const setFrame		= (state: number) => fnCtx.emit(I.local.get(frameLocal.index), I.i32.const(state), I.struct.set(frame.typeIndex, 0));

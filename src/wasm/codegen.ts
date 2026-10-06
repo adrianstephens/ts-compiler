@@ -192,10 +192,12 @@ export interface Local {
 	holderInner?:	Type;
 }
 
+// `frame`: the fields are this function's own hoisted locals (a resumable frame), not captures from outside, which a local of the name shadows.
 export interface ClosureEnv {
 	envLocal:		Local;
 	envTypeIndex:	number;
-	fields:			Map<string, Local>
+	fields:			Map<string, Local>;
+	frame?:			boolean;
 };
 
 // Pushed by `case 'try'` with a `finally`: `emitBreak`/`emitContinue` check the innermost guard first, and a target outside it stashes an action
@@ -403,20 +405,20 @@ export class FunctionContext {
 
 	// The type of a name's logical VALUE: a local, an env field, or a forward-holder's inner type once unboxed (`rawWtype` is the exception).
 	resolvedWtype(name: string): Type | undefined {
-		const captured = this.closureEnv?.fields.get(name);
+		const local = this.lookup(name);
+		const captured = local ? undefined : this.closureEnv?.fields.get(name);
 		if (captured)
 			return captured.holderInner ?? captured.wtype;
-		const local = this.lookup(name);
 		return local?.holderInner ?? local?.wtype;
 	}
 	// The type of a name's STORAGE slot: a forward-holder's boxed type, which a closure capturing its shared storage needs.
 	rawWtype(name: string): Type | undefined {
-		return this.closureEnv?.fields.get(name)?.wtype ?? this.lookup(name)?.wtype;
+		return this.lookup(name)?.wtype ?? this.closureEnv?.fields.get(name)?.wtype;
 	}
 
 	// Reads a name's own storage slot: a captured name lives in `closureEnv`, everything else in a local.
 	rawSlot(name: string) {
-		const captured = this.closureEnv?.fields.get(name);
+		const captured = this.lookup(name) ? undefined : this.closureEnv?.fields.get(name);
 		if (captured) {
 			this.emit(I.local.get(this.closureEnv!.envLocal.index), I.struct.get(this.closureEnv!.envTypeIndex, captured.index));
 			return;

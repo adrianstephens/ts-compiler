@@ -48,34 +48,92 @@ export function ownBoundNames(names: string[], body: Stmt[] | Expr, selfName?: s
 
 export type Closure = { type?: string; params: JS.Param<Type>[]; rest?: JS.Rest<Type>; body?: Stmt[] | Expr; name?: string };
 
-// The names `body` reads that `bound` does not cover, `this` included, in first-use order. A nested closure contributes
-// what it reads from outside itself; an object literal's method reads its own `this`.
-export function freeIn(body: Stmt[] | Expr, bound: ReadonlySet<string> = new Set()): Set<string> {
-	const free	= new Set<string>();
-	const add	= (names: Iterable<string>) => {
-		for (const n of names)
-			if (!bound.has(n))
-				free.add(n);
-	};
+// The names a statement list binds for itself, as JS scopes them: `let`/`const`, classes and function declarations (`var` is the function's).
+function blockNames(stmts: Stmt[]): string[] {
+	return stmts.flatMap(s => {
+		const d = s.type === 'export_decl' ? s.declaration : s;
+		return d.type === 'var_decl' && d.kind !== 'var' ? d.declarations.flatMap(x => T.bindingNames(x.name))
+			: (d.type === 'function_decl' || d.type === 'class_decl') && d.name ? [d.name] : [];
+	});
+}
+
+// Every `var` a body declares at any depth short of a nested closure: function-scoped.
+function varNames(body: Stmt[] | Expr): string[] {
+	const out: string[] = [];
 	walkerB(
-		(s, process) => s.type === 'function_decl' ? (add(closureFree(s)), false) : s.type === 'class_decl' ? (add(classFree(s)), false) : process(s),
-		(e, process) => {
-			if (e.type === 'identifier' || e.type === 'this')
-				add([e.type === 'this' ? 'this' : e.name]);
-			else if (e.type === 'arrow' || e.type === 'function')
-				add(closureFree(e));
-			else if (e.type === 'class')
-				add(classFree(e));
-			else if (e.type !== 'object')
-				return process(e);
-			else
-				for (const p of e.properties)
-					add(p.type === 'spread' ? freeIn(p.operand)
-						: p.type !== 'field' ? [...closureFree(p)].filter(n => n !== 'this')
-						: [...typeof p.key === 'object' ? freeIn(p.key.computed) : [], ...p.value ? freeIn(p.value) : []]);
-			return false;
-		}
+		(s, process) => s.type === 'function_decl' || s.type === 'class_decl' ? false
+			: (s.type === 'var_decl' && s.kind === 'var' && s.declarations.forEach(d => out.push(...T.bindingNames(d.name))), process(s)),
+		(e, process) => e.type === 'arrow' || e.type === 'function' || e.type === 'object' || e.type === 'class' ? false : process(e)
 	).body(body);
+	return out;
+}
+
+// The names `body` reads that `bound` does not cover, `this` included, in first-use order. A nested closure contributes what it reads from
+// outside itself; an object literal's method reads its own `this`. Scoped as JS is: a block, a `for`'s own `let`, a catch parameter and a
+// `switch`'s cases bind their names over their own extent only.
+export function freeIn(body: Stmt[] | Expr, bound: ReadonlySet<string> = new Set()): Set<string> {
+	const free		= new Set<string>();
+	const entered	= new WeakSet<Stmt>();
+	const scan = (x: Stmt[] | Expr, outer: ReadonlySet<string>): void => {
+		const inner	= Array.isArray(x) ? new Set([...outer, ...blockNames(x)]) : outer;
+		const with_	= (names: string[]) => new Set([...inner, ...names]);
+		const add	= (names: Iterable<string>) => {
+			for (const n of names)
+				if (!inner.has(n))
+					free.add(n);
+		};
+		const w = walkerB(
+			(s, process) => {
+				switch (s.type) {
+					case 'function_decl':	return add(closureFree(s)), false;
+					case 'class_decl':		return add(classFree(s)), false;
+					case 'block':			return scan(s.body, inner), false;
+					case 'try':
+						scan(s.body, inner);
+						s.handlers.forEach(h => scan(h.body, with_(h.param ? T.bindingNames(h.param) : [])));
+						if (s.finalizer)
+							scan(s.finalizer, inner);
+						return false;
+					case 'switch': {
+						const cases = with_(blockNames(s.cases.flatMap(c => c.consequent)));
+						scan(s.discriminant, inner);
+						s.cases.forEach(c => (c.test && scan(c.test, cases), scan(c.consequent, cases)));
+						return false;
+					}
+					case 'for': {
+						// Its own `let`/`const` covers the whole loop; walked once more under it.
+						const names = s.init?.type === 'var_decl' && s.init.kind !== 'var' ? s.init.declarations.flatMap(d => T.bindingNames(d.name)) : [];
+						if (!names.length || entered.has(s))
+							return process(s);
+						entered.add(s);
+						return scan([s], with_(names)), false;
+					}
+				}
+				return process(s);
+			},
+			(e, process) => {
+				if (e.type === 'identifier' || e.type === 'this')
+					add([e.type === 'this' ? 'this' : e.name]);
+				else if (e.type === 'arrow' || e.type === 'function')
+					add(closureFree(e));
+				else if (e.type === 'class')
+					add(classFree(e));
+				else if (e.type !== 'object')
+					return process(e);
+				else
+					for (const p of e.properties)
+						add(p.type === 'spread' ? freeIn(p.operand)
+							: p.type !== 'field' ? [...closureFree(p)].filter(n => n !== 'this')
+							: [...typeof p.key === 'object' ? freeIn(p.key.computed) : [], ...p.value ? freeIn(p.value) : []]);
+				return false;
+			}
+		);
+		if (Array.isArray(x))
+			w.statements(x);
+		else
+			w.expression(x);
+	};
+	scan(body, bound);
 	return free;
 }
 
@@ -103,7 +161,7 @@ export function closureFree(fn: Closure): Set<string> {
 	let free = closureFrees.get(fn);
 	if (!free) {
 		const body	= fn.body ?? [];
-		const bound	= ownBoundNames(paramNames(fn.params, fn.rest), body, fn.name);
+		const bound	= new Set([...paramNames(fn.params, fn.rest), ...varNames(body), ...fn.name ? [fn.name] : []]);
 		free		= new Set([body, ...fn.params.flatMap(p => p.default ? [p.default] : [])].flatMap(b => [...freeIn(b, bound)]));
 		closureFrees.set(fn, free);
 		// A function declaration read from a closure nested in it (not a direct self-call, which `selfCall` makes) is its enclosing scope's binding.
@@ -125,7 +183,7 @@ function classFree(c: JS.Class<Type, TS.ClassMember>): string[] {
 
 // The names a module reads that it neither declares nor imports: what only a global (the lib's, or the host's) can supply.
 export function moduleFree(body: Stmt[]): Set<string> {
-	const bound = ownBoundNames([], body);
+	const bound = new Set(varNames(body));
 	for (const s of body) {
 		const d = s.type === 'export_decl' ? s.declaration : s;
 		if (d.type === 'import')

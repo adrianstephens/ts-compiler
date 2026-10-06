@@ -4932,6 +4932,29 @@ async function main() {
 	}
 
 	{
+		// Block scoping: a nested function capturing an outer `built` while a block of its own declares another (wasm-backend.ts's `noteSlot`).
+		const { blockShadow, blockShadowOwn } = await compile(`
+			export function blockShadow(): number {
+				const built = (n: number) => n * 2;
+				function inner(v: number): number {
+					if (v > 10) { const built = v + 1; return built; }
+					for (let i = 0; i < 1; i++) { const x = i; }
+					try { throw 1; } catch (built) { }
+					return built(v);
+				}
+				return inner(3) + inner(20);
+			}
+			export function blockShadowOwn(): number {
+				const built = (n: number) => n * 2;
+				function inner(v: number): number { { const built = v; v = built; } return built(v); }
+				return inner(3) + inner(20);
+			}
+		`);
+		check('a capture beside a block-scoped redeclaration', blockShadow(), 27);
+		check('a block-scoped redeclaration shadows a capture within its block', blockShadowOwn(), 46);
+	}
+
+	{
 		// A nested function's direct self-call omitting a defaulted or optional argument (wasm-backend.ts's `noteTypes(se, ve, scope, depth - 1)`).
 		const { selfCallDefaults } = await compile(`
 			export function selfCallDefaults(): number {
