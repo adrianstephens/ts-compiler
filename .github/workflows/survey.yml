@@ -4,6 +4,10 @@ name: Self-hosting survey
 # matrix runs each slice (a worker probing a few top-level declarations) on a runner of its own, and a last job merges
 # them into the tables a local run prints -- on the run's summary page, and as the `survey-results` artifact.
 on:
+  # a push is a request for a survey, unless it touches nothing a survey measures
+  push:
+    branches: [main]
+    paths: ['src/**', 'survey/**', '.github/workflows/survey.yml']
   workflow_dispatch:
     inputs:
       snapshot:

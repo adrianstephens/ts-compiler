@@ -6,7 +6,8 @@ metadata:
 ---
 
 The survey (`compiler/survey/`, tracked since 2026-10-06; it was untracked scratch in `assistant/`) runs in CI as
-`.github/workflows/survey.yml` in ts-compiler, started by hand (`workflow_dispatch`, input `snapshot`: `previous` | `heads`).
+`.github/workflows/survey.yml` in ts-compiler. A push to main touching `src/`, `survey/` or the workflow starts one (on the
+previous run's snapshot); so can the Actions tab (`workflow_dispatch`, input `snapshot`: `previous` | `heads`).
 Local runs are memory-bound (16 GB Mac, a 6 GB worker heap, ~2 workers, ~2 hours); CI gives each slice its own 16 GB runner,
 20 at a time.
 
