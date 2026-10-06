@@ -4879,6 +4879,17 @@ async function main() {
 			export function iterateAnyArray(): number { const d = [new O(3), new O(4)]; return g(d.map(o => o.typeIndex)); }
 		`);
 		check('for...of over an any-held number array', iterateAnyArray(), 7);
+		// A nested function is one closure: its parameter receiving another array storage is opened, not converted.
+		const { nestedOpenParam } = await compile(`
+			type HT = number | 'any' | 'eq';
+			class O { constructor(public typeIndex: number) {} }
+			export function nestedOpenParam(): number {
+				function g(hs: HT[]): number { let s = 0; for (const h of hs) s += typeof h === 'number' ? h : 100; return s; }
+				const d = [new O(3), new O(4)];
+				return g(d.map(o => o.typeIndex)) + g(['eq', 1]);
+			}
+		`);
+		check('a nested function\'s parameter receiving another array storage', nestedOpenParam(), 108);
 	}
 
 	{

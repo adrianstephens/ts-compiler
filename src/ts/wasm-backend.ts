@@ -1294,11 +1294,13 @@ function collectOpenShapes(
 							// declared signature as written, and every layout in it is a slot.
 							const fnAt	= (i: number) => { const a = decl.params[i]?.typeAnnotation; return !!a && T.resolve(scope, a).type === 'function'; };
 							const escapes = (i: number) => { const k = decl.params[i]?.key; return typeof k === 'string' && !!escaping.get(decl)?.has(k); };
+							// Only a MODULE function is compiled per argument layout; a nested one is one closure, whose parameters are slots.
+							const perLayout	= calleeDecl?.type !== 'function_decl' || callee.type !== 'identifier' || !!functionOf(callee.name, scope);
 							e.arguments.forEach((a, i) => {
 								const p = decl.params[i];
 								if (p && typeof p.key === 'string')
 									slotOf.set(a, p);
-								if (a.type !== 'object' && a.type !== 'array' && !fnAt(i) && !escapes(i))
+								if (perLayout && a.type !== 'object' && a.type !== 'array' && !fnAt(i) && !escapes(i))
 									notASlot.add(a);
 							});
 						// The compiled body need not be the chosen signature (an overload's implementation, the widest for an `any` argument), so every
@@ -5468,7 +5470,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			}
 			// An UNANNOTATED parameter takes the callee's declared one (`Rule([...], $ => ...)` can name it no other way). An annotation the checker wrote back
 			// names types from the SIGNATURE's module, which need not resolve here: the wanted signature is the physical truth.
-			const annotated = p.typeAnnotation && typeOf(p.typeAnnotation);
+			const annotated = p.typeAnnotation && typeOf(openedAs(p, p.typeAnnotation));
 			const ctx = annotated ? undefined : wantParam(i);
 			// A wasm-unrepresentable `void` is boxed as `any`.
 			const wt = annotated || ctx?.wtype;
