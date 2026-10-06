@@ -4847,6 +4847,16 @@ async function main() {
 	}
 
 	{
+		// A subclass reads and writes an accessor its base declares.
+		const { inheritedAccessor } = await compile(`
+			class A { v = 2; get x(): number { return this.v * 10; } set x(n: number) { this.v = n; } }
+			class B extends A { y = 1; }
+			export function inheritedAccessor(): number { const b = new B(); b.x = 4; return b.x + b.y; }
+		`);
+		check('a subclass reads and writes its base\'s accessor', inheritedAccessor(), 41);
+	}
+
+	{
 		// A constructor assigning its fields in branches (codegen.ts's `Error`): the object is built up front, its fields written in place.
 		const { ctorBranchFields } = await compile(`
 			class E { msg: string; pos: number[]; constructor(err: string | E) { if (err instanceof E) { this.msg = err.msg + '!'; this.pos = err.pos; } else { this.msg = err; this.pos = [7]; } } }

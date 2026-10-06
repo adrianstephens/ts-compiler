@@ -8549,6 +8549,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			info.superClass = superInfo;
 			info.fields.push(...superInfo.fields);
 			superInfo.fieldIndex.forEach((idx, fname) => info.fieldIndex.set(fname, idx));
+			// Inherited accessors are this class's too: a read of one finds its `get:` method up the chain (`ensureMethod`).
+			info.getterNames = superInfo.getterNames && new Set(superInfo.getterNames);
+			info.setterNames = superInfo.setterNames && new Set(superInfo.setterNames);
 		}
 
 		if (returnType) {
