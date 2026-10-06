@@ -4927,6 +4927,17 @@ async function main() {
 	}
 
 	{
+		// A generic instantiated at `void` (codegen.ts's `inScope<void>`): its `void` local holds `undefined`, its initializer run for effects.
+		const { voidLocal } = await compile(`
+			let n = 0;
+			function run<T>(fn: () => T): T { const result = fn(); n++; return result; }
+			function act(): void { n += 10; }
+			export function voidLocal(): number { run<void>(act); const x = run(() => 5); return n * 10 + x; }
+		`);
+		check('a generic instantiated at void holds its void local', voidLocal(), 125);
+	}
+
+	{
 		// `a && f()` as a VALUE with a `void` `f`: the call, then `undefined` (wasm-backend.ts's `match = (d, r) => d && r && T.inferTypeArgs(...)`).
 		const { voidAndValue } = await compile(`
 			let hits = 0;

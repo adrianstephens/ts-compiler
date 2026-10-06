@@ -7035,8 +7035,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						emitExpr(d.init, ctx);
 						throw `local '${d.name}' has an unsupported type`;
 					}
-					if (wtype === 'void')
-						throw `local '${d.name}' cannot have type 'void'`;
+					// A `void` local (a generic instantiated at `void`: `const result = fn(this)`) holds `undefined`, its initializer run for its effects.
+					if (wtype === 'void') {
+						emitDiscarded(d.init, ctx);
+						emitAs(Identifier('undefined'), ctx, W.REF_ANY_NULLABLE);
+						ctx.emit(I.local.set(ctx.declareValue(d.name, W.REF_ANY_NULLABLE, T.UNDEFINED).index));
+						continue;
+					}
 					// A generator's hoisted local is a frame struct field, as a closure capture is (`declareCaptured` registered its type).
 					const hoisted = ctx.closureEnv?.fields.get(d.name);
 					const initializing = (ctx.initializing ??= []);
