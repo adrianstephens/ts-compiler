@@ -38,11 +38,20 @@ kind. binary itself: DataViewTypedArray has its own typed-array methods (its Arr
 Then: an array's element keeps its machine type in inference (`Array<i32>.slice`); a closure fits a closure slot only if its result
 converts; TS 4.4 aliased discriminants (`const op = i.op; switch (op)` narrows `i`, via `scope.addSource`).
 **binary-libs wasm.ts now compiles WHOLE** (`WHOLE_FIRST=1 SNAP=<snapshot> probe-decl.ts <snapshot>/binary-libs/src/wasm.ts WasmModule`;
-snapshot = committed sources, refresh after committing binary). **Next**: re-run the survey (ask first) for the next failing rows.
+snapshot = committed sources, refresh after committing binary).
+**Survey 2026-10-06 at `1f96cfa`** (`selfhost-survey.md`; `.prev.md` is 11aa1d6): wasm-backend.ts parses now; its top causes and a
+regression were fixed after it: a hoisted signature takes a non-literal default's type (`refreshParams` after the body; 166 rows);
+defineProperty honours `enumerable` (user's choice; `Map.define`/`hidden_`, `KeyOp` 'define' through every keyed op; 21+ rows); the
+backend re-types an original node against its stamped `expectedTypeOf` (`new Set()` into `ReadonlySet<T>`; 69 rows).
+**Next**: wasm-backend.ts's `process.env` (unresolved `process`: a host-environment decision for the user); self-check checker false
+positives (checker.ts 1213/1215 `Type | undefined` after a narrowing; transform.ts 337 SwitchCase rest; wasm-backend's 8 ERRs);
+wasm.ts's "closure parameter 'v'" (7 rows). Re-run the survey (ask first) before trusting rows.
 Known gaps found: a generic instantiation is its own class (statics per instantiation); a literal with a method into a class-typed
 slot (`object literal for 'A' has unknown property`); `unknown + unknown` accepted; method values (`obj.m`) have no identity;
 `[].values().next().value` types `number | TResult` (a leaked type parameter); wasm lib has no `localeCompare` (wasm-backend.ts:1931,
-needs collation). Re-run the survey before trusting rows.
+needs collation); an `any` read with a symbol key resolves by its SPELLING (`symbolMember`) while an undeclared symbol key is defined
+into `#ext` by VALUE, so they miss; a declared struct field stays enumerable whatever defineProperty says; a hoisted function's
+non-literal-default parameter is untyped for calls checked before its body (missed errors only).
 
 ## The direction since 2026-09-21 (the user's) and what it settled
 
