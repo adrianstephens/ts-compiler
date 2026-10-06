@@ -9,7 +9,7 @@ import { type Contextual, checkBlock, checkHoisted, checkImported, superClassRef
 import { Walker, walker, walkerB } from './walker';
 import { type Closure, paramNames, ownBoundNames, freeIn, closureFree } from './free-names';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
-import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
+import { iteratorOf, foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
 import * as wasm from '@isopodlabs/binary_libs/wasm';
 import * as WAT from '../wasm/wat-parser';
 
@@ -2018,9 +2018,9 @@ function primitivePart(t: TS.IntersectionType, scope: Scope): Type | undefined {
 // its own `[Symbol.iterator]` is for a value known only as an `Iterable`.
 function iteratesByProtocol(e: Expr, ctx: FunctionContext): T.IterationTypes | undefined {
 	const t = ctx.narrowedTypeOf(e);
-	// An `any` is iterated as JS iterates any value, by its `[Symbol.iterator]()`: position is only an array's way.
+	// An `any` is iterated as JS iterates any value, by its `[Symbol.iterator]()` (`__towasm_iterate`: an array's yields by position).
 	if (T.isAny(t))
-		return T.iterationTypes(t, ctx.scope);
+		return (it => it && { ...it, erased: true })(T.iterationTypes(t, ctx.scope));
 	if (T.unionMembers(t, ctx.scope).every(m => arrayPartOf(m, ctx.scope)) || !T.lookupMember(t, '[Symbol.iterator]', ctx.scope))
 		return undefined;
 	const it = T.iterationTypes(t, ctx.scope);
@@ -2933,7 +2933,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			return operand;
 		const { temp, emit } = lowering(ctx, ctx.scope);
 		const iter = Identifier(temp('iterator'));
-		emit(JS.VarDecl('const', JS.Var(iter.name, JS.Call(JS.Member(operand, '[Symbol.iterator]'), []))));
+		emit(JS.VarDecl('const', JS.Var(iter.name, iteratorOf(operand, it))));
 		return drainIterator(iter, it, ctx.scope, temp, emit);
 	}
 

@@ -144,6 +144,7 @@ interface IterableIterator<T, R = any, N = any> extends Iterator<T, R, N> {
 	[Symbol.iterator](): IterableIterator<T, R, N>;
 }
 declare function __towasm_indexed<T>(size: () => number, at: (i: number) => T): Generator<T, void, unknown>;
+declare function __towasm_iterate(x: any): any;
 interface PromiseLike<T> {
 	then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null): PromiseLike<TResult1 | TResult2>;
 }

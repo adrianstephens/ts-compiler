@@ -469,7 +469,7 @@ export function lowerPattern(kind: JS.DeclarationKind, target: BindingTarget, va
 	if (target.type === 'array_pattern') {
 		const it = how.iterates?.(v());
 		if (it && how.temp && how.scope) {
-			const iter = hold(JS.Call(JS.Member(v(), '[Symbol.iterator]'), []), 'iterator');
+			const iter = hold(iteratorOf(v(), it), 'iterator');
 			for (const el of target.elements) {
 				const r = hold(nextCall(iter(), it, how.scope), 'result');	// a hole still advances
 				if (el)
@@ -509,6 +509,9 @@ export function drainIterator(iterator: TS.Expr, it: T.IterationTypes, scope: Sc
 	return Identifier(arr);
 }
 
+// `x`'s iterator: `x[Symbol.iterator]()`, or for a value held as `any` (`it.erased`) `__towasm_iterate(x)`.
+export const iteratorOf = (x: TS.Expr, it: T.IterationTypes): TS.Expr => it.erased ? JS.Call(Identifier('__towasm_iterate'), [x]) : JS.Call(JS.Member(x, '[Symbol.iterator]'), []);
+
 // `for (v of xs) body` as plain loops: by the iteration protocol where codegen iterates by it (`it`: what iterating yields), else by
 // position, a string's (`byCodePoint`) a code point at a time as its iterator yields. `temp` names a fresh hidden binding.
 export function lowerForOf(s: ForOf, it: T.IterationTypes | undefined, scope: Scope, temp: (role: string) => string, byCodePoint = false): Stmt {
@@ -521,7 +524,7 @@ export function lowerForOf(s: ForOf, it: T.IterationTypes | undefined, scope: Sc
 	if (it) {
 		const iter = use(temp('it')), r = use(temp('r'));
 		return JS.Block<Stmt>(
-			JS.VarDecl('const', JS.Var(iter().name, JS.Call(JS.Member(s.right, '[Symbol.iterator]'), []))),
+			JS.VarDecl('const', JS.Var(iter().name, iteratorOf(s.right, it))),
 			JS.For(JS.VarDecl('let', JS.Var(r().name, nextCall(iter(), it, scope))), JS.JSUnary('!', JS.Member(r(), 'done')), Assign<TS.Expr, never>(r(), nextCall(iter(), it, scope)), bind(JS.Member(r(), 'value'), it.yield)),
 		);
 	}

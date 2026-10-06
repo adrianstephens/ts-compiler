@@ -3489,7 +3489,8 @@ export interface Semantics {
 	iterationOf(target: Type, source: Type, scope: Scope): { target: IterationTypes; source: IterationTypes } | undefined;
 }
 
-export interface IterationTypes { yield: Type; return: Type; next: Type }
+// `erased`: the iterated value is held as `any`, so it is iterated through `__towasm_iterate` (an array by position, whatever its element storage).
+export interface IterationTypes { yield: Type; return: Type; next: Type; erased?: boolean }
 
 // Where `break`/`continue` deliver their flow: a loop, a `switch`, or a labeled statement.
 export interface FlowTarget { labels: string[]; loop: boolean; breaks: Scope[]; continues: Scope[] }

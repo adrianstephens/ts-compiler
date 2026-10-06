@@ -280,6 +280,12 @@ class WeakRef<T extends object> {
 	deref(): T | undefined			{ return this.target; }
 }
 
+// A value iterated through `any`: an array by position, as its own iterator yields (whatever its element storage), anything else by its iterator,
+// whatever object that is.
+export function __towasm_iterate(x: any): any {
+	return Array.isArray(x) ? __towasm_indexed<any>(() => x.length, i => x[i]) : x[Symbol.iterator]();
+}
+
 // `at(i)` while `i < size()`, both read on every step: how `Map`/`Set` iterate their own backing arrays live.
 export function* __towasm_indexed<T>(size: () => number, at: (i: number) => T): Generator<T, void, unknown> {
 	for (let i = 0; i < size(); i++)

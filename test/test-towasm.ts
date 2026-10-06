@@ -4871,6 +4871,17 @@ async function main() {
 	}
 
 	{
+		// A `for...of` over a value held as `any` (an open `HT[]` slot holding a `number[]`) iterates an array by position, whatever its storage.
+		const { iterateAnyArray } = await compile(`
+			type HT = number | 'any' | 'eq';
+			function g(hs: HT[]): number { let s = 0; for (const h of hs) s += typeof h === 'number' ? h : 100; return s; }
+			class O { constructor(public typeIndex: number) {} }
+			export function iterateAnyArray(): number { const d = [new O(3), new O(4)]; return g(d.map(o => o.typeIndex)); }
+		`);
+		check('for...of over an any-held number array', iterateAnyArray(), 7);
+	}
+
+	{
 		// `Array`'s `keys()`/`values()`/`entries()`, live as its iterator is.
 		const { arrayIterators } = await compile(`
 			export function arrayIterators(): number { const a = [5, 6, 7]; let s = 0; for (const [i, v] of a.entries()) s += i * v; for (const k of a.keys()) s += k * 100; for (const v of a.values()) s += v * 1000; return s; }
