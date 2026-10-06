@@ -2272,8 +2272,10 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 				}
 				// A declared `[i: number]: T` index signature (`Record<number, T>`, typed arrays), searched through every intersection part (`indexSignatureOf`):
 				// for a computed key no named property applies.
+				// A computed key reads the signature its type selects, as TS's getIndexedAccessType: a number key a number signature, else (and any
+				// other key) a string one.
 				if (!keys) {
-					const idxT = T.indexSignatureOf(objT, scope);
+					const idxT = (T.isNumberLike(indexT, scope) ? T.indexSignatureOf(objT, scope) : undefined) ?? T.stringIndexSignatureOf(objT, scope);
 					return idxT ? T.optional(idxT, absent) : T.ANY;
 				}
 				const found = keys.map(k => T.lookupMember(objT, k, scope));

@@ -2005,6 +2005,11 @@ export function indexSignatureOf(t: Type, scope: Scope, depth = 6): Type | undef
 	return numeric(collectMembers(t, scope));
 }
 
+// A `[k: string]: T` index signature, the one a computed string key reads (and a number key where no number signature is declared).
+export function stringIndexSignatureOf(t: Type, scope: Scope): Type | undefined {
+	return indexMembers(collectMembers(t, scope)).find(m => isRef(resolveOwn(m.paramType, scope), 'string'))?.typeAnnotation;
+}
+
 // The index signature among `members` that covers key `prop`: a numeric one only a numeric-looking key (it is the more
 // specific, as TS requires), a string one every key. A numeric signature must not answer `'push'` for `String`'s `[i: number]`.
 function indexSignatureFor(members: TS.TypeMember[], prop: string, scope: Scope): Type | undefined {
