@@ -3365,8 +3365,13 @@ export function checkStmt(stmt: Stmt, scope: Scope, typeOf: typeOf, checkStmt: c
 		}
 
 		case 'function_decl':
-			if (stmt.body)
+			if (stmt.body) {
 				checkFunctionBody(stmt, stmt.body, ownThis(flowContainer(scope)), hasMod(stmt, 'async'), hasMod(stmt, 'generator'), hasMod(stmt, 'generator'), err, undefined, !quiet);
+				// The hoisted signature typed only literal defaults: the body's check wrote back the rest (`c = m.constraint`).
+				const hoisted = scope.value(stmt.name);
+				if (hoisted?.type === 'function' && hoisted.origin === stmt)
+					refreshParams(hoisted, stmt);
+			}
 			return scope;
 
 		case 'class_decl':
