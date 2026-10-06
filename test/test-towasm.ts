@@ -10,6 +10,7 @@ import { quoteString } from '../dist/ts/printer';
 import { TStypeCheck, TStypeCheckAsync } from '../dist/ts/transform';
 import { ModuleLoader, collectModules } from '../dist/ts/module-loader';
 import { SEVERITY, makeLibScope } from '../dist/ts/checker';
+import { moduleFree } from '../dist/ts/free-names';
 
 // `try`/`catch` compiles to the exnref/try_table exception-handling proposal (Wasm 3.0), which
 // this Node's V8 doesn't enable by default -- must be set before the first `WebAssembly.Module`
@@ -87,6 +88,9 @@ async function compileMulti(files: Record<string, string>, entry: string) {
 	}
 }
 
+const TEST_ARGV	= ['towasm', 'arg1'];
+const TEST_ENV	= ['TOWASM_ENV=on', 'EMPTY='];
+
 async function instantiate(bytes: Uint8Array) {
 	const consoleOutput: string[] = [];
 	const importObject = {
@@ -105,7 +109,29 @@ async function instantiate(bytes: Uint8Array) {
 				mem.setUint32(nwrittenPtr, total, true);
 				return 0; // errno success
 			},
+			// A fixed argv and environment, for `lib/node/process.ts` (`process.argv`/`process.env`).
+			args_sizes_get:		(countPtr: number, sizePtr: number) => tableSizes(TEST_ARGV, countPtr, sizePtr),
+			args_get:			(ptrs: number, buf: number) => tableWrite(TEST_ARGV, ptrs, buf),
+			environ_sizes_get:	(countPtr: number, sizePtr: number) => tableSizes(TEST_ENV, countPtr, sizePtr),
+			environ_get:		(ptrs: number, buf: number) => tableWrite(TEST_ENV, ptrs, buf),
+			proc_exit:			(code: number) => { throw new Error(`proc_exit(${code})`); },
 		},
+	};
+	// WASI's string tables: a count and total size (NUL-terminated), then pointers into one flat buffer.
+	const tableSizes = (table: string[], countPtr: number, sizePtr: number) => {
+		const mem = new DataView((instance.exports.memory as WebAssembly.Memory).buffer);
+		mem.setUint32(countPtr, table.length, true);
+		mem.setUint32(sizePtr, table.reduce((n, e) => n + e.length + 1, 0), true);
+		return 0;
+	};
+	const tableWrite = (table: string[], ptrs: number, buf: number) => {
+		const mem = new DataView((instance.exports.memory as WebAssembly.Memory).buffer);
+		table.forEach((e, i) => {
+			mem.setUint32(ptrs + i * 4, buf, true);
+			[...e].forEach(c => mem.setUint8(buf++, c.charCodeAt(0)));
+			mem.setUint8(buf++, 0);
+		});
+		return 0;
 	};
 	const instance = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.from(bytes)), importObject);
 	return { ...(instance.exports as Record<string, (...args: number[]) => number>), __consoleOutput: consoleOutput } as Record<string, (...args: number[]) => number> & { __consoleOutput: string[] };
@@ -1721,6 +1747,15 @@ async function main() {
 				export function nsInstanceof(): number { return isScope(new T.Scope(7)) * 10 + isScope(new T.Other()); }`,
 		}, 'main');
 		check("nsInstanceof() (instanceof NS.Class)", nsInstanceof(), 70);
+		// Node's global `process` is the `node:process` module, imported where a module reads it free; a parameter or method's `process` is not it.
+		const { nodeProcess } = await compileMulti({
+			lib:	`export function shadow(process: number): number { return process + 1; } export class K { m(process: number) { return process * 2; } }`,
+			main:	`import { shadow, K } from './lib'; export function nodeProcess(): number {
+				return (process.env.TOWASM_ENV === 'on' ? 1000 : 0) + (process.env.MISSING === undefined ? 100 : 0) + process.argv.length * 10 + shadow(new K().m(0)); }`,
+		}, 'main');
+		check("nodeProcess() (the global `process` is node:process)", nodeProcess(), 1121);
+		check("moduleFree: a parameter, method parameter or local named `process` is bound", [...moduleFree(parser.parse(`function f(process: number) { return process; }
+			class C { m(process: number) { return process; } } const g = (process: number) => process; { const process = 1; }`).body)].includes('process'), false);
 		// A non-entry module's own generic type shadows the lib class of its name (binary's `TypedArray<R>` interface, not the lib's typed array).
 		const { shadowed } = await compileMulti({
 			lib:	`export interface TypedArray<R> { length: number; first: R }

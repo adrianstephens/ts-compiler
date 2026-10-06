@@ -5,6 +5,7 @@ import { Module, Location, Identifier, Literal, Binary, Conditional, Assign, Awa
 import { walker, walkerB, constantFolder } from './walker';
 import { SEVERITY, Err, isPurePath, checkBlock, checkStmt1, exportScope, markAbsenceTests, literalSpecifier, unknownTypeNames, typeOf, typeOf1, inferReturn } from './checker';
 import { LoadedModule, ModuleLoader } from './module-loader';
+import { moduleFree } from './free-names';
 
 type Expr			= JS.Expr;
 type Stmt			= TS.Stmt;
@@ -767,6 +768,13 @@ export async function loadLib(loader: ModuleLoader, libs: string[]): Promise<T.S
 }
 
 // As `TStypeCheck`, with `global` chained on top of whatever `options.lib` loads.
+// Node's global `process` IS its `process` module (`lib/node/process.ts`): a module reading it free imports it, as `require('process')`
+// would give it. Mutates `body`.
+function importNodeGlobals(body: Stmt[]) {
+	if (moduleFree(body).has('process'))
+		body.unshift({ type: 'import', source: 'node:process', namespace: 'process' });
+}
+
 export async function TStypeCheckAsync(program: Module<Stmt>, loader: ModuleLoader, global: Scope) {
 	const diagnostics: Diagnostic[] = [];
 
@@ -831,6 +839,7 @@ export async function TStypeCheckAsync(program: Module<Stmt>, loader: ModuleLoad
 			return existing;
 
 		const importScope = new Scope(global);
+		importNodeGlobals(src.program.body);
 		const cached = resolveImports(src, importScope, src.program.body, src.canonical).then(async imports => {
 			let tainted = imports.some(clean => !clean);
 			await resolveDynamicImports(src, src.program.body, src.canonical);
@@ -881,6 +890,7 @@ export async function TStypeCheckAsync(program: Module<Stmt>, loader: ModuleLoad
 	// The entry program never goes through `makeScope`: just its own identity for `wouldDeadlock`.
 	const entryScope = new Scope(global);
 	const entry = { program, canonical: '.' };
+	importNodeGlobals(program.body);
 	await resolveImports(entry, entryScope, program.body, '.');
 	await resolveDynamicImports(entry, program.body, '.');
 

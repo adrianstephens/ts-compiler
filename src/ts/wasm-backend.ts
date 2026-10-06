@@ -7,6 +7,7 @@ import * as W from '../wasm/codegen';
 import { Literal, Identifier, Binary, Assign, hasMod, Module as CModule } from '@isopodlabs/tison/ast';
 import { type Contextual, checkHoisted, checkImported, superClassRef, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, restampFlow, checkedTypeOf, expectedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr, checkMethodInstance } from './checker';
 import { Walker, walker, walkerB } from './walker';
+import { type Closure, paramNames, ownBoundNames, freeIn, closureFree } from './free-names';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
 import { foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
 import * as wasm from '@isopodlabs/binary_libs/wasm';
@@ -757,110 +758,6 @@ function unwrapAs(e: Expr): Expr {
 
 function describeBinding(t: BindingTarget): string {
 	return typeof t === 'string' ? t : t.type === 'array_pattern' ? '[...]' : '{...}';
-}
-
-// ===================================================================
-//  Closures -- free-variable analysis
-// ===================================================================
-
-function paramNames(params: JS.Param<Type>[], rest?: JS.Rest<Type>): string[] {
-	const names = params.flatMap(p => T.bindingNames(p.key));
-	return rest ? [...names, ...T.bindingNames(rest.key)] : names;
-}
-
-// Every name body binds directly (own params + var_decls), not descending into nested arrow/function bodies.
-function ownBoundNames(names: string[], body: Stmt[] | Expr, selfName?: string): Set<string> {
-	const bound = new Set(names);
-	if (selfName)
-		bound.add(selfName);
-	// A `for`'s own `let i` reaches the `var_decl` case too: the walker routes `init` through the statement walk.
-	walkerB(
-		(s, process) => {
-			// A nested function binds its own name here, but its body is a closure boundary of its own.
-			if (s.type === 'function_decl') {
-				bound.add(s.name);
-				return false;
-			}
-			if (s.type === 'var_decl') {
-				for (const d of s.declarations)
-					T.bindingNames(d.name).forEach(n => bound.add(n));
-			}
-			if (s.type === 'try') {
-				for (const h of s.handlers)
-					if (h.param)
-						T.bindingNames(h.param).forEach(n => bound.add(n));
-			}
-			return process(s);
-		},
-		// An object literal reaches statements only through its methods' bodies, each a closure boundary.
-		(e, process) => (e.type === 'arrow' || e.type === 'function' || e.type === 'object') ? false : process(e)
-	).body(body);
-	return bound;
-}
-
-type Closure = { type?: string; params: JS.Param<Type>[]; rest?: JS.Rest<Type>; body?: Stmt[] | Expr; name?: string };
-
-// The names `body` reads that `bound` does not cover, `this` included, in first-use order. A nested closure contributes
-// what it reads from outside itself; an object literal's method reads its own `this`.
-function freeIn(body: Stmt[] | Expr, bound: ReadonlySet<string> = new Set()): Set<string> {
-	const free	= new Set<string>();
-	const add	= (names: Iterable<string>) => {
-		for (const n of names)
-			if (!bound.has(n))
-				free.add(n);
-	};
-	walkerB(
-		(s, process) => s.type === 'function_decl' ? (add(closureFree(s)), false) : process(s),
-		(e, process) => {
-			if (e.type === 'identifier' || e.type === 'this')
-				add([e.type === 'this' ? 'this' : e.name]);
-			else if (e.type === 'arrow' || e.type === 'function')
-				add(closureFree(e));
-			else if (e.type !== 'object')
-				return process(e);
-			else
-				for (const p of e.properties)
-					add(p.type === 'spread' ? freeIn(p.operand)
-						: p.type !== 'field' ? [...closureFree(p)].filter(n => n !== 'this')
-						: [...typeof p.key === 'object' ? freeIn(p.key.computed) : [], ...p.value ? freeIn(p.value) : []]);
-			return false;
-		}
-	).body(body);
-	return free;
-}
-
-// Whether a closure nested in `body` (an arrow, a function, a method) reads `name` from outside itself.
-function nestedReads(body: Stmt[] | Expr, name: string): boolean {
-	let found = false;
-	walkerB(
-		(s, process) => s.type === 'function_decl' ? (found ||= closureFree(s).has(name), false) : process(s),
-		(e, process) => {
-			if (e.type === 'arrow' || e.type === 'function')
-				return (found ||= closureFree(e).has(name), false);
-			if (e.type === 'object')
-				for (const p of e.properties)
-					if (p.type !== 'spread' && p.type !== 'field')
-						found ||= closureFree(p).has(name);
-			return process(e);
-		}
-	).body(body);
-	return found;
-}
-
-// What a closure reads from outside itself: its body's free names and its parameter defaults' (a default runs in the callee).
-const closureFrees = new WeakMap<Closure, Set<string>>();
-function closureFree(fn: Closure): Set<string> {
-	let free = closureFrees.get(fn);
-	if (!free) {
-		const body	= fn.body ?? [];
-		const bound	= ownBoundNames(paramNames(fn.params, fn.rest), body, fn.name);
-		free		= new Set([body, ...fn.params.flatMap(p => p.default ? [p.default] : [])].flatMap(b => [...freeIn(b, bound)]));
-		closureFrees.set(fn, free);
-		// A function declaration read from a closure nested in it (not a direct self-call, which `selfCall` makes) is its enclosing scope's binding.
-		if (fn.type === 'function_decl' && fn.name && nestedReads(body, fn.name))
-			free.add(fn.name);
-	}
-	return free;
 }
 
 // `this` is a real object only once every required field has a value (`ensureCtor`'s `materializeThis`); until then a direct `this.f` reads `f`'s local.

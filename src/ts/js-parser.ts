@@ -139,7 +139,7 @@ export type Expr<T = any> =
 	| Common.Assign<Expr<T>, assignableOps>
 	| Common.Await<Expr<T>>
 	| Common.Yield<Expr<T>> & { delegate?: boolean }
-	| { type: 'class'; } & Class
+	| { type: 'class'; } & Class<T>
 	// for TS
 	| { type: 'as';				expression: Expr<T>; typeAnnotation: T }
 	| { type: 'satisfies';		expression: Expr<T>; typeAnnotation: T }
