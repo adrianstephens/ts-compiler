@@ -4847,6 +4847,19 @@ async function main() {
 	}
 
 	{
+		// A nested function reading names a LATER destructuring binds (wasm-backend.ts's `const { accessorKeys, ... } = collectExpandoFields(...)`).
+		const { forwardDestructured } = await compile(`
+			function make() { return { a: 3, b: [1, 2] }; }
+			export function forwardDestructured(): number {
+				function use(): number { return a * 10 + b.length; }
+				const { a, b } = make();
+				return use();
+			}
+		`);
+		check('a nested function reads names a later destructuring binds', forwardDestructured(), 32);
+	}
+
+	{
 		// An omitted optional parameter before a rest takes its default (codegen.ts's `new W.Error(msg)` against `(err, node?, ...scope)`).
 		const { optionalBeforeRest } = await compile(`
 			class E { n: number; constructor(err: string, node?: number, ...scope: string[]) { this.n = scope.length + (node === undefined ? 10 : 20); } }

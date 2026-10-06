@@ -2284,7 +2284,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	function ensureForwardHolder(ctx: FunctionContext, name: string): W.Local | undefined {
 		// Its own initializer's declarator first: a self-reference may sit in any nested block, which the top-level scan misses.
 		const self	= ctx.initializing?.slice().reverse().find(d => d.name === name);
-		const d		= self ?? ctx.ownBody?.flatMap(s => s.type === 'var_decl' ? s.declarations : []).find(d => d.name === name);
+		// A name a destructuring binds (`const {a, b} = f()`) is typed as its statement's scope bound it.
+		const own	= self ? undefined : ctx.ownBody?.flatMap(s => s.type === 'var_decl' ? s.declarations.map(d => ({ s, d })) : []).find(({ d }) => T.bindingNames(d.name).includes(name));
+		const d		= self ?? own?.d;
 		// A sibling function declaration not yet created: mutual recursion.
 		const fd = d ? undefined : ctx.ownBody?.find((s): s is Extract<Stmt, { type: 'function_decl' }> => s.type === 'function_decl' && s.name === name && !!s.body);
 		if (fd) {
@@ -2294,7 +2296,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		}
 		if (!d)
 			return undefined;
-		const tsType = d.typeAnnotation ?? (d.init && checkerTypeOf(d.init, ctx.scope));
+		const tsType = typeof d.name !== 'string' ? (own?.s as { scope?: Scope } | undefined)?.scope?.value(name) : d.typeAnnotation ?? (d.init && checkerTypeOf(d.init, ctx.scope));
 		if (!tsType)
 			return undefined;
 		const wt = typeOf(tsType);
