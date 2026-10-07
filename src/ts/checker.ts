@@ -2434,7 +2434,8 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 							return t;
 						const p = sig!.params[i];
 						if (inference && t && p?.typeAnnotation)
-							(a.type === 'object' || a.type === 'array' ? inference.inferFromLiteral : inference.infer).call(inference, p.typeAnnotation, t);
+							// An omittable parameter (`t?: T`) takes `T | undefined`, as TS infers to it: `Q | undefined` gives `T` its `Q`.
+							(a.type === 'object' || a.type === 'array' ? inference.inferFromLiteral : inference.infer).call(inference, hasMod(p, 'optional') || p.default ? T.combineTypes([p.typeAnnotation, T.UNDEFINED]) : p.typeAnnotation, t);
 						return t;
 					});
 					if (!resultFirst)

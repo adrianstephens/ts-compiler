@@ -540,7 +540,23 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		const s: Ref | undefined = e?.type.type !== 'ref' ? undefined : use(e.type);
 		const u: Entry = e?.type.type === 'object' ? e : { type: { type: 'object' } };
 		if (e?.type.type === 'ref') {} else { const v: Entry = e; }`,
-		[NOT_ASSIGNABLE('Entry | undefined', 'Entry')]],	['a generic call inside an array-literal argument hears what the call\'s result context inferred', `
+		[NOT_ASSIGNABLE('Entry | undefined', 'Entry')]],	['an optional parameter infers its type parameter from an argument that may be undefined', `
+		interface S { k: string }
+		declare const ms: <T extends S>(t?: T) => T | undefined;
+		export function h<Q extends S>(x?: Q): Q | undefined { return ms(x); }
+		function md<T extends S>(t: T | undefined = undefined): T | undefined { return t; }
+		export function hd<Q extends S>(x?: Q): Q | undefined { return md(x); }
+		function mk<U>(parts: (x: U) => U, on: boolean, always: boolean) {
+			return on ? <T extends U>(t?: T) => t ? parts(t) as T : undefined
+				: always ? <T extends U>(t?: T) => t ? parts(t) as T : undefined
+				: <T extends U>(t?: T) => t;
+		}
+		interface S { k: string }
+		const ms = mk((x: S) => x, true, false);
+		export const f: <T extends S>(x?: T) => T | undefined = x => ms(x);
+		export const g: <T extends S>(x?: T) => T | undefined = x => mk((y: S) => y, true, false)(x);`,
+		[]],
+	['a generic call inside an array-literal argument hears what the call\'s result context inferred', `
 		interface Id { type: 'id' }
 		interface Call<T> { type: 'call'; callee: E<T>; args: E<T>[]; typeArgs?: T[] }
 		interface Idx<T> { type: 'index'; object: E<T>; index: E<T> }
