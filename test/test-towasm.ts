@@ -5656,6 +5656,26 @@ async function main() {
 		asyncLoops.run();
 		['plain', 'awaiting', 'keys', 'nested', 'protocol', 'chars', 'destructured'].forEach((name, i) =>
 			check(`async body: ${name}`, asyncLoops.at(i), [16, 6, 21, 60, 11, 5, 133][i]));
+		// An async body's nested functions are created on entry and called from later states; a closure it makes captures the frame, so it sees
+		// a local written after it was made. `return await p` resolves with the settled value.
+		const asyncNested = await compile(`
+			async function later(): Promise<number> { const f = async () => g(); return await f(); async function g(): Promise<number> { return 42; } }
+			async function capturesLater(): Promise<number> { const early = () => h(1); const base = await Promise.resolve(100); return early(); function h(n: number): number { return base + n; } }
+			async function twoStates(): Promise<number> { const a = await Promise.resolve(5); const v = k(); const b = await Promise.resolve(v); return a + b + k(); function k(): number { return 7; } }
+			async function rewritten(): Promise<number> { let x = 1; const f = () => x; await Promise.resolve(0); x = 20; const g = () => { x += 300; }; g(); return f(); }
+			async function returnAwait(): Promise<number> { const go = await Promise.resolve(true); if (go) return await Promise.resolve(8); return 0; }
+			const got = [0, 0, 0, 0, 0];
+			export function run(): number { [later, capturesLater, twoStates, rewritten, returnAwait].forEach((f, i) => f().then(v => { got[i] = v; })); return 0; }
+			export function at(i: number): number { return got[i]; }
+		`);
+		asyncNested.run();
+		['nested async function', 'closure over a later local', 'function called in two states', 'local written after capture', 'return await'].forEach((name, i) =>
+			check(`async body: ${name}`, asyncNested.at(i), [42, 101, 19, 320, 8][i]));
+		const { forwardConst } = await compile(`
+			function f(): number { const early = () => h(1); const base = 100; return early(); function h(n: number): number { return base + n; } }
+			export function forwardConst(): number { return f(); }
+		`);
+		check('a const that a hoisted function captures before its declaration', forwardConst(), 101);
 
 		const { undefinedAsserted } = await compile(`
 			function opt<T>(v?: T): () => T | undefined { return () => v === undefined ? undefined as T | undefined : v; }

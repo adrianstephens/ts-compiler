@@ -139,15 +139,11 @@ export function BuildStateMachine(stmts: Stmt[]) {
 	}
 
 
-	// The statement shapes recognised as a suspend boundary: a bare `yield x;`/`await p;`, `return await p;`, a single `const v = yield x;`/`= await p;`.
+	// The statement shapes recognised as a suspend boundary: a bare `yield x;`/`await p;`, a single `const v = yield x;`/`= await p;`.
+	// A `return await p;` reaches here as the latter, then a `return v` (the caller's lowering).
 	function suspendBoundary(stmt: Stmt): SuspendBoundary | undefined {
 		if (stmt.type === 'expression')
 			return suspendExpr(stmt.expression);
-		if (stmt.type === 'return' && stmt.argument) {
-			// `return (yield x)` is not recognised (only `return await p;`): rare, deferred.
-			const b = suspendExpr(stmt.argument);
-			return b?.kind === 'await' ? b : undefined;
-		}
 		if (stmt.type === 'var_decl' && stmt.declarations.length === 1) {
 			const d = stmt.declarations[0];
 			if (typeof d.name === 'string' && d.init) {
@@ -254,7 +250,7 @@ export function BuildStateMachine(stmts: Stmt[]) {
 						break;
 					}
 					default:
-						throw new Error("a yield/await here is not yet supported (only a bare 'yield x;'/'await x;' statement, 'return await x;', 'const v = yield x;', or one of those nested in a plain 'if'/'while'/'do..while'/'for' -- not embedded in a larger expression, and not inside a 'switch'/'try')");
+						throw new Error("a yield/await here is not yet supported (only a bare 'yield x;'/'await x;' statement, 'const v = yield x;', or one of those nested in a plain 'if'/'while'/'do..while'/'for' -- not embedded in a larger expression, and not inside a 'switch'/'try')");
 				}
 
 			} else {

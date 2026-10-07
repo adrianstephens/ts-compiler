@@ -186,10 +186,12 @@ export function withCatch(item: ()=>void, ...scopes: string[]) {
 	};
 }
 
+// `holderField`: where in the holder the value sits, when the holder is a resumable frame shared by the closures its body makes.
 export interface Local {
 	wtype:			Type;
 	index:			number;
 	holderInner?:	Type;
+	holderField?:	number;
 }
 
 // `frame`: the fields are this function's own hoisted locals (a resumable frame), not captures from outside, which a local of the name shadows.
@@ -427,8 +429,8 @@ export class FunctionContext {
 	}
 
 	// A holder's field is nullable, allocatable empty; `holderInner` is the non-null logical type, sound because the filling declaration runs first.
-	emitHolderRead(holderType: number, inner: Type) {
-		this.emit(I.struct.get(holderType, 0));
+	emitHolderRead(holderType: number, inner: Type, field = 0) {
+		this.emit(I.struct.get(holderType, field));
 		if (typeof inner !== 'string' && !inner.nullable)
 			this.emit(I.ref.as_non_null);
 	}

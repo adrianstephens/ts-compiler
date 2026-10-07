@@ -742,9 +742,9 @@ const writtenLiteral = (e: Expr) => e.type === 'literal' ? [e.value] : undefined
 // A value's member as a candidate shape's field sees it: whether the field takes it, and the literals it may be.
 interface ShapeProp { fits: (declared: Type) => boolean; literals?: readonly unknown[] }
 
-interface LocalField { index: number; wtype: W.Type; tsType: Type; holderInner?: W.Type }
+interface LocalField { index: number; wtype: W.Type; tsType: Type; holderInner?: W.Type; holderField?: number }
 // A name an async closure captures, as its env struct holds it (`emitClosureLiteral`): copied into its frame.
-interface Capture { name: string; index: number; wtype: W.Type; holderInner?: W.Type; tsType?: Type }
+interface Capture { name: string; index: number; wtype: W.Type; holderInner?: W.Type; holderField?: number; tsType?: Type }
 
 // ===================================================================
 //  AST queries -- names, free variables, and expression shape
@@ -2298,6 +2298,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// A closure referencing a SIBLING const/let declared later in the same block (mutually recursive local closures) has no local to capture, so
 	// the missing local becomes a holder the closure and the sibling's declaration share. Undefined for a name that is no sibling.
+	// A function declaration's type as a value: its name's binding where it is declared, else the function typed as an expression.
+	function functionDeclType(fd: Extract<Stmt, { type: 'function_decl' }>, scope: Scope): Type {
+		return (fd as { scope?: Scope }).scope?.value(fd.name) ?? checkerTypeOf({ ...fd, type: 'function' } as Expr, scope);
+	}
+
 	function ensureForwardHolder(ctx: FunctionContext, name: string): W.Local | undefined {
 		// Its own initializer's declarator first: a self-reference may sit in any nested block, which the top-level scan misses.
 		const self	= ctx.initializing?.slice().reverse().find(d => d.name === name);
@@ -2307,7 +2312,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		// A sibling function declaration not yet created: mutual recursion.
 		const fd = d ? undefined : ctx.ownBody?.find((s): s is Extract<Stmt, { type: 'function_decl' }> => s.type === 'function_decl' && s.name === name && !!s.body);
 		if (fd) {
-			const fnType = (fd as { scope?: Scope }).scope?.value(name) ?? checkerTypeOf({ ...fd, type: 'function' } as Expr, ctx.scope);
+			const fnType = functionDeclType(fd, ctx.scope);
 			const fnWtype = typeOf(fnType);
 			return fnWtype ? declareHolder(ctx, name, fnWtype, fnType, true) : undefined;
 		}
@@ -5093,9 +5098,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (target.type === 'identifier' || target.type === 'this') {
 			const name = target.type === 'this' ? 'this' : target.name;
 			// A holder holds the binding, not a copy, so every read and write of the name goes through it (`declareHolder`).
-			const viaHolder = (holder: Operand, inner: W.Type): Place => {
+			const viaHolder = (holder: Operand, inner: W.Type, field = 0): Place => {
 				const holderType = (holder.wtype as { typeIndex: number }).typeIndex;
-				return { wtype: inner, operands: [holder], load: () => ctx.emitHolderRead(holderType, inner), store: () => ctx.emit(I.struct.set(holderType, 0)) };
+				return { wtype: inner, operands: [holder], load: () => ctx.emitHolderRead(holderType, inner, field), store: () => ctx.emit(I.struct.set(holderType, field)) };
 			};
 			// A local this function declares is nearer than a capture of the same name wherever it is in scope (a block's own `const built`).
 			const local		= ctx.lookup(name);
@@ -5104,7 +5109,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const { envLocal, envTypeIndex } = ctx.closureEnv!;
 				const pushEnv = () => ctx.emit(I.local.get(envLocal.index));
 				if (captured.holderInner)
-					return viaHolder(fixed(captured.wtype, () => { pushEnv(); ctx.emit(I.struct.get(envTypeIndex, captured.index)); }), captured.holderInner);
+					return viaHolder(fixed(captured.wtype, () => { pushEnv(); ctx.emit(I.struct.get(envTypeIndex, captured.index)); }), captured.holderInner, captured.holderField);
 				return { wtype: captured.wtype, operands: [fixed(envLocal.wtype, pushEnv)],
 					load:	() => ctx.emit(I.struct.get(envTypeIndex, captured.index)),
 					store:	() => ctx.emit(I.struct.set(envTypeIndex, captured.index)) };
@@ -5581,16 +5586,22 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const isHeld		= (name: string) => name === 'this' && !!thisHolder;
 		const capturedNames = [...free].filter(name => isHeld(name) || ctx.resolvesName(name));
 		// Each capture's TS type is read NOW, in the scope the literal is written in: its body compiles later, once that block's names are gone.
-		const fields		= capturedNames.length ? new Map<string, { index: number; wtype: W.Type; holderInner?: W.Type; tsType?: Type }>() : undefined;
+		const fields		= capturedNames.length ? new Map<string, Omit<Capture, 'name'>>() : undefined;
+		// A resumable body's own local is a field of its frame, which a closure it makes captures as that local's holder: a later state's write stays visible.
+		const frameLocal	= (name: string) => ctx.lookup(name) || !ctx.closureEnv?.frame ? undefined : ctx.closureEnv.fields.get(name);
 		let envTypeIndex	= envBase;
 		if (fields) {
 			// `rawWtype`, not `resolvedWtype`: a forward-holder is captured as the SHARED holder, so a later write through it stays visible;
 			// `holderInner` lets every read unbox it.
 			envTypeIndex = types.add({ final: true, supertypes: [envBase], type: { kind: 'struct', fields: capturedNames.map((name, i) => {
-				const wt = isHeld(name) ? thisHolder!.holder.wtype : ctx.rawWtype(name)!;
+				const inFrame	= frameLocal(name);
+				const tsType	= isHeld(name) ? thisHolder!.tsType : ctx.scope.value(name);
 				// The name's nearest binding, as `rawWtype` and `rawSlot` read it: a local before a capture of the same name.
-				const holderInner = isHeld(name) ? thisHolder!.holder.holderInner : ctx.lookup(name) ? ctx.lookup(name)!.holderInner : ctx.closureEnv?.fields.get(name)?.holderInner;
-				fields.set(name, { index: i, wtype: wt, holderInner, tsType: isHeld(name) ? thisHolder!.tsType : ctx.scope.value(name) });
+				const binding	= isHeld(name) ? thisHolder!.holder : ctx.lookup(name) ?? ctx.closureEnv!.fields.get(name)!;
+				const wt		= inFrame && !inFrame.holderInner ? ctx.closureEnv!.envLocal.wtype : binding.wtype;
+				fields.set(name, inFrame && !inFrame.holderInner
+					? { index: i, wtype: wt, holderInner: inFrame.wtype, holderField: inFrame.index, tsType }
+					: { index: i, wtype: wt, holderInner: binding.holderInner, holderField: binding.holderField, tsType });
 				return { type: toValType(wt), mut: true };
 			}) } });
 		}
@@ -5603,6 +5614,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					ctx.emit(I.local.get(thisHolder!.holder.index));
 				else if (name === 'this' && !ctx.closureEnv?.fields.get(name)?.holderInner)
 					emitExpr({ type: 'this' }, ctx);
+				else if (frameLocal(name) && !frameLocal(name)!.holderInner)
+					ctx.emit(I.local.get(ctx.closureEnv!.envLocal.index));
 				else
 					ctx.rawSlot(name);
 			}
@@ -7039,13 +7052,20 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// A resumable body with each `for...of`/`for...in` that suspends lowered first, as `emitStmt` would lower it: `BuildStateMachine` splits a plain
 	// loop, and the lowering's hidden bindings (`#rfor`, apart from the step's own `#for`) are frame locals like any other. A nested function's are its own.
+	// Its function declarations come first in their block, as JS creates them on entering it: the state machine keeps statement order, and a call
+	// in an earlier state would find the frame field still empty. `return await p` binds the settled value to a frame local, then returns that.
 	function resumableBody(body: Stmt[], ctx: FunctionContext): Stmt[] {
-		return walker(
+		const hoisted	= (stmts: Stmt[]) => [...stmts.filter(s => s.type === 'function_decl'), ...stmts.filter(s => s.type !== 'function_decl')];
+		let returns		= 0;
+		const viaLocal	= (arg: Expr) => (name => JS.Block<Stmt>(JS.VarDecl('const', JS.Var<Type>(name, arg, checkedTypeOf(arg))), JS.Return(Identifier(name))))(`#ret$${returns++}`);
+		return hoisted(walker(
 			(s, process) => s.type === 'function_decl' || s.type === 'class_decl' ? s
+				: s.type === 'return' && s.argument && (s.argument.type === 'await' || s.argument.type === 'yield') ? viaLocal(s.argument)
 				: s.type === 'for' && s.kind !== 'normal' && containsSuspend(s) ? process(lowerLoopHead(s, ctx, '#rfor'))
+				: s.type === 'block' ? process({ ...s, body: hoisted(s.body) })
 				: process(s),
 			(e, process) => e.type === 'arrow' || e.type === 'function' || e.type === 'class' ? e : process(e)
-		).statements(body);
+		).statements(body));
 	}
 
 	function emitStmts(stmts: readonly Stmt[], ctx: FunctionContext) {
@@ -7129,8 +7149,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						?? (s.kind === 'const' ? precise() : undefined) ?? checkerTypeOf(d.init, (s as { scope?: Scope }).scope ?? ctx.scope);
 
 					// The declared type stays the initializer's context: a literal is built as a `u8[]` even into an open slot.
+					// A forward holder a sibling's closure already captured is the storage, its representation fixed when it was made.
 					const slotT = openedAs(d, tsType);
-					const wtype = typeOf(slotT);
+					const wtype = ctx.lookup(d.name)?.holderInner ?? typeOf(slotT);
 					if (!wtype) {
 						// The lowering's own error first (e.g. indexing a `string`), if it has one.
 						emitExpr(d.init, ctx);
@@ -7354,8 +7375,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				// One that reads its own name from a nested closure captures it: its holder first, filled once the closure exists.
 				if (closureFree(s).has(s.name) && !ctx.resolvesName(s.name))
 					ensureForwardHolder(ctx, s.name);
-				// A sibling created earlier already captured this name's forward holder (`ensureForwardHolder`): fill that.
-				if (ctx.lookup(s.name)?.holderInner) {
+				// A sibling created earlier already captured this name's forward holder (`ensureForwardHolder`): fill that. So is a resumable body's own
+				// function a frame field (`buildFrameFields`), read in whichever later state calls it.
+				if (ctx.lookup(s.name)?.holderInner || (ctx.closureEnv?.frame && ctx.closureEnv.fields.has(s.name))) {
 					ctx.inScope(() => {
 						const target = emitAssignTarget(Identifier(s.name), ctx, 'none');
 						coerceTop(emitClosureLiteral(s, ctx, true), ctx, target.wtype);
@@ -7809,6 +7831,16 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		}
 	}
 
+	// The function declarations (with bodies) a body makes at any block depth, not those inside a nested function.
+	function ownFunctionDecls(body: Stmt[]): Extract<Stmt, { type: 'function_decl' }>[] {
+		const out: Extract<Stmt, { type: 'function_decl' }>[] = [];
+		walkerB(
+			(st, process) => st.type === 'function_decl' ? (st.body && out.push(st), false) : st.type === 'class_decl' ? false : process(st),
+			(e, process) => e.type === 'arrow' || e.type === 'function' || e.type === 'class' ? false : process(e)
+		).statements(body);
+		return out;
+	}
+
 	// The frame's field map: one per param, then one per hoisted local; the state and any extra field are each caller's.
 	function buildFrameFields(body: Stmt[], params: ResolvedParam[], captures: Capture[] = []) {
 		const hoisted		= collectHoistedLocals(body);
@@ -7836,11 +7868,23 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			localFields.set(localName, { index: frameFields.length, wtype: wt, tsType });
 			frameFields.push({ type: toValType(wt), mut: true });
 		}
+		// A nested function, created where it is declared (`case 'function_decl'`), and called from any later state.
+		for (const fd of ownFunctionDecls(body)) {
+			if (localFields.has(fd.name))
+				continue;
+			const tsType	= functionDeclType(fd, (body[0] as { scope?: Scope } | undefined)?.scope ?? libGlobal);
+			const declared	= typeOf(tsType);
+			if (!declared || declared === 'void')
+				throw `function '${fd.name}' has an unsupported type`;
+			const wt = typeof declared === 'string' ? declared : types.nullable(declared);
+			localFields.set(fd.name, { index: frameFields.length, wtype: wt, tsType });
+			frameFields.push({ type: toValType(wt), mut: true });
+		}
 		// What an async closure captures lives in its frame too, unless a local of its own shadows the name.
 		for (const c of captures) {
 			if (localFields.has(c.name))
 				continue;
-			localFields.set(c.name, { index: frameFields.length, wtype: c.wtype, tsType: c.tsType ?? T.ANY, holderInner: c.holderInner });
+			localFields.set(c.name, { index: frameFields.length, wtype: c.wtype, tsType: c.tsType ?? T.ANY, holderInner: c.holderInner, holderField: c.holderField });
 			frameFields.push({ type: toValType(c.wtype), mut: true });
 		}
 		return { localFields, frameFields };
