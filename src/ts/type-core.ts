@@ -3149,9 +3149,9 @@ export function inferTypeArgs(paramT: Type, argT: Type, tparams: ReadonlyMap<str
 		if (depth < 0)
 			return;
 		if (paramT.type === 'ref' && !paramT.typeArgs && tparams.has(paramT.name)) {
-			// A callee's own type parameter that is none at the call site leaked in through context (`[]` typed against the unsolved `U[]`): as in TS,
-			// a parameter never infers from itself.
-			const leaked	= (m: Type) => m.type === 'ref' && !m.typeArgs && tparams.has(m.name) && !scope.type(m.name)?.isTypeParam;
+			// A callee's own type parameter that names nothing at the call site leaked in through context (`[]` typed against the unsolved `U[]`): as in TS,
+			// a parameter never infers from itself. A caller's own type of that name (`type S = Stmt` against `SwitchCase<T, S>`) is a candidate.
+			const leaked	= (m: Type) => m.type === 'ref' && !m.typeArgs && tparams.has(m.name) && !scope.type(m.name);
 			const members	= argT.type === 'union' ? argT.types : [argT];
 			const own		= members.filter(m => !leaked(m));
 			if (!own.length)

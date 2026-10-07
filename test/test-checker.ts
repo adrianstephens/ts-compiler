@@ -540,7 +540,13 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		const s: Ref | undefined = e?.type.type !== 'ref' ? undefined : use(e.type);
 		const u: Entry = e?.type.type === 'object' ? e : { type: { type: 'object' } };
 		if (e?.type.type === 'ref') {} else { const v: Entry = e; }`,
-		[NOT_ASSIGNABLE('Entry | undefined', 'Entry')]],	['an optional parameter infers its type parameter from an argument that may be undefined', `
+		[NOT_ASSIGNABLE('Entry | undefined', 'Entry')]],	['a caller\'s own type named like the callee\'s type parameter is a candidate, not a leak', `
+		interface St { k: string }
+		declare function SC<T, S>(test: T, ...consequent: S[]): { t: T; c: S[] };
+		export function element(): St[] { type S = St; const stmts: S[] = []; return SC(1, stmts[0]).c; }
+		export function spread(): St[] { type S = St; const stmts: S[] = []; return SC(1, ...stmts).c; }`,
+		[]],
+	['an optional parameter infers its type parameter from an argument that may be undefined', `
 		interface S { k: string }
 		declare const ms: <T extends S>(t?: T) => T | undefined;
 		export function h<Q extends S>(x?: Q): Q | undefined { return ms(x); }
