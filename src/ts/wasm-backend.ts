@@ -9,7 +9,7 @@ import { type Contextual, checkBlock, checkHoisted, checkImported, superClassRef
 import { Walker, walker, walkerB } from './walker';
 import { type Closure, paramNames, ownBoundNames, freeIn, closureFree } from './free-names';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
-import { iteratorOf, foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
+import { iteratorOf, foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, containsSuspend, type ForOf, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
 import * as wasm from '@isopodlabs/binary_libs/wasm';
 import * as WAT from '../wasm/wat-parser';
 
@@ -7017,6 +7017,37 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// A nested `function` declaration is hoisted: callable before its own line. It is created just before the first
 	// statement in its list that mentions it -- closure creation has no side effects, and forward holders cover later siblings.
+	// A `for...of`/`for...in` as plain loops (`lowerForOf`), checked where it stands. An array or a string is read by position (a string a code
+	// point at a time, as its iterator yields), anything else with `[Symbol.iterator]()` by the protocol, as JS iterates every iterable.
+	// `for (const k in obj)` is `for (const k of Object.keys(obj))`; something read by POSITION enumerates its indices, as strings.
+	function lowerLoopHead(s: ForOf, ctx: FunctionContext, prefix = '#for'): Stmt {
+		if (s.kind === 'in') {
+			const indexed	= ownerOf(s.right, ctx);
+			const keys		= indexed && isPositional(indexed, ctx)
+				? JS.Call(JS.Member(Identifier('Array'), '_indexKeys'), [JS.Member(s.right, 'length')])
+				: JS.Call(JS.Member(Identifier('Object'), 'keys'), [s.right]);
+			return lowerLoopHead({ ...s, kind: 'of', right: keys }, ctx, prefix);
+		}
+		if (s.kind !== 'of')
+			throw `'for...${s.kind}' is not supported`;
+		const n			= ctx.tempCounter++;
+		const string	= T.typeofName(ctx.narrowedTypeOf(s.right), ctx.scope) === 'string';
+		const lowered	= lowerForOf(s, string ? undefined : iteratesByProtocol(s.right, ctx), ctx.scope, role => `${prefix}${n}$${role}`, string);
+		checkSynthesized([lowered], new Scope((s as { scope?: Scope }).scope ?? ctx.scope));
+		return lowered;
+	}
+
+	// A resumable body with each `for...of`/`for...in` that suspends lowered first, as `emitStmt` would lower it: `BuildStateMachine` splits a plain
+	// loop, and the lowering's hidden bindings (`#rfor`, apart from the step's own `#for`) are frame locals like any other. A nested function's are its own.
+	function resumableBody(body: Stmt[], ctx: FunctionContext): Stmt[] {
+		return walker(
+			(s, process) => s.type === 'function_decl' || s.type === 'class_decl' ? s
+				: s.type === 'for' && s.kind !== 'normal' && containsSuspend(s) ? process(lowerLoopHead(s, ctx, '#rfor'))
+				: process(s),
+			(e, process) => e.type === 'arrow' || e.type === 'function' || e.type === 'class' ? e : process(e)
+		).statements(body);
+	}
+
 	function emitStmts(stmts: readonly Stmt[], ctx: FunctionContext) {
 		hoistTypes(stmts, ctx.scope);
 		const pending = new Map(stmts.flatMap(s => s.type === 'function_decl' && s.body ? [[s.name, s] as const] : []));
@@ -7235,25 +7266,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						});
 						return;
 
-					case  'of': {
-						// An array is read by position; anything else with `[Symbol.iterator]()` by the protocol, as JS iterates every iterable.
-						const n			= ctx.tempCounter++;
-						// A string by position too, stepping a code point at a time: what its iterator yields, without one.
-						const string	= T.typeofName(ctx.narrowedTypeOf(s.right), ctx.scope) === 'string';
-						const lowered	= lowerForOf(s, string ? undefined : iteratesByProtocol(s.right, ctx), ctx.scope, role => `#for${n}$${role}`, string);
-						checkSynthesized([lowered], new Scope((s as { scope?: Scope }).scope ?? ctx.scope));
-						emitStmt(lowered, ctx);
+					case 'of':
+					case 'in':
+						emitStmt(lowerLoopHead(s, ctx), ctx);
 						return;
-					}
-					// `for (const k in obj)` is `for (const k of Object.keys(obj))`; something read by POSITION enumerates its indices, as strings.
-					case 'in': {
-						const indexed	= ownerOf(s.right, ctx);
-						const keys		= indexed && isPositional(indexed, ctx)
-							? JS.Call(JS.Member(Identifier('Array'), '_indexKeys'), [JS.Member(s.right, 'length')])
-							: JS.Call(JS.Member(Identifier('Object'), 'keys'), [s.right]);
-						emitStmt({ ...s, kind: 'of', right: keys }, ctx);
-						return;
-					}
 					default:
 						throw `'for...${s.kind}' is not supported`;
 				}
@@ -7784,7 +7800,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	function hoistVars(body: Stmt[], params: ResolvedParam[], ctx: FunctionContext) {
 		const home = (body[0] as { scope?: Scope } | undefined)?.scope;
 		for (const [name, { decl }] of collectHoistedLocals(body, true)) {
-			const declared = decl.typeAnnotation ?? slotType(decl.flowType) ?? home?.declared(name);
+			const declared = (typeof decl.name === 'string' ? decl.typeAnnotation ?? slotType(decl.flowType) : undefined) ?? home?.declared(name);
 			if (!declared)
 				throw `internal: 'var ${name}' has no checked type`;
 			if (!params.some(p => p.key === name))
@@ -7794,8 +7810,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 	// The frame's field map: one per param, then one per hoisted local; the state and any extra field are each caller's.
-	function buildFrameFields(decl: FunctionDecl, params: ResolvedParam[], captures: Capture[] = []) {
-		const hoisted		= collectHoistedLocals(decl.body!);
+	function buildFrameFields(body: Stmt[], params: ResolvedParam[], captures: Capture[] = []) {
+		const hoisted		= collectHoistedLocals(body);
 		const localFields	= new Map<string, LocalField>();
 		const frameFields: wasm.FieldType[] = [{ type: 'i32', mut: true }];
 		for (const p of params) {
@@ -7805,9 +7821,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		for (const [localName, { stmt, decl: d }] of hoisted) {
 			if (localFields.has(localName))
 				continue;	// already a param field -- real JS forbids a body-level redeclaration of a param name anyway
-			if (!d.init && !d.typeAnnotation)
+			// One with no initializer (a loop variable) or bound by a pattern is its binding's declared type, in the scope the checker stamped on its declaration.
+			const declScope	= (stmt as { scope?: Scope }).scope;
+			const own		= typeof d.name === 'string' && d.init;
+			const tsType	= own ? d.typeAnnotation ?? slotType(d.flowType) ?? T.literalTypeOf(own) ?? checkerTypeOf(own, declScope ?? libGlobal)
+							: (typeof d.name === 'string' && d.typeAnnotation) || declScope?.declared(localName);
+			if (!tsType)
 				throw `local '${localName}' needs an initializer or an explicit type`;
-			const tsType = d.typeAnnotation ?? slotType(d.flowType) ?? (d.init && T.literalTypeOf(d.init)) ?? checkerTypeOf(d.init!, (stmt as any).scope as Scope ?? libGlobal);
 			const declared = typeOf(tsType);
 			if (!declared || declared === 'void')
 				throw `local '${localName}' has an unsupported type`;
@@ -7828,12 +7848,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// The frame a resumable function keeps between calls: its state, then every local the body declares (params first), then any
 	// field the driver needs (`extra`, at `extraAt`). Hoisted locals take the type `case 'var_decl'` would give them, via the same widenings.
-	function resumableFrame(decl: FunctionDecl, params: ResolvedParam[], extra: wasm.FieldType[] = [], captures: Capture[] = []) {
-		const { localFields, frameFields } = buildFrameFields(decl, params, captures);
+	function resumableFrame(decl: FunctionDecl, params: ResolvedParam[], homeModule: string, extra: wasm.FieldType[] = [], captures: Capture[] = []) {
+		const body = resumableBody(decl.body!, new FunctionContext(decl.name ?? '<resumable>', new Scope(moduleScopeOf(homeModule) ?? libGlobal), plainReturn('void'), undefined, homeModule));
+		const { localFields, frameFields } = buildFrameFields(body, params, captures);
 		const extraAt		= frameFields.push(...extra) - extra.length;
 		// `envBase` as supertype: the frame is stored as a closure's env, whose declared param type is `(ref $envBase)`.
 		const typeIndex		= types.add({ final: true, supertypes: [types.envBase()], type: { kind: 'struct', fields: frameFields } });
-		return { localFields, typeIndex, extraAt, machine: BuildStateMachine(decl.body!) };
+		return { localFields, typeIndex, extraAt, machine: BuildStateMachine(body) };
 	}
 	type ResumableFrame = ReturnType<typeof resumableFrame>;
 
@@ -7926,7 +7947,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const sig			= closureSigOf(genClass.fields[genClass.fieldIndex.get('step')!].wtype);
 		const resultWtype	= sig.result;
 		const { funcTypeIndex, structTypeIndex } = ensureClosureType(sig);
-		const frame			= resumableFrame(decl, params);
+		const frame			= resumableFrame(decl, params, homeModule);
 		const { funcIndex: stepFuncIndex } = types.funcAt(funcTypeIndex);
 		const stepInfo: FuncInfo = { params: sig.params, result: sig.result, hasRest: false, funcIndex: stepFuncIndex, typeIndex: funcTypeIndex };
 		closureLiterals.push(stepInfo);
@@ -8006,7 +8027,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const newPromise	= (t: Type, ctx: FunctionContext) => ctx.emit(I.call(instantiateFunc('__asyncResult', LIB_DECL_MAP.get('__asyncResult') as FunctionDecl, new Map([['T', t]])).funcIndex));
 
 		// Two hidden fields after the locals: the function's own result Promise, and whether this resume delivers a rejection.
-		const frame			= resumableFrame(decl, params, [{ type: toValType(promiseWtype), mut: true }, { type: 'i32', mut: true }], closure?.captures);
+		const frame			= resumableFrame(decl, params, homeModule, [{ type: toValType(promiseWtype), mut: true }, { type: 'i32', mut: true }], closure?.captures);
 		const resultPromise	= frame.extraAt, threw = frame.extraAt + 1;
 		const { funcIndex: stepFuncIndex, typeIndex: stepFuncTypeIndex } = types.func(
 			[{ type: { ref: frame.typeIndex, nullable: false }, id: 'frame' }, { type: toValType(W.REF_ANY_NULLABLE), id: 'sent' }], []);
@@ -10209,7 +10230,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// one in `__toplevel`. Held nullable where their type is a reference, since nothing has assigned them yet.
 	const moduleVars = [...collectHoistedLocals(ast.body, true)].filter(([, { stmt }]) => !(stmt.type === 'var_decl' && stmt.ambient));
 	for (const [name, { decl }] of moduleVars) {
-		const declared = decl.typeAnnotation ?? slotType(decl.flowType) ?? global.declared(name);
+		const declared = (typeof decl.name === 'string' ? decl.typeAnnotation ?? slotType(decl.flowType) : undefined) ?? global.declared(name);
 		const wtype = declared && typeOf(openedAs(decl, declared));
 		if (!wtype || wtype === 'void')
 			throw `module-level 'var ${name}' has an unsupported type`;

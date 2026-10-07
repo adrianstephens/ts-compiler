@@ -111,6 +111,20 @@ export interface StateMachine {
 	completeId:	number;
 }
 
+function suspendExpr(e: Expr): SuspendBoundary | undefined {
+	return e.type === 'yield' ? { kind: 'yield', operand: e.operand, delegate: e.delegate }
+		: e.type === 'await' ? { kind: 'await', operand: e.operand }
+		: undefined;
+}
+
+// Stops at a nested closure: a yield/await inside it is that function's.
+export function containsSuspend(stmt: Stmt): boolean {
+	return walkerB(
+		undefined,
+		(e, process) => suspendExpr(e as Expr) ? true : (e.type === 'arrow' || e.type === 'function') ? false : process(e)
+	).statement(stmt);
+}
+
 // Splits a generator/async body into an id-addressable graph of segments, which codegen turns into one resumable step (a dispatch, one block
 // per segment, in a loop so a transition redispatches). Pure AST in and out; `containsSuspend`/`isFlattenable` reject what cannot be expressed.
 
@@ -124,11 +138,6 @@ export function BuildStateMachine(stmts: Stmt[]) {
 		segments[id] = { id, stmts, next };
 	}
 
-	function suspendExpr(e: Expr): SuspendBoundary | undefined {
-		return e.type === 'yield' ? { kind: 'yield', operand: e.operand, delegate: e.delegate }
-			: e.type === 'await' ? { kind: 'await', operand: e.operand }
-			: undefined;
-	}
 
 	// The statement shapes recognised as a suspend boundary: a bare `yield x;`/`await p;`, `return await p;`, a single `const v = yield x;`/`= await p;`.
 	function suspendBoundary(stmt: Stmt): SuspendBoundary | undefined {
@@ -150,13 +159,6 @@ export function BuildStateMachine(stmts: Stmt[]) {
 		return undefined;
 	}
 
-	// Stops at a nested closure: a yield/await inside it is that function's.
-	function containsSuspend(stmt: Stmt): boolean {
-		return walkerB(
-			undefined,
-			(e, process) => suspendExpr(e as Expr) ? true : (e.type === 'arrow' || e.type === 'function') ? false : process(e)
-		).statement(stmt);
-	}
 
 	// An unlabeled break/continue targeting the loop or switch holding `body` directly, not a nested one (which has its own targets).
 	function containsOwnBreakOrContinue(body: Stmt): boolean {
@@ -351,7 +353,7 @@ export function patternBindings(kind: JS.DeclarationKind, target: BindingTarget,
 // Lowering for codegen -- after the check; the result is checked with `checkSynthesized`
 //-----------------------------------------------------------------------------
 
-type ForOf = Extract<Stmt, { type: 'for'; right: unknown }>;
+export type ForOf = Extract<Stmt, { type: 'for'; right: unknown }>;
 
 // `iterator.next()`: JS sends `undefined` to a `next` that takes a value (a generator's).
 // As `for...of` calls it, with no argument; `undefined` only where the iterator's `next` declares a parameter it takes (an `any` iterator declares none).

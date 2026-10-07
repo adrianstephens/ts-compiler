@@ -43,10 +43,12 @@ export function collectHoistedLocals(body: Stmt[], varsOnly = false): Map<string
 		(s, process) => {
 			if (s.type === 'function_decl' || s.type === 'class_decl')
 				return false;
+			// A pattern's every name, under its declarator: whose annotation and initializer are the whole pattern's, not that name's.
 			if (s.type === 'var_decl' && (!varsOnly || s.kind === 'var')) {
 				for (const d of s.declarations) {
-					if (typeof d.name === 'string' && !decls.has(d.name))
-						decls.set(d.name, { stmt: s, decl: d });
+					for (const name of T.bindingNames(d.name))
+						if (!decls.has(name))
+							decls.set(name, { stmt: s, decl: d });
 				}
 			}
 			return process(s);
@@ -3625,6 +3627,9 @@ function checkLoop(stmt: LoopStmt, scope: Scope, labels: string[], typeOf: typeO
 			const home = stmt.init.kind === 'var' ? inner.varScope() : inner;
 			for (const d of stmt.init.declarations)
 				hoistVar(inner, d, true, d.typeAnnotation ?? elemT, report, !quiet, home);
+			// Stamped as a synthesized loop's head is: a resumable body's frame types its loop variable from it.
+			if (!quiet)
+				(stmt.init as { scope?: Scope }).scope = inner;
 		} else {
 			typeOf(stmt.init, inner);
 		}

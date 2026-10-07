@@ -5637,6 +5637,25 @@ async function main() {
 		`);
 		asyncClosure();
 		check('an async closure capturing its enclosing function', result(), 28);
+		// An async body's locals live in its frame: a loop variable, a destructured name, and a loop that suspends (lowered to a plain loop first).
+		const asyncLoops = await compile(`
+			async function plain(): Promise<number> { const base = await Promise.resolve(10); let t = base; for (const x of [1, 2, 3]) t += x; return t; }
+			async function awaiting(): Promise<number> { let t = 0; for (const x of [1, 2, 3]) { const v = await Promise.resolve(x); t += v; } return t; }
+			async function keys(): Promise<number> { const o: Record<string, number> = { a: 1, b: 20 }; let t = 0; for (const k in o) { const v = await Promise.resolve(o[k]); t += v; } return t; }
+			async function nested(): Promise<number> { let t = 0; for (const xs of [[1, 2], [3]]) for (const x of xs) { const v = await Promise.resolve(x * 10); t += v; } return t; }
+			async function protocol(): Promise<number> { const m = new Map<string, number>([['a', 4], ['b', 5]]); let t = 0; for (const [k, v] of m) { const w = await Promise.resolve(v + k.length); t += w; } return t; }
+			async function chars(): Promise<number> { let n = 0; for (const c of 'héllo') { const s = await Promise.resolve(c); n += s.length; } return n; }
+			async function destructured(): Promise<number> { const [a, b] = [1, 2]; const { c } = { c: 30 }; const v = await Promise.resolve(100); return a + b + c + v; }
+			const got = [0, 0, 0, 0, 0, 0, 0];
+			export function run(): number {
+				[plain, awaiting, keys, nested, protocol, chars, destructured].forEach((f, i) => f().then(v => { got[i] = v; }));
+				return 0;
+			}
+			export function at(i: number): number { return got[i]; }
+		`);
+		asyncLoops.run();
+		['plain', 'awaiting', 'keys', 'nested', 'protocol', 'chars', 'destructured'].forEach((name, i) =>
+			check(`async body: ${name}`, asyncLoops.at(i), [16, 6, 21, 60, 11, 5, 133][i]));
 
 		const { undefinedAsserted } = await compile(`
 			function opt<T>(v?: T): () => T | undefined { return () => v === undefined ? undefined as T | undefined : v; }
