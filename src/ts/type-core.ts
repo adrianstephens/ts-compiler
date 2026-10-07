@@ -89,7 +89,8 @@ export function typeId(t: Type, scoped = false): string {
 		: v instanceof Scope ? (scoped ? `$${scopeId(v)}` : '')
 		: typeof (v as { type?: unknown }).type === 'string' ? `#${typeId(v as Type, scoped)}`
 		: `{${fields(v).join(',')}}`;
-	const fields = (o: object) => Object.keys(o).filter(k => !(scoped && k === 'declScope' ? false : UNPRINTED.has(k)) && typeof (o as Record<string, unknown>)[k] !== 'function').sort()
+	// A field set to `undefined` is absent, as `typeKey` prints it: `{readonly: undefined}` and `{}` are one type.
+	const fields = (o: object) => Object.keys(o).filter(k => !(scoped && k === 'declScope' ? false : UNPRINTED.has(k)) && (o as Record<string, unknown>)[k] !== undefined && typeof (o as Record<string, unknown>)[k] !== 'function').sort()
 		.map(k => `${k}:${part((o as Record<string, unknown>)[k])}`);
 	// A node reached again while its own id is computed (`f` returning `f`) reads as a provisional id unique to it, which ends the cycle.
 	Object.defineProperty(t, memo, { value: `~${++cyclicIds}`, configurable: true });

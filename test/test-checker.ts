@@ -552,6 +552,14 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 			console.log(`ok - ${name}`);
 		}
 	}
+	// `typeId` keys what `typeKey` prints, so a field set to `undefined` is an absent one: the backend's open-shape keys depend on it
+	const plain: TS.Type = { type: 'tuple', elements: [] }, unset: TS.Type = { type: 'tuple', elements: [], readonly: undefined };
+	if (T.typeId(plain) !== T.typeId(unset)) {
+		++failures;
+		console.error('FAIL - typeId: a field set to undefined is an absent one');
+	} else {
+		console.log('ok - typeId: a field set to undefined is an absent one');
+	}
 	console.log(failures ? `${failures} checker test(s) failed` : 'all checker tests passed');
 	process.exitCode = failures ? 1 : 0;
 })();
