@@ -9,7 +9,7 @@ import { type Contextual, checkBlock, checkHoisted, checkImported, superClassRef
 import { Walker, walker, walkerB } from './walker';
 import { type Closure, paramNames, ownBoundNames, freeIn, closureFree } from './free-names';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
-import { iteratorOf, foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, containsSuspend, type ForOf, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
+import { iteratorOf, foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, containsSuspend, liftSuspends, type ForOf, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
 import * as wasm from '@isopodlabs/binary_libs/wasm';
 import * as WAT from '../wasm/wat-parser';
 
@@ -742,7 +742,7 @@ const writtenLiteral = (e: Expr) => e.type === 'literal' ? [e.value] : undefined
 // A value's member as a candidate shape's field sees it: whether the field takes it, and the literals it may be.
 interface ShapeProp { fits: (declared: Type) => boolean; literals?: readonly unknown[] }
 
-interface LocalField { index: number; wtype: W.Type; tsType: Type; holderInner?: W.Type; holderField?: number }
+interface LocalField { index: number; wtype: W.Type; tsType: Type; holderInner?: W.Type; holderField?: number; declared?: W.Type }
 // A name an async closure captures, as its env struct holds it (`emitClosureLiteral`): copied into its frame.
 interface Capture { name: string; index: number; wtype: W.Type; holderInner?: W.Type; holderField?: number; tsType?: Type }
 
@@ -5110,8 +5110,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const pushEnv = () => ctx.emit(I.local.get(envLocal.index));
 				if (captured.holderInner)
 					return viaHolder(fixed(captured.wtype, () => { pushEnv(); ctx.emit(I.struct.get(envTypeIndex, captured.index)); }), captured.holderInner, captured.holderField);
-				return { wtype: captured.wtype, operands: [fixed(envLocal.wtype, pushEnv)],
-					load:	() => ctx.emit(I.struct.get(envTypeIndex, captured.index)),
+				const wtype = captured.declared ?? captured.wtype;
+				return { wtype, operands: [fixed(envLocal.wtype, pushEnv)],
+					load:	() => { ctx.emit(I.struct.get(envTypeIndex, captured.index)); ctx.emitNonNull(wtype); },
 					store:	() => ctx.emit(I.struct.set(envTypeIndex, captured.index)) };
 			}
 			if (local?.holderInner)
@@ -5600,7 +5601,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const binding	= isHeld(name) ? thisHolder!.holder : ctx.lookup(name) ?? ctx.closureEnv!.fields.get(name)!;
 				const wt		= inFrame && !inFrame.holderInner ? ctx.closureEnv!.envLocal.wtype : binding.wtype;
 				fields.set(name, inFrame && !inFrame.holderInner
-					? { index: i, wtype: wt, holderInner: inFrame.wtype, holderField: inFrame.index, tsType }
+					? { index: i, wtype: wt, holderInner: inFrame.declared ?? inFrame.wtype, holderField: inFrame.index, tsType }
 					: { index: i, wtype: wt, holderInner: binding.holderInner, holderField: binding.holderField, tsType });
 				return { type: toValType(wt), mut: true };
 			}) } });
@@ -7053,19 +7054,18 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// A resumable body with each `for...of`/`for...in` that suspends lowered first, as `emitStmt` would lower it: `BuildStateMachine` splits a plain
 	// loop, and the lowering's hidden bindings (`#rfor`, apart from the step's own `#for`) are frame locals like any other. A nested function's are its own.
 	// Its function declarations come first in their block, as JS creates them on entering it: the state machine keeps statement order, and a call
-	// in an earlier state would find the frame field still empty. `return await p` binds the settled value to a frame local, then returns that.
+	// in an earlier state would find the frame field still empty. A suspend inside an expression is lifted to its own statement (`liftSuspends`).
 	function resumableBody(body: Stmt[], ctx: FunctionContext): Stmt[] {
+		const lifted	= (stmts: Stmt[]) => liftSuspends(stmts, role => `#${role}$${ctx.tempCounter++}`);
 		const hoisted	= (stmts: Stmt[]) => [...stmts.filter(s => s.type === 'function_decl'), ...stmts.filter(s => s.type !== 'function_decl')];
-		let returns		= 0;
-		const viaLocal	= (arg: Expr) => (name => JS.Block<Stmt>(JS.VarDecl('const', JS.Var<Type>(name, arg, checkedTypeOf(arg))), JS.Return(Identifier(name))))(`#ret$${returns++}`);
 		return hoisted(walker(
 			(s, process) => s.type === 'function_decl' || s.type === 'class_decl' ? s
-				: s.type === 'return' && s.argument && (s.argument.type === 'await' || s.argument.type === 'yield') ? viaLocal(s.argument)
 				: s.type === 'for' && s.kind !== 'normal' && containsSuspend(s) ? process(lowerLoopHead(s, ctx, '#rfor'))
-				: s.type === 'block' ? process({ ...s, body: hoisted(s.body) })
-				: process(s),
+				: s.type === 'block' ? process({ ...s, body: hoisted(lifted(s.body)) })
+				// A lone statement under `if`/a loop: what it lifts needs a block to sit in.
+				: (l => l.length > 1 || l[0] !== s ? process(JS.Block<Stmt>(...l)) : process(s))(lifted([s])),
 			(e, process) => e.type === 'arrow' || e.type === 'function' || e.type === 'class' ? e : process(e)
-		).statements(body));
+		).statements(lifted(body)));
 	}
 
 	function emitStmts(stmts: readonly Stmt[], ctx: FunctionContext) {
@@ -7865,7 +7865,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				throw `local '${localName}' has an unsupported type`;
 			// Stored nullable: the frame is built before the body assigns it, and a non-nullable reference has no default.
 			const wt = typeof declared === 'string' ? declared : types.nullable(declared);
-			localFields.set(localName, { index: frameFields.length, wtype: wt, tsType });
+			localFields.set(localName, { index: frameFields.length, wtype: wt, tsType, declared });
 			frameFields.push({ type: toValType(wt), mut: true });
 		}
 		// A nested function, created where it is declared (`case 'function_decl'`), and called from any later state.
@@ -7877,7 +7877,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			if (!declared || declared === 'void')
 				throw `function '${fd.name}' has an unsupported type`;
 			const wt = typeof declared === 'string' ? declared : types.nullable(declared);
-			localFields.set(fd.name, { index: frameFields.length, wtype: wt, tsType });
+			localFields.set(fd.name, { index: frameFields.length, wtype: wt, tsType, declared });
 			frameFields.push({ type: toValType(wt), mut: true });
 		}
 		// What an async closure captures lives in its frame too, unless a local of its own shadows the name.

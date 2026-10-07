@@ -3,7 +3,7 @@ import * as JS from './js-parser';
 import * as T from './type-utils';
 import { Module, Location, Identifier, Literal, Binary, Conditional, Assign, Await, Member, ExprStmt, hasMod, dropMod, If, While } from '@isopodlabs/tison/ast';
 import { walker, walkerB, constantFolder } from './walker';
-import { SEVERITY, Err, superClassRef, isPurePath, checkBlock, checkStmt1, exportScope, markAbsenceTests, literalSpecifier, unknownTypeNames, typeOf, typeOf1, inferReturn } from './checker';
+import { SEVERITY, Err, superClassRef, isPurePath, checkBlock, checkStmt1, exportScope, markAbsenceTests, literalSpecifier, unknownTypeNames, typeOf, typeOf1, inferReturn, checkedTypeOf, stampType } from './checker';
 import { LoadedModule, ModuleLoader } from './module-loader';
 import { moduleFree } from './free-names';
 
@@ -123,6 +123,179 @@ export function containsSuspend(stmt: Stmt): boolean {
 		undefined,
 		(e, process) => suspendExpr(e as Expr) ? true : (e.type === 'arrow' || e.type === 'function') ? false : process(e)
 	).statement(stmt);
+}
+
+// The yields/awaits `e` evaluates itself, not a nested function's (a statement inside an expression is in one).
+function suspendsIn(e: Expr): number {
+	let n = 0;
+	walkerB(() => false, (x, process) => (suspendExpr(x) && n++, x.type === 'arrow' || x.type === 'function' || x.type === 'class' ? false : process(x))).expression(e);
+	return n;
+}
+
+// A link of `e`'s own chain that is optional: what follows it runs only when that base is present.
+const inOptionalChain = (e: Expr): boolean =>
+	(e.type === 'member' || e.type === 'index' || e.type === 'call') && (!!e.optional || inOptionalChain(e.type === 'call' ? e.callee : e.object));
+
+// Each yield/await a statement evaluates as a `const t = await x;` of its own before it, as `BuildStateMachine` splits a body. What is evaluated
+// before a suspend is held first, in order; an arm of `&&`/`||`/`??`/`?:` holding one becomes an `if`, so it runs only when taken. Temps are `temp`'s,
+// bound in a child of the statement's checked scope, which the lifted statements are stamped with.
+export function liftSuspends(stmts: Stmt[], temp: (role: string) => string): Stmt[] {
+	return stmts.flatMap(s => {
+		const out: Stmt[] = [];
+		let scope: Scope | undefined;
+		const child	= () => {
+			const checked = (s as { scope?: Scope }).scope;
+			if (!checked)
+				throw `internal: an unchecked '${s.type}' beside a yield/await`;
+			return new Scope(checked);
+		};
+		const lift	= (e: Expr, keepTop = false) => liftExpr(e, out, temp, (name, t) => (scope ??= child()).addValue(name, t), keepTop);
+		const own	= (e?: Expr) => !!e && suspendsIn(e) > 0;
+		// Unchanged where nothing was lifted: a statement-level suspend stays the statement it is.
+		const done	= (rebuilt: Stmt) => out.length ? [...out, rebuilt].map(st => Object.assign(st, { scope })) : [s];
+		switch (s.type) {
+			case 'expression':
+				return own(s.expression) ? done({ ...s, expression: lift(s.expression, true) }) : [s];
+			case 'var_decl':
+				if (!s.declarations.some(d => own(d.init)))
+					return [s];
+				if (s.declarations.length > 1)
+					return s.declarations.flatMap(d => liftSuspends([{ ...s, declarations: [d] }], temp));
+				return (d => done({ ...s, declarations: [{ ...d, init: lift(d.init!, typeof d.name === 'string') }] }))(s.declarations[0]);
+			case 'return':
+			case 'throw':
+				return own(s.argument) ? done({ ...s, argument: lift(s.argument!) }) : [s];
+			case 'if':
+				return own(s.test) ? done({ ...s, test: lift(s.test) }) : [s];
+			case 'switch':
+				return own(s.discriminant) ? done({ ...s, discriminant: lift(s.discriminant) }) : [s];
+			case 'for':
+				return s.kind !== 'normal' && own(s.right) ? done({ ...s, right: lift(s.right) }) : [s];
+			default:
+				return [s];
+		}
+	});
+}
+
+// `root` with its suspends lifted into `out`, returning what stands in its place. `keepTop`: a suspend at the top stays (a statement-level one).
+// `pending` counts the suspends evaluated after the node being lowered: a value computed now and used after one of them is held.
+function liftExpr(root: Expr, out: Stmt[], temp: (role: string) => string, bind: (name: string, t: Type) => void, keepTop: boolean): Expr {
+	const temps		= new Set<string>();
+	const typeOf	= (e: Expr) => {
+		const t = checkedTypeOf(e);
+		if (!t)
+			throw `internal: an unchecked ${e.type} beside a yield/await`;
+		return T.widenLiterals(t);
+	};
+	const ref		= (name: string, t: Type) => stampType(Identifier(name), t);
+	const declare	= (kind: 'const' | 'let', role: string, init: Expr | undefined, t: Type, into: Stmt[]) => {
+		const name = temp(role);
+		temps.add(name);
+		bind(name, t);
+		into.push(JS.VarDecl(kind, JS.Var(name, init, t)));
+		return name;
+	};
+	const trivial = (e: Expr) => e.type === 'this' || e.type === 'arrow' || e.type === 'function'
+		|| (e.type === 'literal' && !(Array.isArray(e.value) && e.value.some(p => p.exp)))
+		|| (e.type === 'identifier' && (temps.has(e.name) || e.name === 'undefined'));
+	let pending = suspendsIn(root);
+
+	// `a && b` as `let t = a; if (t) t = b;` (`||` tests `!t`, `??` `t == null`): `b` evaluated only when taken, its suspends lifted into the arm.
+	// `t` holds `a` first, so it is typed as `a` or the result.
+	const shortCircuit = (op: string, left: Expr, right: Expr, result: Type, into: Stmt[]): Expr => {
+		const t		= T.combineTypes([typeOf(left), result]);
+		const name	= declare('let', 'logical', left, t, into);
+		const arm: Stmt[] = [];
+		arm.push(ExprStmt(Assign<Expr, never>(ref(name, t), lower(right, arm, false))));
+		const v		= ref(name, t);
+		into.push(If<Expr, Stmt>(op === '&&' ? v : op === '||' ? JS.JSUnary('!', v) : JS.JSBinary('==', v, Literal(null)), JS.Block<Stmt>(...arm)));
+		return ref(name, t);
+	};
+
+	const shape = (e: Expr, into: Stmt[]): Expr => {
+		switch (e.type) {
+			case 'await':
+			case 'yield': {
+				pending--;
+				const operand	= e.operand && lower(e.operand, into, false);
+				const t			= typeOf(e);
+				return ref(declare('const', 'sent', { ...e, operand } as Expr, t, into), t);
+			}
+			case 'binary':
+				if ((e.operator === '&&' || e.operator === '||' || e.operator === '??') && suspendsIn(e.right))
+					return shortCircuit(e.operator, lower(e.left, into, false), e.right, typeOf(e), into);
+				break;
+			case 'conditional': {
+				const [sc, sa] = [suspendsIn(e.consequent), suspendsIn(e.alternate)];
+				if (!sc && !sa)
+					break;
+				const test		= lower(e.test, into, false);
+				const t			= typeOf(e);
+				const name		= declare('let', 'cond', undefined, t, into);
+				const after		= pending - sc - sa;
+				const arm		= (x: Expr, own: number) => {
+					pending = after + own;
+					const a: Stmt[] = [];
+					a.push(ExprStmt(Assign<Expr, never>(ref(name, t), lower(x, a, false))));
+					return JS.Block<Stmt>(...a);
+				};
+				into.push(If<Expr, Stmt>(test, arm(e.consequent, sc), arm(e.alternate, sa)));
+				return ref(name, t);
+			}
+			case 'assign': {
+				const target = e.target;
+				if (target.type === 'array' || target.type === 'object') {
+					if (suspendsIn(target))
+						throw "a yield/await inside a destructuring assignment's pattern is not yet supported";
+					return { ...e, value: lower(e.value, into, false) };
+				}
+				const place = target.type === 'member' ? { ...target, object: lower(target.object, into) }
+					: target.type === 'index' ? { ...target, object: lower(target.object, into), index: lower(target.index, into) }
+					: target;
+				// Each read of the place is a fresh node: a checked node holds one type.
+				const read = () => ({ ...place }) as Expr;
+				if (!e.operator)
+					return { ...e, target: place, value: lower(e.value, into, false) };
+				if (e.operator === '&&' || e.operator === '||' || e.operator === '??')
+					return shortCircuit(e.operator, read(), Assign<Expr, never>(read(), e.value), typeOf(e), into);
+				// `t op= v` reads `t` before `v` runs.
+				const current = lower(read(), into);
+				return Assign<Expr, never>(place, JS.JSBinary(e.operator, current, lower(e.value, into, false)));
+			}
+			case 'call':
+			case 'new': {
+				const callee = e.callee;
+				if ((e.type === 'call' && e.optional || inOptionalChain(callee)) && e.arguments.some(suspendsIn))
+					throw 'a yield/await in the arguments of an optional call is not yet supported';
+				// The callee stays a reference: a function or class name, and a method's receiver name (a namespace is no value to hold).
+				const lowered = callee.type === 'identifier' || callee.type === 'super' ? callee
+					: callee.type === 'member' ? { ...callee, object: callee.object.type === 'identifier' ? callee.object : lower(callee.object, into) }
+					: callee.type === 'index' ? { ...callee, object: lower(callee.object, into), index: lower(callee.index, into) }
+					: lower(callee, into);
+				return { ...e, callee: lowered, arguments: e.arguments.map(a => lower(a, into)) } as Expr;
+			}
+			case 'index':
+				if ((e.optional || inOptionalChain(e.object)) && suspendsIn(e.index))
+					throw 'a yield/await in an optional index is not yet supported';
+				break;
+		}
+		return walker(st => st, (x, process) => x === e ? process(x) : lower(x, into)).expression(e)!;
+	};
+
+	// `mayHold`: false where the value is used at once (an operand of the suspend itself, an assignment's value, a test).
+	const lower = (e: Expr, into: Stmt[], mayHold = true): Expr => {
+		const lowered = suspendsIn(e) || e.type === 'spread' ? shape(e, into) : e;
+		return mayHold && pending > 0 && !trivial(lowered) && lowered.type !== 'spread'
+			? (t => ref(declare('const', 'held', lowered, t, into), t))(typeOf(e))
+			: lowered;
+	};
+
+	const top = keepTop ? suspendExpr(root) : undefined;
+	if (top) {
+		pending--;
+		return { ...root, operand: top.operand && lower(top.operand, out, false) } as Expr;
+	}
+	return lower(root, out, false);
 }
 
 // Splits a generator/async body into an id-addressable graph of segments, which codegen turns into one resumable step (a dispatch, one block

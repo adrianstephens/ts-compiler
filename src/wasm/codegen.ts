@@ -187,11 +187,13 @@ export function withCatch(item: ()=>void, ...scopes: string[]) {
 }
 
 // `holderField`: where in the holder the value sits, when the holder is a resumable frame shared by the closures its body makes.
+// `declared`: the value's own type where its storage is nullable only to be allocated empty (a frame field), read back non-null as a holder is.
 export interface Local {
 	wtype:			Type;
 	index:			number;
 	holderInner?:	Type;
 	holderField?:	number;
+	declared?:		Type;
 }
 
 // `frame`: the fields are this function's own hoisted locals (a resumable frame), not captures from outside, which a local of the name shadows.
@@ -410,7 +412,7 @@ export class FunctionContext {
 		const local = this.lookup(name);
 		const captured = local ? undefined : this.closureEnv?.fields.get(name);
 		if (captured)
-			return captured.holderInner ?? captured.wtype;
+			return captured.holderInner ?? captured.declared ?? captured.wtype;
 		return local?.holderInner ?? local?.wtype;
 	}
 	// The type of a name's STORAGE slot: a forward-holder's boxed type, which a closure capturing its shared storage needs.
@@ -431,6 +433,9 @@ export class FunctionContext {
 	// A holder's field is nullable, allocatable empty; `holderInner` is the non-null logical type, sound because the filling declaration runs first.
 	emitHolderRead(holderType: number, inner: Type, field = 0) {
 		this.emit(I.struct.get(holderType, field));
+		this.emitNonNull(inner);
+	}
+	emitNonNull(inner: Type) {
 		if (typeof inner !== 'string' && !inner.nullable)
 			this.emit(I.ref.as_non_null);
 	}

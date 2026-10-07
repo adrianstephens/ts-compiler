@@ -5671,6 +5671,29 @@ async function main() {
 		asyncNested.run();
 		['nested async function', 'closure over a later local', 'function called in two states', 'local written after capture', 'return await'].forEach((name, i) =>
 			check(`async body: ${name}`, asyncNested.at(i), [42, 101, 19, 320, 8][i]));
+		// A yield/await inside an expression is lifted to a statement of its own: what runs before it is held first, a short-circuit or conditional
+		// arm holding one runs only when taken, and a spread or assignment of a frame local reads its value.
+		const liftedAwaits = await compile(`
+			const val = (n: number) => Promise.resolve(n);
+			async function arg(): Promise<number> { return Math.max(1, await val(7)); }
+			async function before(): Promise<number> { let x = 2; const bump = async () => { x = 100; return 3; }; return x + await bump(); }
+			async function and(): Promise<number> { const t = true; const f = false; const a = t && await val(4); const b = f && await val(50); return (a ? 4 : 0) + (b ? 50 : 0); }
+			async function nullish(): Promise<number> { const u: number | undefined = undefined; const k: number | undefined = 6; return (u ?? await val(10)) + (k ?? await val(1000)); }
+			async function cond(): Promise<number> { const s: string | undefined = 'x'; const r = s === undefined ? 0 : await val(s.length + 8); return r; }
+			async function member(): Promise<number> { const o = { v: [1, 2, 3] }; return (await Promise.resolve(o)).v.length; }
+			async function assign(): Promise<number> { const o = { n: 1 }; o.n = await val(30); let c = 5; c += await val(2); return o.n + c; }
+			async function spread(): Promise<number> { const xs: number[] = [1]; xs.push(...await Promise.resolve([2, 3])); return xs.length * 10 + xs[2]; }
+			async function nested(): Promise<number> { if (await val(1)) return await val(await val(12)); return 0; }
+			async function iterable(): Promise<number> { let t = 0; for (const x of await Promise.resolve([1, 2, 3])) t += x; return t; }
+			async function lone(): Promise<number> { let t = 0; const c = true; if (c) t = await val(9); return t; }
+			const got = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+			export function run(): number { [arg, before, and, nullish, cond, member, assign, spread, nested, iterable, lone].forEach((f, i) => f().then(v => { got[i] = v; })); return 0; }
+			export function at(i: number): number { return got[i]; }
+		`);
+		liftedAwaits.run();
+		['an argument', 'an operand read before it', '&&', '??', 'a conditional arm', 'a member base', 'an assignment and a compound one', 'a spread argument',
+			'a test and a nested operand', 'a for...of iterable', 'a lone statement under if'].forEach((name, i) =>
+			check(`await inside ${name}`, liftedAwaits.at(i), [7, 5, 4, 16, 9, 3, 37, 33, 12, 6, 9][i]));
 		const { forwardConst } = await compile(`
 			function f(): number { const early = () => h(1); const base = 100; return early(); function h(n: number): number { return base + n; } }
 			export function forwardConst(): number { return f(); }
@@ -9500,16 +9523,6 @@ async function main() {
 					yield 1;
 					break;
 				}
-			}
-			export function f(): number {
-				const g = gen();
-				return g.next(0).done ? 1 : 0;
-			}
-		`), /not yet supported/);
-
-		await checkThrows('generator: a yield embedded in a larger expression is rejected', () => compile(`
-			function* gen(): Generator<number, void, number> {
-				const x = (yield 1) + 1;
 			}
 			export function f(): number {
 				const g = gen();

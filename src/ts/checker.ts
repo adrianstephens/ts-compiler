@@ -1240,6 +1240,8 @@ export interface FlowSlot { type: Type; element?: boolean }
 export const flowSlotOf = (e: Expr): FlowSlot | undefined => (e as { flowSlot?: FlowSlot }).flowSlot;
 // The type the check pass gave `e`, precise (unwidened) and narrowed where it stands; `??=`, so the first real check wins.
 export const checkedTypeOf = (e: Expr): Type | undefined => (e as { checkedType?: Type }).checkedType;
+// A node a lowering builds after the check, typed as the checked node it stands for (a temp holding that node's value).
+export const stampType = <E extends Expr>(e: E, t: Type): E => Object.assign(e, { checkedType: t });
 // The contextual type the check pass typed `e` against (its slot, parameter, element or member), taken with `checkedType`.
 export const expectedTypeOf = (e: Expr): Type | undefined => (e as { expectedType?: Type }).expectedType;
 // The signature a call or `new` resolved to -- the chosen overload as declared -- and the type arguments it was instantiated with.
