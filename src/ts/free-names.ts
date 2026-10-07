@@ -172,7 +172,7 @@ export function closureFree(fn: Closure): Set<string> {
 }
 
 // What a class reads from outside itself: its heritage and its members', each method a closure over its own `this`.
-function classFree(c: JS.Class<Type, TS.ClassMember>): string[] {
+export function classFree(c: JS.Class<Type, TS.ClassMember>): string[] {
 	const own = (m: TS.ClassMember): Iterable<string> =>
 		m.type === 'method'			? [...typeof m.key === 'object' ? freeIn(m.key.computed) : [], ...closureFree(m)]
 		: m.type === 'field'		? [...typeof m.key === 'object' ? freeIn(m.key.computed) : [], ...m.value ? freeIn(m.value) : []]

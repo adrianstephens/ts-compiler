@@ -7,7 +7,7 @@ import * as W from '../wasm/codegen';
 import { Literal, Identifier, Binary, Assign, hasMod, Module as CModule } from '@isopodlabs/tison/ast';
 import { type Contextual, checkBlock, checkHoisted, checkImported, superClassRef, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, restampFlow, checkedTypeOf, expectedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr, checkMethodInstance, hoistTypes } from './checker';
 import { Walker, walker, walkerB } from './walker';
-import { type Closure, paramNames, ownBoundNames, freeIn, closureFree } from './free-names';
+import { type Closure, paramNames, ownBoundNames, freeIn, closureFree, classFree } from './free-names';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
 import { iteratorOf, foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, containsSuspend, liftSuspends, lowerFlattenedTry, type ForOf, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
 import * as wasm from '@isopodlabs/binary_libs/wasm';
@@ -836,6 +836,11 @@ function namesSelfAsValue(body: Stmt[] | Expr, name: string): boolean {
 	return found;
 }
 
+// A class declared in a function body: each evaluation closes over that call's bindings (`case 'class_decl'` captures them into `env`),
+// and its instances carry that env (`#env`). Marked on the node, which a generic instantiation's copy shares; `id` keeps same-named ones apart.
+interface LocalClass { id: number; home: string; env?: { typeIndex: number; fields: Map<string, Omit<Capture, 'name'>> } }
+const localClassOf = (decl: object): LocalClass | undefined => (decl as { localClass?: LocalClass }).localClass;
+
 // The names this body declares that a nested closure captures AND something assigns: shared heap holders, since a closure captures the BINDING
 // (`let n = 1; const f = () => n; n = 4;` sees 4). A `for (let i ...)` binding is per iteration, so each closure's copy is right; a `var`'s is not.
 function collectCapturedMutables(body: Stmt[]): Set<string> {
@@ -848,6 +853,12 @@ function collectCapturedMutables(body: Stmt[]): Set<string> {
 		(st, process) => {
 			if (st.type === 'for' && st.init && !Array.isArray(st.init) && st.init.type === 'var_decl' && st.init.kind !== 'var')
 				st.init.declarations.forEach(d => typeof d.name === 'string' && perIteration.add(d.name));
+			// A local class's members close over this scope as a closure does.
+			if (st.type === 'class_decl') {
+				classFree(st).forEach(n => captured.add(n));
+				walkerB(undefined, (x, p) => (noteAssignExpr(x, assigned), p(x))).statement(st);
+				return false;
+			}
 			return st.type === 'function_decl' ? (nested(st), false) : process(st);
 		},
 		(e, process) => {
@@ -2462,7 +2473,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 	// The module-level `const`/`let` (with an initializer) `name` resolves to in `scope`, imports included.
-	// Where a class's bodies resolve names: its declaring module, or for a factory's class the scope binding the factory's parameters.
+	// Where a class's bodies resolve names: its declaring module, or for a factory's class the scope binding the factory's parameters, or for a
+	// local class the block declaring it.
 	const factoryScopes	= new Map<TS.Class, Scope>();
 	const classScope	= (c: ClassInfo) => factoryScopes.get(c.decl) ?? moduleScopeOf(c.homeModule) ?? c.declScope ?? libGlobal;
 
@@ -4603,6 +4615,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				return emitCall(c.name, e, ctx, contextOf(e) ?? (() => checkerTypeOf(e, ctx.scope)), c.home);
 			case 'construct': {
 				const ctor = ensureCtor(c.cls, c.lowered ? e.arguments : e, ctx);
+				// A local class's env, from the binding its declaration made.
+				if (c.cls.fieldIndex.has('#env')) {
+					const binding = Identifier(c.label);
+					emitPlaceRead(binding, resolvePlace(binding, ctx)!, ctx);
+				}
 				emitCallArgs(`${c.label}'s constructor`, ctor.params, ctor.defaults, !!ctor.hasRest, e.arguments, ctx, ctor.resolvedParams);
 				ctx.emit(I.call(ctor.funcIndex));
 				return c.cls.thisWtype!;
@@ -5476,6 +5493,58 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 
+	// What a closure (or a local class) made here captures of the names it reads: each one this body binds, read raw (`rawSlot`), so a
+	// forward-holder is captured as the holder itself. `pushEnv` leaves the env struct on the stack.
+	function captureEnv(free: Iterable<string>, ctx: FunctionContext, thisHolder?: { holder: W.Local; tsType: Type }) {
+		for (const name of free) {
+			// `undefined` is no declared value (`case 'identifier'` reads it as `isNullLiteral`).
+			if (name === 'undefined' || (name === 'this' && thisHolder))
+				continue;
+			// The enclosing body's own declaration (a sibling function not created yet) before the module's: it is the nearer binding.
+			if (!ctx.resolvesName(name) && !ensureForwardHolder(ctx, name) && !resolvesGlobally(ctx, name))
+				throw `unresolved identifier '${name}'`;
+		}
+
+		// Zero captures reuse `$envBase`: no distinct type, no cast. A globally resolvable free name (a top-level function, a wasm global) needs no slot.
+		const envBase		= types.envBase();
+		const isHeld		= (name: string) => name === 'this' && !!thisHolder;
+		const capturedNames = [...free].filter(name => isHeld(name) || ctx.resolvesName(name));
+		// Each capture's TS type is read NOW, in the scope the literal is written in: its body compiles later, once that block's names are gone.
+		const fields		= capturedNames.length ? new Map<string, Omit<Capture, 'name'>>() : undefined;
+		// A resumable body's own local is a field of its frame, which a closure it makes captures as that local's holder: a later state's write stays visible.
+		const frameLocal	= (name: string) => ctx.lookup(name) || !ctx.closureEnv?.frame ? undefined : ctx.closureEnv.fields.get(name);
+		let envTypeIndex	= envBase;
+		if (fields) {
+			// `rawWtype`, not `resolvedWtype`: a forward-holder is captured as the SHARED holder, so a later write through it stays visible;
+			// `holderInner` lets every read unbox it.
+			envTypeIndex = types.add({ final: true, supertypes: [envBase], type: { kind: 'struct', fields: capturedNames.map((name, i) => {
+				const inFrame	= frameLocal(name);
+				const tsType	= isHeld(name) ? thisHolder!.tsType : ctx.scope.value(name);
+				// The name's nearest binding, as `rawWtype` and `rawSlot` read it: a local before a capture of the same name.
+				const binding	= isHeld(name) ? thisHolder!.holder : ctx.lookup(name) ?? ctx.closureEnv!.fields.get(name)!;
+				const wt		= inFrame && !inFrame.holderInner ? ctx.closureEnv!.envLocal.wtype : binding.wtype;
+				fields.set(name, inFrame && !inFrame.holderInner
+					? { index: i, wtype: wt, holderInner: inFrame.declared ?? inFrame.wtype, holderField: inFrame.index, tsType }
+					: { index: i, wtype: wt, holderInner: binding.holderInner, holderField: binding.holderField, tsType });
+				return { type: toValType(wt), mut: true };
+			}) } });
+		}
+		const pushEnv = () => {
+			for (const name of capturedNames) {
+				if (isHeld(name))
+					ctx.emit(I.local.get(thisHolder!.holder.index));
+				else if (name === 'this' && !ctx.closureEnv?.fields.get(name)?.holderInner)
+					emitExpr({ type: 'this' }, ctx);
+				else if (frameLocal(name) && !frameLocal(name)!.holderInner)
+					ctx.emit(I.local.get(ctx.closureEnv!.envLocal.index));
+				else
+					ctx.rawSlot(name);
+			}
+			ctx.emit(fields ? I.struct.new(envTypeIndex) : I.struct.new_default(envBase));
+		};
+		return { capturedNames, fields, envTypeIndex, pushEnv };
+	}
+
 	// Builds the `{code, env}` closure struct for an `arrow`/`function` expression or a nested `function_decl`, leaving it on the stack. `allowSelfCall`
 	// (a declaration) lets calls to its own name be a direct `call` (`ctx.selfCall`): the struct cannot be a field of itself, so it cannot be captured.
 	function emitClosureLiteral(
@@ -5573,54 +5642,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (e.type !== 'arrow' && free.has('this') && !thisHolder)
 			throw "'this' inside a function expression is not supported -- only an arrow function's lexical 'this' is";
 
-		for (const name of free) {
-			// `undefined` is no declared value (`case 'identifier'` reads it as `isNullLiteral`).
-			if (name === 'undefined' || (name === 'this' && thisHolder))
-				continue;
-			// The enclosing body's own declaration (a sibling function not created yet) before the module's: it is the nearer binding.
-			if (!ctx.resolvesName(name) && !ensureForwardHolder(ctx, name) && !resolvesGlobally(ctx, name))
-				throw `unresolved identifier '${name}'`;
-		}
+		const { capturedNames, fields, envTypeIndex, pushEnv } = captureEnv(free, ctx, thisHolder);
 
-		// Zero captures reuse `$envBase`: no distinct type, no cast. A globally resolvable free name (a top-level function, a wasm global) needs no slot.
-		const envBase		= types.envBase();
-		const isHeld		= (name: string) => name === 'this' && !!thisHolder;
-		const capturedNames = [...free].filter(name => isHeld(name) || ctx.resolvesName(name));
-		// Each capture's TS type is read NOW, in the scope the literal is written in: its body compiles later, once that block's names are gone.
-		const fields		= capturedNames.length ? new Map<string, Omit<Capture, 'name'>>() : undefined;
-		// A resumable body's own local is a field of its frame, which a closure it makes captures as that local's holder: a later state's write stays visible.
-		const frameLocal	= (name: string) => ctx.lookup(name) || !ctx.closureEnv?.frame ? undefined : ctx.closureEnv.fields.get(name);
-		let envTypeIndex	= envBase;
-		if (fields) {
-			// `rawWtype`, not `resolvedWtype`: a forward-holder is captured as the SHARED holder, so a later write through it stays visible;
-			// `holderInner` lets every read unbox it.
-			envTypeIndex = types.add({ final: true, supertypes: [envBase], type: { kind: 'struct', fields: capturedNames.map((name, i) => {
-				const inFrame	= frameLocal(name);
-				const tsType	= isHeld(name) ? thisHolder!.tsType : ctx.scope.value(name);
-				// The name's nearest binding, as `rawWtype` and `rawSlot` read it: a local before a capture of the same name.
-				const binding	= isHeld(name) ? thisHolder!.holder : ctx.lookup(name) ?? ctx.closureEnv!.fields.get(name)!;
-				const wt		= inFrame && !inFrame.holderInner ? ctx.closureEnv!.envLocal.wtype : binding.wtype;
-				fields.set(name, inFrame && !inFrame.holderInner
-					? { index: i, wtype: wt, holderInner: inFrame.declared ?? inFrame.wtype, holderField: inFrame.index, tsType }
-					: { index: i, wtype: wt, holderInner: binding.holderInner, holderField: binding.holderField, tsType });
-				return { type: toValType(wt), mut: true };
-			}) } });
-		}
-
-		// `struct.new` takes `[code, env]` in order. Each capture is read raw (`rawSlot`): a forward-holder is captured as the holder itself.
+		// `struct.new` takes `[code, env]` in order.
 		const build = (funcIndex: number, structTypeIndex: number, sig: FuncSig): W.Type => {
 			ctx.emit(I.ref.func(funcIndex));
-			for (const name of capturedNames) {
-				if (isHeld(name))
-					ctx.emit(I.local.get(thisHolder!.holder.index));
-				else if (name === 'this' && !ctx.closureEnv?.fields.get(name)?.holderInner)
-					emitExpr({ type: 'this' }, ctx);
-				else if (frameLocal(name) && !frameLocal(name)!.holderInner)
-					ctx.emit(I.local.get(ctx.closureEnv!.envLocal.index));
-				else
-					ctx.rawSlot(name);
-			}
-			ctx.emit(fields ? I.struct.new(envTypeIndex) : I.struct.new_default(envBase));
+			pushEnv();
 			ctx.emit(I.i32.const(jsLength(e.params)), ...newClosure(structTypeIndex));
 			return closureWtype(sig);
 		};
@@ -5647,7 +5674,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		worklist.push(W.withCatchAt(() => {
 			const fnCtx		= new FunctionContext(e.name ?? '<anonymous>', new Scope(moduleScopeOf(ctx.homeModule) ?? libGlobal), plainReturn(result), undefined, ctx.homeModule);
 			// Env param first (wasm param 0), then the literal's own: `toFuncBody` takes the first `1 + params.length` locals as the params.
-			const envParam	= fnCtx.declareLocal('#envParam', { typeIndex: envBase, nullable: false });
+			const envParam	= fnCtx.declareLocal('#envParam', { typeIndex: types.envBase(), nullable: false });
 			const pending	= fnCtx.declareParams(params);
 			// Each rest-covered parameter is a `let x = #rest[k]`, its declared type riding along or it reads back as the element type.
 			pending.unshift(...restBound.map((p, k) => JS.VarDecl('let', JS.Var<Type>(p.key,
@@ -5695,10 +5722,23 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const target = classTargetOf(e, ctx);
 		return target && ensureClass(target.name, undefined, target.scope);
 	}
+	// A local class's binding holds the env its declaration captured (`case 'class_decl'`): no value is ever an env struct otherwise.
+	const localClassEnvTypes	= new Set<number>();
+	const holdsLocalClass		= (w: W.Type) => typeof w === 'object' && 'typeIndex' in w && (w.typeIndex === types.envBase() || localClassEnvTypes.has(w.typeIndex));
+	// A local class named where its declaring body's scope is out of reach (a nested closure): the instance its constructor builds names the class
+	// in the scope the checker declared it.
+	function localClassTarget(e: Expr, ctx: FunctionContext): { name: string; scope: Scope } | undefined {
+		if (e.type !== 'identifier')
+			return undefined;
+		const instance	= T.constructSignatures(ctx.typeAt(e), ctx.scope)[0]?.returnType;
+		const scope		= instance?.type === 'ref' && instance.name === e.name ? instance.declScope as Scope | undefined : undefined;
+		const decl		= scope?.decl(e.name);
+		return scope && decl?.type === 'class_decl' && localClassOf(decl) ? { name: e.name, scope } : undefined;
+	}
 	// The class an expression names: a declared one, or a lib class by its declaration or a lib alias to one (`Uint8Array` is `TypedArray<u8>`),
 	// unless a local shadows the name. The lib's own `var Uint8Array` is that class, so a value of the name does not shadow it.
 	function classTargetOf(e: Expr, ctx: FunctionContext): { name: string; scope: Scope } | undefined {
-		return classRefTarget(e, ctx.scope) ?? (e.type === 'identifier' && !ctx.lookup(e.name) && isLibName(e.name, ctx.scope) && (LIB_DECL_MAP.get(e.name)?.type === 'class_decl' || resolveClassAlias(e.name))
+		return classRefTarget(e, ctx.scope) ?? localClassTarget(e, ctx) ?? (e.type === 'identifier' && !ctx.lookup(e.name) && isLibName(e.name, ctx.scope) && (LIB_DECL_MAP.get(e.name)?.type === 'class_decl' || resolveClassAlias(e.name))
 			? { name: e.name, scope: ctx.scope } : undefined);
 	}
 
@@ -6220,6 +6260,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				if (e.type === 'this' && ctx.ctorFields)
 					throw `'this' can't be used yet in '${ctx.owner?.name}'s constructor -- it has at least one object-typed field, which needs every field's real value collected up front (for 'struct.new') before 'this' exists at all; assign every field via a plain 'this.field = value' statement before using 'this' any other way`;
 				const place = resolvePlace(e, ctx);
+				if (place && holdsLocalClass(place.wtype))
+					throw `local class '${name}' as a value is not supported (only 'new', 'instanceof' and its members)`;
 				if (place)
 					return emitPlaceRead(e, place, ctx);
 				const fnValue = functionValueDecl(e, ctx);
@@ -6736,7 +6778,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					// structurally identical sibling classes apart.
 					case 'instanceof': {
 						// A class named directly or through a namespace import (`x instanceof T.Scope`).
-						const target = classRefTarget(right, ctx.scope) ?? (right.type === 'identifier' ? { name: right.name, scope: ctx.scope } : undefined);
+						const target = classRefTarget(right, ctx.scope) ?? localClassTarget(right, ctx) ?? (right.type === 'identifier' ? { name: right.name, scope: ctx.scope } : undefined);
 						if (!target)
 							throw "'instanceof' is only supported against a class name";
 						const leftWtype = wtypeOf(left, ctx);
@@ -7511,6 +7553,20 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			case 'type_alias_decl':
 				return;
 
+			// A local class (`LocalClass`): evaluated here, it captures what its members read of this scope, bound under its name for `new` to read.
+			case 'class_decl': {
+				const local = localClassOf(s);
+				if (!local)
+					throw `internal: class '${s.name}' is declared in a body but was not marked local`;
+				const { fields, envTypeIndex, pushEnv } = captureEnv(classFree(s), ctx);
+				local.env = fields && { typeIndex: envTypeIndex, fields };
+				localClassEnvTypes.add(envTypeIndex);
+				pushEnv();
+				ctx.scope.addDecl(s.name, s);
+				ctx.emit(I.local.set(ctx.declareValue(s.name, { typeIndex: envTypeIndex, nullable: false }, (s as { scope?: Scope }).scope!.value(s.name)!).index));
+				return;
+			}
+
 			default:
 				throw `unsupported statement '${s.type}'`;
 		}
@@ -7637,14 +7693,17 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 	// Binds the params (running their defaults) and hoists the body's `var`s.
-	function beginBody(ctx: FunctionContext, body: Stmt[], params: ResolvedParam[]) {
+	// `enter`: what runs once the params are declared (their locals first, as wasm requires) and before their defaults.
+	function beginBody(ctx: FunctionContext, body: Stmt[], params: ResolvedParam[], enter?: () => void) {
 		ctx.ownBody = body;
-		ctx.declareParams(params).forEach(lowering(ctx).emit);
+		const pending = ctx.declareParams(params);
+		enter?.();
+		pending.forEach(lowering(ctx).emit);
 		hoistVars(body, params, ctx);
 	}
 
-	function emitFuncBody(ctx: FunctionContext, body: Stmt[], params: ResolvedParam[], result: W.Type) {
-		beginBody(ctx, body, params);
+	function emitFuncBody(ctx: FunctionContext, body: Stmt[], params: ResolvedParam[], result: W.Type, enter?: () => void) {
+		beginBody(ctx, body, params, enter);
 		emitStmts(body, ctx);
 		emitBodyEnd(ctx, result, body);
 	}
@@ -8006,6 +8065,20 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			else if (!capture?.(localName))
 				ctx.emitDefaultValue(field.wtype, types, toValType);
 		}
+	}
+
+	// A local class's member reads the names its declaration captured through the env its instance holds (`#env`), as a closure body reads its own.
+	function enterClassEnv(cls: ClassInfo, ctx: FunctionContext, pushEnv: () => void) {
+		const env = localClassOf(cls.decl)?.env;
+		if (!env)
+			return;
+		const envLocal = ctx.declareLocal('#env', { typeIndex: env.typeIndex, nullable: false });
+		pushEnv();
+		ctx.emit(I.ref.cast(env.typeIndex), I.local.set(envLocal.index));
+		ctx.closureEnv = { envLocal, envTypeIndex: env.typeIndex, fields: env.fields };
+		for (const [name, f] of env.fields)
+			if (f.tsType)
+				ctx.declareCaptured(name, f.tsType);
 	}
 
 	// The function a caller calls, registered module-qualified as `compileFunc` registers, or two modules' same-named functions collide.
@@ -8683,7 +8756,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (classDecl?.type === 'class_decl')
 			typeArgs = typeArgs && classLayoutArgs(typeArgs, global, classDecl);
 		// A class declared outside the entry module is keyed by its module too: `W.FunctionContext` and this file's subclass of it are two classes.
-		const tag	= classDecl?.type === 'class_decl' ? moduleTag(stmtHomeModule.get(classDecl)) : '';
+		const tag	= classDecl?.type !== 'class_decl' ? '' : localClassOf(classDecl) ? `@local${localClassOf(classDecl)!.id}` : moduleTag(stmtHomeModule.get(classDecl));
 		const key	= (typeArgs?.length ? `${name}<${typeArgs.map(t => layoutArgKey(t, global)).join(',')}>` : name) + tag;
 		// A non-generic top-level class is seeded eagerly, unprocessed; a generic one per instantiation. `thisWtype` set is what stops re-entry,
 		// not `typeIndex`, which stays -1 for a scalar-backed class (`Number`).
@@ -8715,8 +8788,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					return ensureClass(aliased.name, typeArgs, aliased.scope);
 				return ensureObjectShape(name, typeArgs, declScope);
 			}
-			// Off the ORIGINAL declaration: an instantiation is a substituted copy `stmtHomeModule` has never seen.
-			const homeModule	= stmtHomeModule.get(decl);
+			// Off the ORIGINAL declaration: an instantiation is a substituted copy `stmtHomeModule` has never seen. A local class's scope is the
+			// block the checker declared it in.
+			const local			= localClassOf(decl);
+			const homeModule	= stmtHomeModule.get(decl) ?? local?.home;
+			const localScope	= local && (decl as { scope?: Scope }).scope;
 			const generic		= !!decl.typeParams?.length;
 			if (decl.typeParams?.length) {
 				const got = typeArgs?.length ?? 0;
@@ -8728,7 +8804,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				decl = substituteClassTypeParam(decl, new Map(decl.typeParams.map((p, i) => [p.name, i < got ? typeArgs![i] : p.default!])));
 			}
 			// `thisTsType` names the class and its type arguments, not the composite key, or `this.length` cannot resolve.
-			const home			= moduleScopeOf(homeModule);
+			const home			= localScope ?? moduleScopeOf(homeModule);
 			const thisTsType	= { ...TS.RefType(name, typeArgs), declScope: home ?? declScope };
 			// Re-checked, as a generic function's instance is: its stamps must be this instantiation's, not the erased template's.
 			if (generic) {
@@ -8739,6 +8815,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			// Its OWN module's scope, where its superclass and field types are named, not the scope that first referred to it.
 			info.declScope		= home ?? declScope;
 			info.homeModule		= homeModule;
+			if (localScope)
+				factoryScopes.set(decl, localScope);
 			classes.set(key, info);
 			// Known by its declaration, as a shape is: another module's same-named interface (`Predicate`) must not take this class.
 			const entry = home?.type(name);
@@ -8778,6 +8856,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			// Inherited accessors are this class's too: a read of one finds its `get:` method up the chain (`ensureMethod`).
 			info.getterNames = superInfo.getterNames && new Set(superInfo.getterNames);
 			info.setterNames = superInfo.setterNames && new Set(superInfo.setterNames);
+		}
+		// A local class's instance holds the env its declaration captured, which its members read their outer names through.
+		if (localClassOf(decl) && !returnType) {
+			if (info.fieldIndex.has('#env'))
+				throw `local class '${name}' extending another local class is not supported`;
+			info.fieldIndex.set('#env', info.fields.length);
+			info.fields.push({ name: '#env', wtype: { typeIndex: types.envBase(), nullable: true }, optional: true });
 		}
 
 		if (returnType) {
@@ -9073,7 +9158,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 		const params		= resolveParams(ctor, cls.declScope ?? libGlobal);
 		const thisWtype		= cls.thisWtype!;
-		const info			= declareFunc(key, ctor, params, thisWtype);
+		// A local class's env, passed first as a method's receiver is (`emitClassEnv`).
+		const envWtype		= cls.fieldIndex.has('#env') ? { typeIndex: types.envBase(), nullable: false } : undefined;
+		const info			= declareFunc(key, ctor, params, thisWtype, envWtype);
 
 		// A constructor's `return;` carries no value: it stops early, `this` the result. So does a `return` of `this` itself, evaluated first.
 		const ctorOnReturn: ReturnHandler = {
@@ -9091,7 +9178,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			// The DECLARING module's scope, so the body resolves names only its file declares; not `declScope`, the scope of whatever reference first
 			// built this class (maybe another module). `libGlobal` for a lib class or a synthesized shape.
 			const ctx		= new FunctionContext(key, new Scope(classScope(cls)), plainReturn(thisWtype), cls, cls.homeModule);
-			beginBody(ctx, ctor.body!, params);
+			const envParam	= envWtype && ctx.declareLocal('#envParam', envWtype);
+			beginBody(ctx, ctor.body!, params, () => envParam && enterClassEnv(cls, ctx, () => ctx.emit(I.local.get(envParam.index))));
 			const writeField = (field: string, value: Expr) => {
 				const idx = cls.fieldIndex.get(field)!, wtype = cls.fields[idx].wtype;
 				ctx.emit(I.local.get(ctx.ctorThis!.index));
@@ -9122,6 +9210,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						values.set(f.name, local);
 					}
 				}
+				if (envParam)
+					ctx.emit(I.local.get(envParam.index), I.local.set(values.get('#env')!.index));
 
 				const materializeThis = () => {
 					for (const f of cls.fields)
@@ -9165,11 +9255,16 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					I.struct.new_default(cls.typeIndex),
 					I.local.set(thisLocal.index),
 				);
+				if (envParam) {
+					const idx = cls.fieldIndex.get('#env')!;
+					ctx.emit(I.local.get(thisLocal.index), I.local.get(envParam.index));
+					emitFieldWrite(cls, idx, cls.fields[idx].wtype, ctx);
+				}
 				emitCtorStatements(ctor, cls, ctx, writeField);
 				ctx.emit(I.local.get(ctx.ctorThis!.index), I.return);
 			}
 
-			info.body = ctx.toFuncBody(ctor.params.length + (ctor.rest ? 1 : 0), toValType);
+			info.body = ctx.toFuncBody((envParam ? 1 : 0) + ctor.params.length + (ctor.rest ? 1 : 0), toValType);
 		}, key));
 		return info;
 	}
@@ -9229,6 +9324,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const isStatic		= !!decl.modifiers?.includes('static');
 		// An async or generator method is resumable, as such a function is, with its receiver in the frame.
 		if (!abstract && (hasMod(decl, 'async') || hasMod(decl, 'generator'))) {
+			if (localClassOf(owner.decl)?.env)
+				throw `an async or generator method of local class '${owner.name}', which captures its scope, is not supported`;
 			const asFunc: FunctionDecl = { ...decl, type: 'function_decl', name: fullName };
 			return hasMod(decl, 'async')
 				? compileAsyncFunc(key, asFunc, owner.homeModule, undefined, { key, owner, isStatic, staticThis })
@@ -9265,7 +9362,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					},
 				};
 			}
-			emitFuncBody(ctx, decl.body!, params, result);
+			emitFuncBody(ctx, decl.body!, params, result, () => !isStatic && enterClassEnv(owner, ctx, () => {
+				const idx = owner.fieldIndex.get('#env')!;
+				ctx.emit(I.local.get(ctx.lookup('this')!.index), I.struct.get(owner.typeIndex, idx));
+			}));
 			info.body = ctx.toFuncBody((isStatic ? 0 : 1) + params.length, toValType);
 		}, key));
 		return info;
@@ -10160,8 +10260,31 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// TS width subtyping has no wasm analogue, so a shape receiving a value of another type is stored as `any` (`collectOpenShapes`).
 
 
+	// Each class a function body declares, at any depth, marked local afresh for this compile (`LocalClass`).
+	let localClasses = 0;
+	const markLocalClasses = (body: Stmt[], home: string) => {
+		let depth = 0;
+		const inFunction = (process: () => boolean) => {
+			depth++;
+			const r = process();
+			depth--;
+			return r;
+		};
+		walkerB(
+			(st, process) => {
+				if (st.type === 'class_decl' && depth)
+					Object.assign(st, { localClass: { id: localClasses++, home } });
+				return st.type === 'function_decl' ? inFunction(() => process(st)) : process(st);
+			},
+			(e, process) => e.type === 'arrow' || e.type === 'function' ? inFunction(() => process(e)) : process(e),
+			undefined,
+			(m, process) => 'body' in m && m.body ? inFunction(() => process(m)) : process(m)
+		).statements(body);
+	};
+
 	// Functions are registered before the layout passes, which resolve a call to the declaration it compiles.
 	for (const [moduleId, body] of moduleBodies) {
+		markLocalClasses(body.body, moduleId);
 		for (let s of body.body) {
 			if (s.type === 'export_decl')
 				s = s.declaration;

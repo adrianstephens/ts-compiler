@@ -5790,6 +5790,45 @@ async function main() {
 		check('matchAll rejects a non-global regexp', strMatch.matchAllNonGlobal(), 2);
 		check('a match array destructured', strMatch.destructured(), 2);
 		check('replace with a string pattern', strMatch.stringPattern(), 6734);
+		// A class declared in a function body closes over that call's bindings, a later one too, as a closure does; `new` and `instanceof` reach
+		// it from a nested closure, and each loop iteration's declaration captures that iteration's binding.
+		const localClasses = await compile(`
+			function plain(): number {
+				class Cycle {}
+				try { throw new Cycle(); } catch (e) { return e instanceof Cycle ? 1 : 0; }
+			}
+			function captures(): number {
+				class Counter {
+					n = 0;
+					add(name: string) {
+						this.n++;
+						if (this.n > 1)
+							seen.push(name + base);
+					}
+				}
+				const c = new Counter();
+				const base = '!';
+				const seen: string[] = [];
+				c.add('a');
+				const later = () => { const d = new Counter(); d.add('x'); d.add('y'); return d instanceof Counter ? d.n : -1; };
+				c.add('b');
+				return later() * 100 + seen.length * 10 + seen[0].length;
+			}
+			let total = 0;
+			function inLoop(): number {
+				for (let i = 0; i < 3; i++) {
+					class K { v = i * 10; get(): number { return this.v + i + total; } }
+					total += new K().get();
+				}
+				return total;
+			}
+			export function p(): number { return plain(); }
+			export function c(): number { return captures(); }
+			export function l(): number { return inLoop(); }
+		`);
+		check('a local class', localClasses.p(), 1);
+		check('a local class capturing its scope, from a nested closure too', localClasses.c(), 222);
+		check('a local class per loop iteration', localClasses.l(), 44);
 		const { forwardConst } = await compile(`
 			function f(): number { const early = () => h(1); const base = 100; return early(); function h(n: number): number { return base + n; } }
 			export function forwardConst(): number { return f(); }
