@@ -547,7 +547,12 @@ function runWorker(file: string, wholeOnly: boolean, slice?: { start: number; co
 	if (args.includes('--plan')) {
 		const plan = await planSlices(targets);
 		await fs.writeFile(PLAN_FILE, JSON.stringify(plan, null, '\t'));
-		console.log(JSON.stringify(plan.map(({ file, start, count }) => ({ file, start, count }))));
+		// a job's label: its repo, file and place among the file's slices, short enough not to be cut off ('compiler/checker.ts 2/4')
+		const label = (s: Slice) => {
+			const own = plan.filter(p => p.file === s.file);
+			return `${s.file.split('/')[0]}/${path.basename(s.file)} ${own.indexOf(s) + 1}/${own.length}`;
+		};
+		console.log(JSON.stringify(plan.map(s => ({ file: s.file, start: s.start, count: s.count, label: label(s) }))));
 		return;
 	}
 	if (!args.includes('--aggregate')) {

@@ -90,7 +90,7 @@ jobs:
 
   slice:
     needs: plan
-    name: ${{ matrix.file }} [${{ matrix.start }}]
+    name: ${{ matrix.label }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
