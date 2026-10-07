@@ -251,6 +251,7 @@ interface String {
 	lastIndexOf(searchString: string, position?: number): number;
 	localeCompare(that: string): number;
 	match(regexp: string | RegExp): RegExpMatchArray | null;
+	matchAll(regexp: RegExp): IterableIterator<RegExpExecArray>;
 	replace(searchValue: string | RegExp, replaceValue: string): string;
 	replace(searchValue: string | RegExp, replacer: (substring: string, ...args: any[]) => string): string;
 	search(regexp: string | RegExp): number;

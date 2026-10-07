@@ -50,6 +50,20 @@ function* codePoints(s: String): Generator<string, void, unknown> {
 		yield s._codePointString(i);
 }
 
+// What one match is replaced by: the pattern expanded, or the replacer's result.
+function replacementFor(m: RegExpMatch, replacement: string | ((substring: string, ...args: any[]) => string)): string {
+	if (typeof replacement === 'string')
+		return expandReplacement(replacement, m);
+	// A group that did not participate is `undefined` in real JS, not the empty string
+	// `group` itself returns -- callers routinely test the arguments with `!== undefined`.
+	const args: any[] = [];
+	for (let i = 1; i < m.length; i++)
+		args.push(m.groupStart(i) === -1 ? undefined : m.group(i));
+	args.push(m.index);
+	args.push(m.input);
+	return replacement(m.group(0), ...args);
+}
+
 export class String {
 	get length(): u32 { return __asm<[], u32>('array.len')(); }
 
@@ -298,15 +312,30 @@ export class String {
 	match(regexp: RegExp): RegExpMatch | null {
 		return regexp.exec(this as unknown as string);
 	}
+	// Each match of a global `regexp` from its `lastIndex`, as JS's does it: on a copy, so the caller's `lastIndex` is left alone.
+	*matchAll(regexp: RegExp): Generator<RegExpMatch, void, unknown> {
+		if (!regexp.global)
+			throw new TypeError('String.prototype.matchAll called with a non-global RegExp argument');
+		const re = new RegExp(regexp);
+		re.lastIndex = regexp.lastIndex;
+		const s: string = this as unknown as string;
+		for (let m = re.exec(s); m !== null; m = re.exec(s))
+			yield m;
+	}
 	search(regexp: RegExp): number {
 		const s: string = this as unknown as string;
 		const m: RegExpMatch | null = regexp.exec(s);
 		return m === null ? -1 : m.index;
 	}
 	// `$1`.."$9"/`$&`/`$$` substitution (see regexp.ts's `expandReplacement`), or the FUNCTION replacer,
-	// which real JS calls as `(match, ...captures, offset, input)`. Honors `g` (all matches) vs first-only.
-	replace(regexp: RegExp, replacement: string | ((substring: string, ...args: any[]) => string)): string {
+	// which real JS calls as `(match, ...captures, offset, input)`. Honors `g` (all matches) vs first-only; a string pattern replaces its first occurrence.
+	replace(search: string | RegExp, replacement: string | ((substring: string, ...args: any[]) => string)): string {
 		const s: string = this as unknown as string;
+		if (typeof search === 'string') {
+			const at = s.indexOf(search);
+			return at < 0 ? s : s.slice(0, at).concat(replacementFor(new RegExpMatch(s, at, 1, [at, at + search.length]), replacement), s.slice(at + search.length));
+		}
+		const regexp = search;
 		let result = '';
 		let last = 0;
 		let go = true;
@@ -316,20 +345,7 @@ export class String {
 			if (m === null) {
 				go = false;
 			} else {
-				let piece = '';
-				if (typeof replacement === 'string') {
-					piece = expandReplacement(replacement, m);
-				} else {
-					// A group that did not participate is `undefined` in real JS, not the empty string
-					// `group` itself returns -- callers routinely test the arguments with `!== undefined`.
-					const args: any[] = [];
-					for (let i = 1; i < m.length; i++)
-						args.push(m.groupStart(i) === -1 ? undefined : m.group(i));
-					args.push(m.index);
-					args.push(s);
-					piece = replacement(m.group(0), ...args);
-				}
-				result = result.concat(s.slice(last, m.index)).concat(piece);
+				result = result.concat(s.slice(last, m.index)).concat(replacementFor(m, replacement));
 				last = m.groupEnd(0);
 				if (!regexp.global)
 					go = false;

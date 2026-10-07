@@ -5767,6 +5767,29 @@ async function main() {
 		`);
 		asyncMethods.run();
 		check('async, static async and generator methods', asyncMethods.at(), 1281015);
+		// A match array is iterable (destructured by the checker and at run time); `matchAll` walks a global regexp's matches on a copy of it;
+		// `replace` takes a string pattern, replacing its first occurrence through the same `$&` expansion and replacer.
+		const strMatch = await compile(`
+			const re = /<(\\w+)=(\\w+)>/g;
+			export function matchAll(): number {
+				let n = 0, total = 0;
+				for (const [, kind, ref] of '<a=bc> x <de=f> <g=hij>'.matchAll(re)) {
+					n++;
+					total += kind.length * 10 + ref.length;
+				}
+				return n * 1000 + total + re.lastIndex;
+			}
+			export function matchAllNonGlobal(): number { try { for (const m of 'abc'.matchAll(/b/)) return 0; return 1; } catch { return 2; } }
+			export function destructured(): number { const m = 'a1b2'.match(/(\\d)/); if (!m) return 0; const [, d] = m; return d.length + (m.index ?? 0); }
+			export function stringPattern(): number {
+				return '@a/b/c'.slice(1).replace('/', '__').length * 1000 + 'x.y.z'.replace('.', '[$&]').length * 100
+					+ 'abc'.replace('q', 'z').length * 10 + 'hello'.replace('ll', (m: string, at: number) => String(at)).length;
+			}
+		`);
+		check('matchAll over a global regexp', strMatch.matchAll(), 3046);
+		check('matchAll rejects a non-global regexp', strMatch.matchAllNonGlobal(), 2);
+		check('a match array destructured', strMatch.destructured(), 2);
+		check('replace with a string pattern', strMatch.stringPattern(), 6734);
 		const { forwardConst } = await compile(`
 			function f(): number { const early = () => h(1); const base = 100; return early(); function h(n: number): number { return base + n; } }
 			export function forwardConst(): number { return f(); }
