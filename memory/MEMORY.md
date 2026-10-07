@@ -49,6 +49,7 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 - [don't simplify deps for self-hosting](feedback_no_simplifying_deps_for_selfhosting.md) — hard constructs need a real compiler feature
 - [no JSON.stringify on AST/Type](feedback_no_json_stringify_ast.md) — bigints throw; print with `T.typeKey` / `T.exprKey` / `T.stmtKey`
 - [no unimplemented-throws tests](feedback_no_unimplemented_throws_tests.md) — `checkThrows` is for permanent enforced behavior only
+- [codegen perf](tison_codegen_perf.md) — where a self-compile probe's 5 min goes; isOpen memo landed; the open `typeId` undefined-field lead (patch parked) and why it isn't landed
 - [survey in CI](tison_survey_ci.md) — the survey as a GitHub Actions workflow: plan / slice matrix / merge; sees only PUSHED commits; results in the `survey-results` artifact
 - [SESSION HANDOFF](tison_session_handoff.md) — **read this at cold start**: live state (survey 399/421 at `11aa1d6`, top blockers), user decisions, what's deliberately unfixed, what the user hasn't decided
 - [harness portability](tison_harness_portability.md) — for running tison under a DIFFERENT agent harness: cwd, gate order, the acceptance numbers at `ec2a21f`, which instruments gate by EXIT CODE (difftest and vsdg-check do; the survey is a probe to be read), and what does not travel (the transcript)
