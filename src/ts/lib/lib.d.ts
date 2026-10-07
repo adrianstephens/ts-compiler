@@ -580,6 +580,9 @@ declare var Buffer: {
 	from(array: number[]): Buffer;
 };
 
+// The `Promise` `lib/promise.ts` implements, named so `lib/node/*.ts` can declare async functions; it merges with that class and adds nothing.
+interface Promise<T> {}
+
 
 //declare var TypedArray: {
 //	new (length: number): TypedArray<any>;

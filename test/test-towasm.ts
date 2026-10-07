@@ -1756,6 +1756,12 @@ async function main() {
 			main:	`import { shared } from './lib'; export function importedVar(): number { return shared[1]; }`,
 		}, 'main');
 		check("importedVar() (an imported module's var)", importedVar(), 4);
+		// Two specifiers naming one module (`path`, `node:path`) load it once: the checker binds each name to the parse codegen compiles.
+		const { twoSpecifiers } = await compileMulti({
+			lib:	`import * as p from 'path'; export function base(s: string): number { return p.basename(s).length; }`,
+			main:	`import * as q from 'node:path'; import { base } from './lib'; export function twoSpecifiers(): number { return q.basename('a/bc').length * 10 + base('d/efg'); }`,
+		}, 'main');
+		check('one module record for two specifiers of it', twoSpecifiers(), 23);
 		// A generic function's LOCAL type alias, reaching a closure's parameter only through an assertion's context (binary's `Array`): each
 		// instance resolves it as its own, and a second compile sharing the imported module's AST still can.
 		const { localAlias } = await compileMulti({

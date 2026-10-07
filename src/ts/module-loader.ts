@@ -260,6 +260,9 @@ class NodeModules {
 export class ModuleLoader {
 	opts = OptionsDefault;
 	imported = new Map<string, Promise<LoadedModule|undefined>>;
+	// One record per module however it is named (`fs`, and `../fs` from a sibling builtin): the checker binds a name to one parse's
+	// declarations, and codegen must compile that same parse.
+	private byCanonical = new Map<string, LoadedModule>;
 
 	constructor(public root: string, opts: Partial<typeof OptionsDefault>, restrictTypes?: string[]) {
 		this.opts = {...this.opts, ...opts};
@@ -293,9 +296,12 @@ export class ModuleLoader {
 	// imports the specifier, and adding a new builtin is a new file, not a compiler change. Its own
 	// directory, not `lib/` itself, so a bare specifier can never collide with a static lib file
 	// (`string`, `map`, `array` are all plausible package names).
+	// `spec` is a builtin's name (`fs/promises`, `node:path`), or a builtin module's own canonical name (`lib/node/fs`, which a relative
+	// import between two of them resolves to); the subpath is kept, so a package's `x/path` is not node's `path`.
 	private async nodeBuiltin(spec: string): Promise<LoadedModule | undefined> {
-		const canonical = 'lib/node/' + spec.replace(/^node:/, '');
-		const filename = path.join(NODE_LIB_DIR, path.basename(canonical) + '.ts');
+		const name		= spec.replace(/^(node:|lib\/node\/)/, '');
+		const canonical	= 'lib/node/' + name;
+		const filename	= path.join(NODE_LIB_DIR, name + '.ts');
 		const code = await tryLoadFile(filename);
 		if (!code)
 			return undefined;
@@ -333,10 +339,18 @@ export class ModuleLoader {
 			return nm.get(resolved);
 	}
 
+	private first(m: LoadedModule): LoadedModule {
+		const seen = this.byCanonical.get(m.canonical);
+		if (seen)
+			return seen;
+		this.byCanonical.set(m.canonical, m);
+		return m;
+	}
+
 	async get(mod: string, from: string): Promise<LoadedModule | undefined> {
 		const resolved = mod.startsWith('.') ? stripExt(joinSpecifier(from, mod)) : mod;
 		if (!this.imported.has(resolved))
-			this.imported.set(resolved, this.get0(resolved));
+			this.imported.set(resolved, this.get0(resolved).then(m => m && this.first(m)));
 
 		return await this.imported.get(resolved);
 	}

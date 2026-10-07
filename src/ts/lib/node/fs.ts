@@ -255,7 +255,26 @@ export function writeFileSync(p: string, data: string | Buffer): void {
 // directory bigger than the buffer. `d_next` from the last complete entry is the cookie to resume from.
 // A trailing PARTIAL entry is normal (it is how the host says "buffer full"), so it is skipped rather
 // than treated as an error -- the next round re-reads it whole.
-export function readdirSync(p: string): string[] {
+// One entry as `readdirSync(p, { withFileTypes: true })` gives it; `filetype` is WASI's code for it (3 a directory, 4 a regular file).
+export class Dirent {
+	name: string;
+	filetype: i32;
+	constructor(name: string, filetype: i32) {
+		this.name = name;
+		this.filetype = filetype;
+	}
+	isDirectory(): boolean { return this.filetype === 3; }
+	isFile(): boolean { return this.filetype === 4; }
+}
+
+export function readdirSync(p: string): string[];
+export function readdirSync(p: string, options: { withFileTypes: true }): Dirent[];
+export function readdirSync(p: string, options?: { withFileTypes?: boolean }): string[] | Dirent[] {
+	const entries = direntsOf(p);
+	return options?.withFileTypes ? entries : entries.map(e => e.name);
+}
+
+function direntsOf(p: string): Dirent[] {
 	const pre	= findPreopen(p);
 	const mark	= __allocMark();
 	const pathBuf = writeBytes(pre.rel);
@@ -268,7 +287,7 @@ export function readdirSync(p: string): string[] {
 	const bufLen	= 4096;
 	const buf		= __alloc(bufLen, 8);
 	const usedPtr	= __alloc(4, 4);
-	const result: string[] = [];
+	const result: Dirent[] = [];
 
 	let cookie: i64	= 0n;
 	let more		= true;
@@ -288,9 +307,9 @@ export function readdirSync(p: string): string[] {
 				stop = true;
 			} else {
 				const name = String.fromCharCodesAt(buf + off + 24, namlen);
-				// Node omits these two; WASI reports them.
+				// Node omits these two; WASI reports them. `d_type` is the byte after `d_namlen`.
 				if (name !== '.' && name !== '..')
-					result.push(name);
+					result.push(new Dirent(name, loadU8(buf + off + 20)));
 				cookie	= loadI64(buf + off);
 				off		= off + 24 + namlen;
 			}
