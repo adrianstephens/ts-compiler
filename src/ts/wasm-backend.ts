@@ -10048,7 +10048,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	openReads = opened;
 	// Stored as `any`: a shape holding several layouts, or a struct shape no literal builds, whose values all arrived through `any` or a
 	// cast (a dynamic object). Its members are reached by the run-time dispatchers.
-	const isOpen = (t: Type) => openShapes.has(openKey(t, global)) || unbuiltShape(t);
+	// Fixed once the pass above has run, and asked of the same type nodes all through emission.
+	const openness	= new WeakMap<Type, boolean>();
+	const isOpen	= (t: Type) => openness.get(t) ?? (open => (openness.set(t, open), open))(openShapes.has(openKey(t, global)) || unbuiltShape(t));
 	const unbuiltShape = (t: Type) => {
 		const n = T.nonNullable(t, global), r = T.resolve(global, n);
 		if (T.isClassRef(n, global) || (n.type === 'ref' && READONLY_ALIAS.has(n.name)) || (r.type !== 'object' && r.type !== 'intersection') || (r.type === 'intersection' && (arrayPartOf(r, global) || primitivePart(r, global))))
