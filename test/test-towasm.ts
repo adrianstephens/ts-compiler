@@ -5709,6 +5709,32 @@ async function main() {
 		asyncJumps.run();
 		['continue in for...of', 'break in for...of', 'both in while', 'labeled across nested loops', 'continue in do...while'].forEach((name, i) =>
 			check(`async loop: ${name}`, asyncJumps.at(i), [6, 3, 8, 90, 5][i]));
+		// A `try` around a suspend is flattened too: an exception in one of its states (a rejected await, a throw) goes to its `catch`, and a
+		// `finally` runs on every way out (a return, a continue, an exception), then carries on with it.
+		const asyncTry = await compile(`
+			const val = (n: number) => Promise.resolve(n);
+			const fail = (): Promise<number> => Promise.reject(new Error('no'));
+			let log = 0;
+			async function caught(): Promise<number> { try { await fail(); return 1; } catch (e) { return 2 + (e instanceof Error ? 10 : 0); } }
+			async function afterCatch(): Promise<number> { let t = 0; try { t += await val(3); await fail(); t += 100; } catch { t += 20; } return t + await val(400); }
+			async function syncThrow(): Promise<number> { try { await val(1); throw new Error('x'); } catch (e) { return 5; } }
+			async function finallyRet(): Promise<number> { try { return await val(7); } finally { log += 30; } }
+			async function finallyThrow(): Promise<number> { try { try { await fail(); } finally { log += 100; } return 0; } catch { return 9; } }
+			async function loopFinally(): Promise<number> { let t = 0; for (const x of [1, 2, 3]) { try { if (x === 2) continue; t += await val(x); } finally { t += 1000; } } return t; }
+			async function plainTry(): Promise<number> { const a = await val(1); try { JSON.parse('{'); return 0; } catch { return a + 40; } }
+			const got = [0, 0, 0, 0, 0, 0, 0];
+			export function run(): number { [caught, afterCatch, syncThrow, finallyRet, finallyThrow, loopFinally, plainTry].forEach((f, i) => f().then(v => { got[i] = v; })); return 0; }
+			export function at(i: number): number { return got[i]; }
+			export function logged(): number { return log; }
+			function* gen(): Generator<number, number, number> { let t = 0; try { t += yield 1; throw new Error('x'); } catch { t += yield 2; } finally { t += 1000; } return t; }
+			export function genTry(): number { const g = gen(); const a = g.next(0).value, b = g.next(5).value, c = g.next(40).value; return a + b * 10 + c; }
+		`);
+		asyncTry.run();
+		['catching a rejection', 'resuming after a catch', 'catching a throw', 'finally after a return', 'finally then the rethrow caught outside',
+			'finally on continue and fallthrough', 'a plain try in a later state'].forEach((name, i) =>
+			check(`async try: ${name}`, asyncTry.at(i), [12, 423, 5, 7, 9, 3004, 41][i]));
+		check('async try: each finally ran once', asyncTry.logged(), 130);
+		check('generator: catch and finally across yields', asyncTry.genTry(), 1066);
 		const { forwardConst } = await compile(`
 			function f(): number { const early = () => h(1); const base = 100; return early(); function h(n: number): number { return base + n; } }
 			export function forwardConst(): number { return f(); }

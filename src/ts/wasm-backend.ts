@@ -9,7 +9,7 @@ import { type Contextual, checkBlock, checkHoisted, checkImported, superClassRef
 import { Walker, walker, walkerB } from './walker';
 import { type Closure, paramNames, ownBoundNames, freeIn, closureFree } from './free-names';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
-import { iteratorOf, foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, containsSuspend, liftSuspends, type ForOf, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
+import { iteratorOf, foldConstants, BuildStateMachine, StateMachine, SuspendBoundary, containsSuspend, liftSuspends, lowerFlattenedTry, type ForOf, lowerForOf, lowerPattern, drainIterator, lowerExpr, lowerObjectAssign, lowerConditionalSpread, lowerCompound } from './transform';
 import * as wasm from '@isopodlabs/binary_libs/wasm';
 import * as WAT from '../wasm/wat-parser';
 
@@ -7056,7 +7056,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// Its function declarations come first in their block, as JS creates them on entering it: the state machine keeps statement order, and a call
 	// in an earlier state would find the frame field still empty. A suspend inside an expression is lifted to its own statement (`liftSuspends`).
 	function resumableBody(body: Stmt[], ctx: FunctionContext): Stmt[] {
-		const lifted	= (stmts: Stmt[]) => liftSuspends(stmts, role => `#${role}$${ctx.tempCounter++}`);
+		const temp		= (role: string) => `#${role}$${ctx.tempCounter++}`;
+		const lifted	= (stmts: Stmt[]) => liftSuspends(stmts, temp);
 		const hoisted	= (stmts: Stmt[]) => [...stmts.filter(s => s.type === 'function_decl'), ...stmts.filter(s => s.type !== 'function_decl')];
 		const suspendingForOf = (s: Stmt): s is ForOf => s.type === 'for' && s.kind !== 'normal' && containsSuspend(s);
 		// A label stays on the loop the lowering makes, where `continue label` can reach it.
@@ -7070,7 +7071,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				// A lone statement under `if`/a loop: what it lifts needs a block to sit in.
 				: (l => l.length > 1 || l[0] !== s ? process(JS.Block<Stmt>(...l)) : process(s))(lifted([s])),
 			(e, process) => e.type === 'arrow' || e.type === 'function' || e.type === 'class' ? e : process(e)
-		).statements(lifted(body)));
+		).statements(lifted(lowerFlattenedTry(body, temp))));
 	}
 
 	function emitStmts(stmts: readonly Stmt[], ctx: FunctionContext) {
@@ -7836,11 +7837,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		}
 	}
 
-	// The function declarations (with bodies) a body makes at any block depth, not those inside a nested function.
-	function ownFunctionDecls(body: Stmt[]): Extract<Stmt, { type: 'function_decl' }>[] {
-		const out: Extract<Stmt, { type: 'function_decl' }>[] = [];
+	// The statements of a kind a body holds at any block depth, not those inside a nested function or class.
+	function ownStatements<S extends Stmt>(body: Stmt[], is: (s: Stmt) => s is S): S[] {
+		const out: S[] = [];
 		walkerB(
-			(st, process) => st.type === 'function_decl' ? (st.body && out.push(st), false) : st.type === 'class_decl' ? false : process(st),
+			(st, process) => (is(st) && out.push(st), st.type === 'function_decl' || st.type === 'class_decl' ? false : process(st)),
 			(e, process) => e.type === 'arrow' || e.type === 'function' || e.type === 'class' ? false : process(e)
 		).statements(body);
 		return out;
@@ -7874,7 +7875,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			frameFields.push({ type: toValType(wt), mut: true });
 		}
 		// A nested function, created where it is declared (`case 'function_decl'`), and called from any later state.
-		for (const fd of ownFunctionDecls(body)) {
+		for (const fd of ownStatements(body, (s): s is Extract<Stmt, { type: 'function_decl' }> => s.type === 'function_decl' && !!s.body)) {
 			if (localFields.has(fd.name))
 				continue;
 			const tsType	= functionDeclType(fd, (body[0] as { scope?: Scope } | undefined)?.scope ?? libGlobal);
@@ -7884,6 +7885,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const wt = typeof declared === 'string' ? declared : types.nullable(declared);
 			localFields.set(fd.name, { index: frameFields.length, wtype: wt, tsType, declared });
 			frameFields.push({ type: toValType(wt), mut: true });
+		}
+		// A flattened `catch`'s parameter (`lowerFlattenedTry` names it): the dispatch stores what it caught there.
+		for (const param of ownStatements(body, (s): s is Extract<Stmt, { type: 'try' }> => s.type === 'try').flatMap(t => t.handlers.flatMap(h => typeof h.param === 'string' ? [h.param] : []))) {
+			if (localFields.has(param))
+				continue;
+			localFields.set(param, { index: frameFields.length, wtype: W.REF_ANY_NULLABLE, tsType: T.ANY });
+			frameFields.push({ type: toValType(W.REF_ANY_NULLABLE), mut: true });
 		}
 		// What an async closure captures lives in its frame too, unless a local of its own shadows the name.
 		for (const c of captures) {
@@ -7915,6 +7923,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		fromSent:			(field: LocalField) => void;
 		suspend:			(next: SuspendBoundary, resumeId: number, loopMark: number, setFrame: (state: number) => void) => void;
 		complete:			() => void;
+		entry?:				() => void;
 	}): void {
 		fnCtx.closureEnv	= { envLocal: frameLocal, envTypeIndex: frame.typeIndex, fields: frame.localFields, frame: true };
 		for (const [localName, { tsType }] of frame.localFields)
@@ -7925,21 +7934,62 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		for (const seg of frame.machine.segments)
 			if (seg.next.type === 'suspend' && seg.next.resultVar && driver.resumesWithValue(seg.next))
 				sentBindings.set(seg.next.resumeId, frame.localFields.get(seg.next.resultVar)!);
-		fnCtx.emitResumableDispatch(frame.machine,
-			() => fnCtx.emit(I.local.get(frameLocal.index), I.struct.get(frame.typeIndex, 0)),
-			setFrame,
-			test => emitTruthy(test, fnCtx),
-			id => {
-				const field = sentBindings.get(id);
+		const loadState		= () => fnCtx.emit(I.local.get(frameLocal.index), I.struct.get(frame.typeIndex, 0));
+		const dispatch		= () => {
+			driver.entry?.();
+			fnCtx.emitResumableDispatch(frame.machine,
+				loadState,
+				setFrame,
+				test => emitTruthy(test, fnCtx),
+				id => {
+					const field = sentBindings.get(id);
+					if (field) {
+						fnCtx.emit(I.local.get(frameLocal.index), I.local.get(sent.index));
+						driver.fromSent(field);
+						fnCtx.emit(I.struct.set(frame.typeIndex, field.index));
+					}
+					emitStmts(frame.machine.segments[id].stmts, fnCtx);
+				},
+				(next, resumeId, loopMark) => driver.suspend(next, resumeId, loopMark, setFrame),
+				driver.complete);
+		};
+		const segments	= frame.machine.segments;
+		const entries	= [...new Set(segments.flatMap(seg => seg.handler ? [seg.handler] : []))];
+		if (!entries.length)
+			return dispatch();
+
+		// What is thrown in a state inside a flattened `try` goes to its `catch`: bound to the parameter, then the dispatch re-entered at the handler.
+		// Anything else is thrown on. One block per handler, the current state choosing; the outermost is the rethrow.
+		const saved		= fnCtx.swapOut();
+		const retry		= fnCtx.enterLabel();
+		const inLoop	= fnCtx.swapOut();
+		emitCatching(fnCtx, fnCtx.enterLabel(), dispatch, () => {
+			const caught = fnCtx.temp('#caught', W.REF_ANY);
+			fnCtx.emit(I.local.set(caught));
+			const before = fnCtx.swapOut();
+			fnCtx.enterLabel(entries.length + 1);
+			loadState();
+			fnCtx.emit(I.br_table(segments.map(seg => seg.handler ? entries.indexOf(seg.handler) : entries.length), entries.length));
+			for (const h of entries) {
+				fnCtx.exitLabel();
+				fnCtx.emit(I.block(undefined, fnCtx.swapOut()));
+				const field = h.param !== undefined ? frame.localFields.get(h.param)! : undefined;
 				if (field) {
-					fnCtx.emit(I.local.get(frameLocal.index), I.local.get(sent.index));
-					driver.fromSent(field);
+					fnCtx.emit(I.local.get(frameLocal.index), I.local.get(caught));
+					coerceTop(W.REF_ANY, fnCtx, field.wtype);
 					fnCtx.emit(I.struct.set(frame.typeIndex, field.index));
 				}
-				emitStmts(frame.machine.segments[id].stmts, fnCtx);
-			},
-			(next, resumeId, loopMark) => driver.suspend(next, resumeId, loopMark, setFrame),
-			driver.complete);
+				setFrame(h.entry);
+				fnCtx.emit(I.br(fnCtx.depth - retry));
+			}
+			fnCtx.exitLabel();
+			fnCtx.emit(I.block(undefined, fnCtx.swapOut()), I.local.get(caught), I.throw(ensureExceptionTag()));
+			fnCtx.emit(...fnCtx.swapOut(before));
+		});
+		fnCtx.exitLabel();
+		fnCtx.emit(I.block(undefined, fnCtx.swapOut(inLoop)));
+		fnCtx.exitLabel();
+		fnCtx.emit(I.loop(undefined, fnCtx.swapOut(saved)));
 	}
 
 	// The frame's leading field values, in declaration order: the entry state, a param's own value, every other hoisted local its
@@ -8150,16 +8200,18 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const saved = fnCtx.swapOut();
 			const after = fnCtx.enterLabel();
 			emitCatching(fnCtx, after, () => {
-				// A rejected `await` throws its reason where the step resumes.
-				getFrame(fnCtx);
-				fnCtx.emit(I.struct.get(frame.typeIndex, threw));
-				fnCtx.emitIf(undefined, () => {
-					getFrame(fnCtx);
-					fnCtx.emit(I.i32.const(0), I.struct.set(frame.typeIndex, threw), I.local.get(sentParam.index));
-					coerceTop(W.REF_ANY_NULLABLE, fnCtx, W.REF_ANY);
-					fnCtx.emit(I.throw(ensureExceptionTag()));
-				});
 				emitResumableBody(fnCtx, frame, frameLocal, sentParam, {
+					// A rejected `await` throws its reason where the step resumes, inside any flattened `try` around it.
+					entry() {
+						getFrame(fnCtx);
+						fnCtx.emit(I.struct.get(frame.typeIndex, threw));
+						fnCtx.emitIf(undefined, () => {
+							getFrame(fnCtx);
+							fnCtx.emit(I.i32.const(0), I.struct.set(frame.typeIndex, threw), I.local.get(sentParam.index));
+							coerceTop(W.REF_ANY_NULLABLE, fnCtx, W.REF_ANY);
+							fnCtx.emit(I.throw(ensureExceptionTag()));
+						});
+					},
 					// A `return expr;` resolves the result Promise and returns nothing: the step's result is `void`, and nothing reads it.
 					onReturn: () => ({ wtype: () => adopt.params[0], emit: (ctx, argument) => resolve(argument, ctx) }),
 					resumesWithValue:	() => true,

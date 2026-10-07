@@ -99,10 +99,12 @@ export type SegmentNext =
 	| { type: 'suspend';	resumeId: number } & SuspendBoundary
 	| { type: 'complete' };
 
+// `handler`: the innermost flattened `catch` around the segment -- where an exception thrown while in this state goes, its value bound to `param`.
 export interface StateMachineSegment {
 	id:			number;
 	stmts:		Stmt[];
 	next:		SegmentNext;
+	handler?:	{ entry: number; param?: string };
 }
 
 export interface StateMachine {
@@ -175,6 +177,89 @@ export function liftSuspends(stmts: Stmt[], temp: (role: string) => string): Stm
 				return [s];
 		}
 	});
+}
+
+// Each `try` the state machine splits, in the shape it splits: a catch parameter renamed to a temp (bound to its own name as the handler starts),
+// and a `finally` as a catch-all plus a completion code, since it runs on every way out:
+//   `L: { try { A } catch (t) { how = -1; exc = t; } }  C  if (how === -1) throw exc;  if (how === k) <exit k>;`
+// where each `return`/`break`/`continue` leaving `A` (or its `catch`) records exit `k` and `break L`s; a return's value is held first.
+export function lowerFlattenedTry(stmts: Stmt[], temp: (role: string) => string): Stmt[] {
+	const one	= (st: Stmt) => (r => r.length === 1 ? r[0] : JS.Block<Stmt>(...r))(lowerFlattenedTry([st], temp));
+	const typed	= (e: Expr) => {
+		const t = checkedTypeOf(e);
+		if (!t)
+			throw `internal: an unchecked ${e.type} returned through a 'finally'`;
+		return T.widenLiterals(t);
+	};
+	type Handler = Extract<Stmt, { type: 'try' }>['handlers'][number];
+	const renamed = (h: Handler): Handler => {
+		if (h.param === undefined)
+			return h;
+		const t = temp('catch');
+		return { param: t, body: [JS.VarDecl('let', JS.Var(h.param, Identifier(t), T.ANY)), ...h.body] };
+	};
+	return stmts.flatMap((st): Stmt[] => {
+		if (!flattens(st))
+			return [st];
+		switch (st.type) {
+			case 'block':		return [{ ...st, body: lowerFlattenedTry(st.body, temp) }];
+			case 'if':			return [{ ...st, consequent: one(st.consequent), alternate: st.alternate && one(st.alternate) }];
+			case 'while':
+			case 'do_while':
+			case 'for':
+			case 'labeled':		return [{ ...st, body: one(st.body) }];
+			case 'try': {
+				const body		= lowerFlattenedTry(st.body, temp);
+				const handlers	= st.handlers.map(h => renamed({ ...h, body: lowerFlattenedTry(h.body, temp) }));
+				if (!st.finalizer)
+					return [{ ...st, body, handlers }];
+				const label = temp('finally'), how = temp('how'), exc = temp('exc');
+				const exits: { k: number; then: Stmt; held?: { name: string; t: Type } }[] = [];
+				const leave = (k: number): Stmt[] => [ExprStmt(Assign<Expr, never>(Identifier(how), Literal(k))), { type: 'break', label }];
+				const exit = (x: Stmt): Stmt => {
+					const k = exits.length + 1;
+					if (x.type === 'return' && x.argument) {
+						const held = { name: temp('result'), t: typed(x.argument) };
+						exits.push({ k, then: JS.Return(Identifier(held.name)), held });
+						return JS.Block<Stmt>(ExprStmt(Assign<Expr, never>(Identifier(held.name), x.argument)), ...leave(k));
+					}
+					exits.push({ k, then: x });
+					return JS.Block<Stmt>(...leave(k));
+				};
+				const inner		= rewriteExits(body, exit);
+				const tried: Stmt[] = handlers.length ? [{ type: 'try', body: inner, handlers: handlers.map(h => ({ ...h, body: rewriteExits(h.body, exit) })) }] : inner;
+				const caught	= temp('catch');
+				const isExit	= (k: number) => JS.JSBinary('===', Identifier(how), Literal(k));
+				return withScope((st as { scope?: Scope }).scope, [JS.Block<Stmt>(
+					JS.VarDecl('let', JS.Var(how, Literal(0), T.NUMBER)),
+					JS.VarDecl('let', JS.Var(exc, undefined, T.ANY)),
+					...exits.flatMap(x => x.held ? [JS.VarDecl('let', JS.Var(x.held.name, undefined, x.held.t))] : []),
+					{ type: 'labeled', label, body: JS.Block<Stmt>({ type: 'try', body: tried,
+						handlers: [{ param: caught, body: [ExprStmt(Assign<Expr, never>(Identifier(how), Literal(-1))), ExprStmt(Assign<Expr, never>(Identifier(exc), Identifier(caught)))] }] }) },
+					...lowerFlattenedTry(st.finalizer, temp),
+					If<Expr, Stmt>(isExit(-1), { type: 'throw', argument: Identifier(exc) }),
+					...exits.map(x => If<Expr, Stmt>(isExit(x.k), x.then)),
+				)]);
+			}
+			default:
+				return [st];
+		}
+	});
+}
+
+// Synthesized statements take the checked scope of the one they replace (a checked statement keeps its own).
+function withScope(scope: Scope | undefined, stmts: Stmt[]): Stmt[] {
+	walkerB((s, process) => (Object.assign(s, { scope: (s as { scope?: Scope }).scope ?? scope }), ownCode(s) && process(s)), () => false).statements(stmts);
+	return stmts;
+}
+
+// `stmts` with each `return`, and each `break`/`continue` leaving them, replaced by `exit`'s statement; nested functions keep their own.
+function rewriteExits(stmts: Stmt[], exit: (s: Stmt) => Stmt): Stmt[] {
+	const scopes = exitScopes();
+	return walker(
+		(s, process) => s.type === 'return' || scopes.leaves(s) ? exit(s) : ownCode(s) ? scopes.within(s, () => process(s)) : s,
+		(e, process) => nestedCode(e) ? e : process(e)
+	).statements(stmts);
 }
 
 // `root` with its suspends lifted into `out`, returning what stands in its place. `keepTop`: a suspend at the top stays (a statement-level one).
@@ -298,6 +383,41 @@ function liftExpr(root: Expr, out: Stmt[], temp: (role: string) => string, bind:
 	return lower(root, out, false);
 }
 
+// The loops, switches and labels a walk is inside, telling a `break`/`continue` that leaves the walked statements from one that stays in them.
+function exitScopes() {
+	const labels: string[] = [];
+	let loops = 0, switches = 0;
+	return {
+		leaves: (s: Stmt) => (s.type === 'break' || s.type === 'continue') && (s.label ? !labels.includes(s.label) : loops + (s.type === 'break' ? switches : 0) === 0),
+		within: <R,>(s: Stmt, process: () => R): R => {
+			const loop = +(s.type === 'while' || s.type === 'do_while' || s.type === 'for'), sw = +(s.type === 'switch');
+			if (s.type === 'labeled')
+				labels.push(s.label);
+			loops += loop;
+			switches += sw;
+			const r = process();
+			loops -= loop;
+			switches -= sw;
+			if (s.type === 'labeled')
+				labels.pop();
+			return r;
+		},
+	};
+}
+const ownCode = (s: Stmt) => s.type !== 'function_decl' && s.type !== 'class_decl';
+const nestedCode = (e: Expr) => e.type === 'arrow' || e.type === 'function' || e.type === 'class';
+
+// A `break`/`continue` in `stmt` that leaves it.
+function jumpsOut(stmt: Stmt): boolean {
+	const scopes = exitScopes();
+	return walkerB((s, process) => scopes.leaves(s) || (ownCode(s) && scopes.within(s, () => process(s))), (e, process) => !nestedCode(e) && process(e)).statement(stmt);
+}
+
+// Whether `BuildStateMachine` splits `stmt` into states (reached in a list it splits): it suspends, or a jump leaves it for a loop that is split.
+export function flattens(stmt: Stmt): boolean {
+	return containsSuspend(stmt) || jumpsOut(stmt);
+}
+
 // Splits a generator/async body into an id-addressable graph of segments, which codegen turns into one resumable step (a dispatch, one block
 // per segment, in a loop so a transition redispatches). Pure AST in and out; `containsSuspend`/`isFlattenable` reject what cannot be expressed.
 
@@ -307,8 +427,9 @@ export function BuildStateMachine(stmts: Stmt[]) {
 	function reserve(): number {
 		return segments.push(undefined) - 1;
 	}
+	const handlers: { entry: number; param?: string }[] = [];
 	function define(id: number, stmts: Stmt[], next: SegmentNext) {
-		segments[id] = { id, stmts, next };
+		segments[id] = { id, stmts, next, handler: handlers[handlers.length - 1] };
 	}
 
 
@@ -337,32 +458,6 @@ export function BuildStateMachine(stmts: Stmt[]) {
 			throw new Error(`internal: no flattened target for '${s.type}${s.label ? ' ' + s.label : ''}'`);
 		return s.type === 'break' ? t.breakId : t.continueId!;
 	};
-	// A `break`/`continue` in `stmt` that leaves it: its target is a flattened loop, so `stmt` is flattened too.
-	function jumpsOut(stmt: Stmt): boolean {
-		const labels: string[] = [];
-		let loops = 0, switches = 0;
-		return walkerB(
-			(s, process) => {
-				if (s.type === 'break' || s.type === 'continue')
-					return s.label ? !labels.includes(s.label) : loops + (s.type === 'break' ? switches : 0) === 0;
-				if (s.type === 'function_decl' || s.type === 'class_decl')
-					return false;
-				const loop = +(s.type === 'while' || s.type === 'do_while' || s.type === 'for'), sw = +(s.type === 'switch');
-				if (s.type === 'labeled')
-					labels.push(s.label);
-				loops += loop;
-				switches += sw;
-				const r = process(s);
-				loops -= loop;
-				switches -= sw;
-				if (s.type === 'labeled')
-					labels.pop();
-				return r;
-			},
-			(e, process) => (e.type === 'arrow' || e.type === 'function' || e.type === 'class') ? false : process(e)
-		).statement(stmt);
-	}
-
 	function bodyStmtsOf(stmt: Stmt): Stmt[] {
 		return stmt.type === 'block' ? stmt.body : [stmt];
 	}
@@ -450,8 +545,24 @@ export function BuildStateMachine(stmts: Stmt[]) {
 					}
 					break;
 				}
+				case 'try': {
+					if (stmt.finalizer || stmt.handlers.length !== 1)
+						throw new Error("internal: a 'try' reaches the state machine with a 'finally' (`lowerFlattenedTry` lowers it)");
+					const { param, body } = stmt.handlers[0];
+					if (param !== undefined && typeof param !== 'string')
+						throw new Error("internal: a flattened catch parameter is a pattern (`lowerFlattenedTry` renames it)");
+					const cont0		= flush();
+					const entry		= recurse(body, cont0);
+					handlers.push({ entry, param });
+					// A resume at the body's very end is still inside it, where a rejection is caught.
+					const exit		= reserve();
+					define(exit, [], { type: 'goto', target: cont0 });
+					cont = recurse(stmt.body, exit);
+					handlers.pop();
+					break;
+				}
 				default:
-					throw new Error("a yield/await here is not yet supported (only a bare 'yield x;'/'await x;' statement, 'const v = yield x;', or one of those nested in a plain 'if'/'while'/'do..while'/'for'/block -- not inside a 'switch'/'try')");
+					throw new Error("a yield/await here is not yet supported (only a bare 'yield x;'/'await x;' statement, 'const v = yield x;', or one of those nested in a plain 'if'/'while'/'do..while'/'for'/'try'/block -- not inside a 'switch')");
 			}
 		};
 		for (let i = stmts.length - 1; i >= 0; i--) {
@@ -461,7 +572,7 @@ export function BuildStateMachine(stmts: Stmt[]) {
 				const id = reserve();
 				define(id, [], { ...boundary, type: 'suspend', resumeId: flush() });
 				cont = id;
-			} else if (containsSuspend(stmt) || jumpsOut(stmt)) {
+			} else if (flattens(stmt)) {
 				flatten(stmt);
 			} else {
 				trailing.push(stmt);
