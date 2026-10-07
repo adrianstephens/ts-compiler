@@ -1444,15 +1444,8 @@ function stampTypeParams(tps: TS.TypeParam[] | undefined, scope: Scope) {
 	}
 }
 
-function hoist(block: Stmt[], scope: Scope) {
-	const fnGroups = new Map<string, JS.FunctionDecl<any>[]>();
-	// `declare global` in a block that is already global (the lib's root, a script) declares here; a module's is not merged yet.
-	const inGlobal	= !scope.parent || scope.globalSpace;
-	const stmts		= block.flatMap(s => inGlobal && s.type === 'module_decl' && s.name === 'global' ? (s.body as Stmt[]).map(d => d.type === 'var_decl' ? { ...d, ambient: true } : d) : [s]);
-	if (inGlobal)
-		scope.addLazyValue('globalThis', () => globalObject(stmts, scope));
-
-	// `interface`/`type` declarations first: a `declare var X: Y` resolves `Y` eagerly, so every augmentation of `Y` across lib files must be merged.
+// A block's `interface`/`type` declarations into `scope`. Codegen binds a body's own too, so what it asks the checker resolves them.
+export function hoistTypes(stmts: readonly Stmt[], scope: Scope) {
 	for (let stmt of stmts) {
 		if (stmt.type === 'export_decl')
 			stmt = stmt.declaration;
@@ -1467,6 +1460,18 @@ function hoist(block: Stmt[], scope: Scope) {
 			scope.mergeType(stmt.name, stmt.extendsClause?.length ? T.intersectTypes([...stmt.extendsClause.map(e => T.stampScope(e, scope)), obj]) : obj, stmt.typeParams, true);
 		}
 	}
+}
+
+function hoist(block: Stmt[], scope: Scope) {
+	const fnGroups = new Map<string, JS.FunctionDecl<any>[]>();
+	// `declare global` in a block that is already global (the lib's root, a script) declares here; a module's is not merged yet.
+	const inGlobal	= !scope.parent || scope.globalSpace;
+	const stmts		= block.flatMap(s => inGlobal && s.type === 'module_decl' && s.name === 'global' ? (s.body as Stmt[]).map(d => d.type === 'var_decl' ? { ...d, ambient: true } : d) : [s]);
+	if (inGlobal)
+		scope.addLazyValue('globalThis', () => globalObject(stmts, scope));
+
+	// `interface`/`type` declarations first: a `declare var X: Y` resolves `Y` eagerly, so every augmentation of `Y` across lib files must be merged.
+	hoistTypes(stmts, scope);
 	for (let stmt of stmts) {
 		if (stmt.type === 'export_decl')
 			stmt = stmt.declaration;

@@ -5,7 +5,7 @@ import * as JS from './js-parser';
 import * as T from './type-utils';
 import * as W from '../wasm/codegen';
 import { Literal, Identifier, Binary, Assign, hasMod, Module as CModule } from '@isopodlabs/tison/ast';
-import { type Contextual, checkBlock, checkHoisted, checkImported, superClassRef, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, restampFlow, checkedTypeOf, expectedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr, checkMethodInstance } from './checker';
+import { type Contextual, checkBlock, checkHoisted, checkImported, superClassRef, typeOf as checkerQuery, isOptionalChainLink, narrow, inferTypeArgMap as checkerInferTypeArgMap, isConstContext, flowSlotOf, restampFlow, checkedTypeOf, expectedTypeOf, checkedCallOf, type CheckedCall, isPurePath, assignsToThis, collectHoistedLocals, checkSynthesized, checkSynthesizedExpr, checkMethodInstance, hoistTypes } from './checker';
 import { Walker, walker, walkerB } from './walker';
 import { type Closure, paramNames, ownBoundNames, freeIn, closureFree } from './free-names';
 import { makeAsm as makeAsm0 } from '../wasm/codegen';
@@ -1732,11 +1732,17 @@ function substituteTypeParams(map: Map<string, Type>): Walker {
 		// The checker's stamps are the TEMPLATE's, where `T` is opaque: an instance is re-checked (`instantiateDecl`, `ensureClass`), stamping afresh.
 		(s, process) => unstamped(process(s)),
 		(e, process) => linked(e, unstamped(process(e))),
-		// `substituteType`, not a ref swap: it normalizes what substitution leaves (`A | B` at `never` is `A`).
-		t => T.substituteType(t, map),
+		// `substituteType`, not a ref swap: it normalizes what substitution leaves (`A | B` at `never` is `A`). A local alias the template's check stamped
+		// (`type R = T[]`) is expanded first, so the substitution reaches the type parameters it names, as TS instantiates a local type.
+		t => freshType(T.substituteType(T.expandLocalQueries(t, LIB_TYPES), map)),
 		undefined,
 		(m, process) => unstamped(process(m))
 	);
+}
+// A type with every node fresh, its stamps kept: a part naming no type parameter (`put<R>` over a local `type R = ReadType<T>[]`) comes back
+// from substitution as the template's own node, so the first instance to stamp it would stamp it for every other.
+function freshType(t: Type): Type {
+	return walker(undefined, undefined, (x: Type, process: <X extends Type>(x: X) => X) => ({ ...process(x) })).type(t) ?? t;
 }
 // A fresh node even where nothing was substituted: the walk hands an untouched node back as itself, and an instance re-check
 // stamps its types ON the node, so two instances sharing one would each read the other's.
@@ -7012,6 +7018,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// A nested `function` declaration is hoisted: callable before its own line. It is created just before the first
 	// statement in its list that mentions it -- closure creation has no side effects, and forward holders cover later siblings.
 	function emitStmts(stmts: readonly Stmt[], ctx: FunctionContext) {
+		hoistTypes(stmts, ctx.scope);
 		const pending = new Map(stmts.flatMap(s => s.type === 'function_decl' && s.body ? [[s.name, s] as const] : []));
 		const materialize = (fn: Extract<Stmt, { type: 'function_decl' }>) => {
 			pending.delete(fn.name);
@@ -7455,7 +7462,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			case 'enum_decl':
 				return;
 
-			// These declare only TYPES, already in the scope the checker stamped.
+			// These declare only TYPES, bound in the body's scope by `emitStmts`.
 			case 'interface_decl':
 			case 'type_alias_decl':
 				return;

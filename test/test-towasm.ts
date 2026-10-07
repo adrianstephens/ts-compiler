@@ -62,8 +62,9 @@ async function compile(src: string) {
 // resolving real files -- an in-memory `parser.parse(src)` string, unlike `compile()` above, has no file
 // system location for a relative `import` to resolve against. `files`: every module's own source, keyed
 // by its filename (no `.ts` extension) relative to a fresh temp directory; `entry` names which one is the
-// program entry point.
-async function compileMulti(files: Record<string, string>, entry: string) {
+// program entry point. `compiles` > 1 compiles the entry again with the same loader and scope, as the self-hosting survey's probes
+// do: what one compile leaves on an imported module's AST must not break the next.
+async function compileMulti(files: Record<string, string>, entry: string, compiles = 1) {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'towasm-multi-'));
 	try {
 		for (const [name, src] of Object.entries(files))
@@ -72,17 +73,33 @@ async function compileMulti(files: Record<string, string>, entry: string) {
 		//const global	= libScope ? new Scope(libScope) : await getLibScope(loader, options);
 		
 		const loader		= new ModuleLoader(dir, {});
+		const scope			= programScope();
 		const entrySrc		= await fs.readFile(path.join(dir, entry + '.ts'), 'utf8');
-		const program		= parser.parse(entrySrc);
-		const diagnostics	= await TStypeCheckAsync(program, loader, programScope());
-		const errors		= diagnostics.filter(d => d.severity === SEVERITY.ERROR);
-		if (errors.length)
-			throw new Error('type errors:\n' + errors.map(d => `  ${d.pos.line}:${d.pos.col} - ${d.message}`).join('\n'));
+		// Each compile's outcome: its module's bytes, or what it threw (the backend throws strings and `TSWError`s), as text.
+		const outcomes: (Uint8Array | string)[] = [];
+		for (let i = 0; i < compiles; i++) {
+			try {
+				const program		= parser.parse(entrySrc);
+				const diagnostics	= await TStypeCheckAsync(program, loader, scope);
+				const errors		= diagnostics.filter(d => d.severity === SEVERITY.ERROR);
+				if (errors.length)
+					throw 'type errors:\n' + errors.map(d => `  ${d.pos.line}:${d.pos.col} - ${d.message}`).join('\n');
 
-		const { modules } = await collectModules(program.body, loader);
-		const mod = TStoWasm(program, modules);
-		console.log(mod.toWAT({expandTypes: true, hexFloats: false}));
-		return instantiate(mod.toBytes());
+				const { modules } = await collectModules(program.body, loader);
+				const mod = TStoWasm(program, modules);
+				console.log(mod.toWAT({expandTypes: true, hexFloats: false}));
+				outcomes.push(mod.toBytes());
+			} catch (e) {
+				outcomes.push(typeof e === 'string' ? e : (e as { msg?: unknown }).msg !== undefined ? String((e as { msg: unknown }).msg) : (e as Error).message);
+			}
+		}
+		const same = (a: Uint8Array | string, b: Uint8Array | string) => typeof a === 'string' || typeof b === 'string' ? a === b : a.length === b.length && a.every((x, i) => x === b[i]);
+		const differs = outcomes.findIndex(o => !same(o, outcomes[0]));
+		if (differs > 0)
+			throw new Error(`compile ${differs + 1} differs from compile 1 (${typeof outcomes[differs] === 'string' ? outcomes[differs] : 'a module'})`);
+		if (typeof outcomes[0] === 'string')
+			throw new Error(outcomes[0]);
+		return instantiate(outcomes[0]);
 	} finally {
 		await fs.rm(dir, {recursive: true, force: true});
 	}
@@ -1739,6 +1756,35 @@ async function main() {
 			main:	`import { shared } from './lib'; export function importedVar(): number { return shared[1]; }`,
 		}, 'main');
 		check("importedVar() (an imported module's var)", importedVar(), 4);
+		// A generic function's LOCAL type alias, reaching a closure's parameter only through an assertion's context (binary's `Array`): each
+		// instance resolves it as its own, and a second compile sharing the imported module's AST still can.
+		const { localAlias } = await compileMulti({
+			lib:	`export type Put<T> = (out: number[], v: T) => void;
+				export function lengths<T>(scale: (x: T) => number): Put<T[]> {
+					type R = T[];
+					return ((out, v) => { out.push(v.length); for (const x of v) out.push(scale(x)); }) as Put<R>;
+				}`,
+			main:	`import { lengths } from './lib';
+				export function localAlias(): number {
+					const out: number[] = [];
+					lengths((x: number) => x * 2)(out, [3, 4]);
+					lengths((x: string) => x.length)(out, ['abc']);
+					return out.reduce((a, b) => a * 10 + b, 0);
+				}`,
+		}, 'main', 2);
+		check("localAlias() (a generic function's local type alias, compiled twice)", localAlias(), 26813);
+		// The same, built into a returned object (binary's `Array`): the first compile stamped the template's `R` in codegen's scope, which lacked it,
+		// and the second, sharing the imported module, could no longer type `v`.
+		const { twice } = await compileMulti({
+			lib:	`export type Put<T> = (out: number[], v: T) => void;
+				export function lengths<T>(scale: (x: T) => number): { put: Put<T[]> } {
+					type R = T[];
+					return { put: ((out, v) => { out.push(v.length); for (const x of v) out.push(scale(x)); }) as Put<R> };
+				}`,
+			main:	`import { lengths } from './lib';
+				export function twice(): number { const out: number[] = []; lengths((x: number) => x * 2).put(out, [3, 4]); return out.length; }`,
+		}, 'main', 2);
+		check("twice() (a local type alias in a returned closure, compiled twice)", twice(), 3);
 		// A const read through a NON-entry module's import, under an alias, and through a namespace: one lazy global.
 		const { importedConst } = await compileMulti({
 			a:		`export const K = [1, 2, 3];`,
