@@ -1785,6 +1785,23 @@ async function main() {
 				export function twice(): number { const out: number[] = []; lengths((x: number) => x * 2).put(out, [3, 4]); return out.length; }`,
 		}, 'main', 2);
 		check("twice() (a local type alias in a returned closure, compiled twice)", twice(), 3);
+		// An importer reads an exported `const` as DECLARED: the union-typed one's narrowing by its initializer holds only in its own module.
+		const { exportedDeclared } = await compileMulti({
+			w:		`export type Ref = { ref: string; nullable?: boolean };
+				export type Kind = 'i32' | 'void' | Ref;
+				export const REF_ANY: Kind = { ref: 'any' };
+				export function nullable(t: Kind): Kind { return t; }`,
+			main:	`import * as W from './w';
+				function pick(n: number): W.Kind | undefined { return n > 0 ? 'void' : undefined; }
+				export function exportedDeclared(): number {
+					const raw = pick(1);
+					let k = raw === 'void' ? W.REF_ANY : raw;
+					if (typeof k === 'object' && !k.nullable)
+						k = W.nullable(k);
+					return typeof k === 'object' ? 1 : 0;
+				}`,
+		}, 'main');
+		check("exportedDeclared() (an exported const's declared type)", exportedDeclared(), 1);
 		// A const read through a NON-entry module's import, under an alias, and through a namespace: one lazy global.
 		const { importedConst } = await compileMulti({
 			a:		`export const K = [1, 2, 3];`,

@@ -3770,9 +3770,11 @@ export class Scope {
 		return names;
 	}
 
+	// What a name exports, imports or re-exports as: its DECLARED type, as TS's importer sees it. A narrowing (a union-typed `const`'s by its
+	// initializer, `hoistVar`) holds only in the flow it was made in.
 	copy(from: Scope, local: string, pub: string, typeOnly = false) {
 		if (!typeOnly) {
-			const v = from.value(local);
+			const v = from.declared(local);
 			if (v)
 				this.values.set(pub, v);
 			const ns = from.namespace(local);
