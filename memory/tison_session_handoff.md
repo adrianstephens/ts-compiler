@@ -67,12 +67,13 @@ before captures); destructuring assignment (`emitDestructuringAssign`); all-open
 Then: localeCompare (user's choice: root collation for ASCII, code-unit order beyond; `COLLATION_ORDER` from node); object rest in patterns
 (`restKeys` hook: one known key set -> literal of the others, else spread clone + deletes); computed `string` key reads a string index
 signature (`stringIndexSignatureOf`; was `any`).
-**Next (open)**: TStoWasm stops at "unknown field 'length'" on `v` typed `R` in a closure of binary's generic `Array(len, type)` instance:
-`R` is that function's LOCAL type alias (`type R = ReadType<T>[]`, the closure's param typed via `as put<R>`). The ref's stamped declScope
-holds the body's values (`x`, `len`) and module names but NOT the type `R`; a closure's ctx scope is the module's, so only the stamp could
-resolve it. Local aliases work in the checker and in every small repro tried (generic, cross-module, intersection callbacks, double cast):
-it depends on how the whole wasm-backend program reaches the instance. Next step: find who stamps the closure param's `R` (applyContextualParams
-in the instance re-check vs a template stamp kept by `substituteTypeParams`). Also transform.ts 337 SwitchCase rest (checker FP).
+**Closed 2026-10-07 (`f597344`)**: the local-alias blocker (binary's `Array`, `type R = ReadType<T>[]`, `as put<R>`). Codegen's
+function scopes lacked local TYPES (now `hoistTypes` in `emitStmts`), so `checkerTypeOf` stamped the template's `R` with a scope that could
+not resolve it, and a type node naming no type parameter came back from substitution shared by every instance and every later compile
+(now `freshType`, plus `expandLocalQueries` before substituting). Its survey rows flipped between declarations run to run: a compile
+leaking into the next. `compileMulti(..., 2)` now fails on any second compile that differs from the first.
+**Open gap found there**: two instances of a generic function returning a closure over `T[]` store it with an erased `Array<any>`
+param, so a direct call passing `number[]` fails ("cannot convert arr:f64 to ref:Array<any>"). Also transform.ts 337 SwitchCase rest (checker FP).
 Known checker leniency noted: an object rest binds `any` (TS: `Omit<T, keys>`). Re-run the survey (ask first) before trusting rows.
 Known gaps found: a generic instantiation is its own class (statics per instantiation); a literal with a method into a class-typed
 slot (`object literal for 'A' has unknown property`); `unknown + unknown` accepted; method values (`obj.m`) have no identity;
