@@ -7058,9 +7058,14 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	function resumableBody(body: Stmt[], ctx: FunctionContext): Stmt[] {
 		const lifted	= (stmts: Stmt[]) => liftSuspends(stmts, role => `#${role}$${ctx.tempCounter++}`);
 		const hoisted	= (stmts: Stmt[]) => [...stmts.filter(s => s.type === 'function_decl'), ...stmts.filter(s => s.type !== 'function_decl')];
+		const suspendingForOf = (s: Stmt): s is ForOf => s.type === 'for' && s.kind !== 'normal' && containsSuspend(s);
+		// A label stays on the loop the lowering makes, where `continue label` can reach it.
+		const relabel = (label: string, lowered: Stmt): Stmt => lowered.type === 'block'
+			? { ...lowered, body: lowered.body.map(st => st.type === 'for' ? { type: 'labeled', label, body: st } : st) } : lowered;
 		return hoisted(walker(
 			(s, process) => s.type === 'function_decl' || s.type === 'class_decl' ? s
-				: s.type === 'for' && s.kind !== 'normal' && containsSuspend(s) ? process(lowerLoopHead(s, ctx, '#rfor'))
+				: s.type === 'labeled' && suspendingForOf(s.body) ? process(relabel(s.label, lowerLoopHead(s.body, ctx, '#rfor')))
+				: suspendingForOf(s) ? process(lowerLoopHead(s, ctx, '#rfor'))
 				: s.type === 'block' ? process({ ...s, body: hoisted(lifted(s.body)) })
 				// A lone statement under `if`/a loop: what it lifts needs a block to sit in.
 				: (l => l.length > 1 || l[0] !== s ? process(JS.Block<Stmt>(...l)) : process(s))(lifted([s])),

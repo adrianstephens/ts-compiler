@@ -329,18 +329,38 @@ export function BuildStateMachine(stmts: Stmt[]) {
 	}
 
 
-	// An unlabeled break/continue targeting the loop or switch holding `body` directly, not a nested one (which has its own targets).
-	function containsOwnBreakOrContinue(body: Stmt): boolean {
+	// Where a `break`/`continue` out of a flattened statement goes: the enclosing flattened loops (and labeled statements), innermost last.
+	const targets: { label?: string; breakId: number; continueId?: number }[] = [];
+	const jumpTarget = (s: Extract<Stmt, { type: 'break' | 'continue' }>): number => {
+		const t = targets.slice().reverse().find(t => s.label ? t.label === s.label : t.continueId !== undefined);
+		if (!t || (s.type === 'continue' && t.continueId === undefined))
+			throw new Error(`internal: no flattened target for '${s.type}${s.label ? ' ' + s.label : ''}'`);
+		return s.type === 'break' ? t.breakId : t.continueId!;
+	};
+	// A `break`/`continue` in `stmt` that leaves it: its target is a flattened loop, so `stmt` is flattened too.
+	function jumpsOut(stmt: Stmt): boolean {
+		const labels: string[] = [];
+		let loops = 0, switches = 0;
 		return walkerB(
 			(s, process) => {
 				if (s.type === 'break' || s.type === 'continue')
-					return true;
-				if (s.type === 'while' || s.type === 'do_while' || s.type === 'for' || s.type === 'switch')
+					return s.label ? !labels.includes(s.label) : loops + (s.type === 'break' ? switches : 0) === 0;
+				if (s.type === 'function_decl' || s.type === 'class_decl')
 					return false;
-				return process(s);
+				const loop = +(s.type === 'while' || s.type === 'do_while' || s.type === 'for'), sw = +(s.type === 'switch');
+				if (s.type === 'labeled')
+					labels.push(s.label);
+				loops += loop;
+				switches += sw;
+				const r = process(s);
+				loops -= loop;
+				switches -= sw;
+				if (s.type === 'labeled')
+					labels.pop();
+				return r;
 			},
-			(e, process) => (e.type === 'arrow' || e.type === 'function') ? false : process(e)
-		).statement(body);
+			(e, process) => (e.type === 'arrow' || e.type === 'function' || e.type === 'class') ? false : process(e)
+		).statement(stmt);
 	}
 
 	function bodyStmtsOf(stmt: Stmt): Stmt[] {
@@ -361,6 +381,79 @@ export function BuildStateMachine(stmts: Stmt[]) {
 			cont = id;
 			return id;
 		};
+		// A loop's body flattened with its own targets: `break` to `breakId`, `continue` to `continueId`.
+		const loopBody = (body: Stmt, label: string | undefined, breakId: number, continueId: number, entry: number) => {
+			targets.push({ label, breakId, continueId });
+			const id = recurse(bodyStmtsOf(body), entry);
+			targets.pop();
+			return id;
+		};
+		const flatten = (stmt: Stmt, label?: string): void => {
+			switch (stmt.type) {
+				case 'block':
+					cont = recurse(stmt.body, flush());
+					break;
+
+				// What follows a jump in its list never runs.
+				case 'break':
+				case 'continue':
+					trailing	= [];
+					cont		= jumpTarget(stmt);
+					break;
+
+				case 'labeled': {
+					const body = stmt.body;
+					if (body.type === 'while' || body.type === 'do_while' || body.type === 'for')
+						return flatten(body, stmt.label);
+					const cont0 = flush();
+					targets.push({ label: stmt.label, breakId: cont0 });
+					cont = recurse(bodyStmtsOf(body), cont0);
+					targets.pop();
+					break;
+				}
+				case 'if': {
+					const cont0 = flush();
+					cont = reserve();
+					define(cont, [], {
+						type: 'branch', test: stmt.test,
+						then: recurse(bodyStmtsOf(stmt.consequent), cont0),
+						else: stmt.alternate ? recurse(bodyStmtsOf(stmt.alternate), cont0) : cont0,
+					});
+					break;
+				}
+				case 'while': {
+					const cont0 = flush();
+					cont = reserve();
+					define(cont, [], { type: 'branch', test: stmt.test, then: loopBody(stmt.body, label, cont0, cont, cont), else: cont0 });
+					break;
+				}
+				case 'do_while': {
+					const cont0		= flush();
+					const testId	= reserve();
+					cont = loopBody(stmt.body, label, cont0, testId, testId);
+					define(testId, [], { type: 'branch', test: stmt.test, then: cont, else: cont0 });
+					break;
+				}
+				case 'for': {
+					if (stmt.kind !== 'normal')
+						throw new Error(`internal: a 'for...${stmt.kind}' reaches the state machine unlowered`);
+					const cont0		= flush();
+					cont = reserve();
+					const updateId	= reserve();
+					const bodyEntry = loopBody(stmt.body, label, cont0, updateId, updateId);
+					define(updateId, stmt.update ? [{ type: 'expression', expression: stmt.update } as Stmt] : [], { type: 'goto', target: cont });
+					define(cont, [], stmt.test ? { type: 'branch', test: stmt.test, then: bodyEntry, else: cont0 } : { type: 'goto', target: bodyEntry });
+					if (stmt.init) {
+						const cont2 = reserve();
+						define(cont2, [stmt.init.type === 'var_decl' ? stmt.init : { type: 'expression', expression: stmt.init } as Stmt], { type: 'goto', target: cont });
+						cont = cont2;
+					}
+					break;
+				}
+				default:
+					throw new Error("a yield/await here is not yet supported (only a bare 'yield x;'/'await x;' statement, 'const v = yield x;', or one of those nested in a plain 'if'/'while'/'do..while'/'for'/block -- not inside a 'switch'/'try')");
+			}
+		};
 		for (let i = stmts.length - 1; i >= 0; i--) {
 			const stmt = stmts[i];
 			const boundary = suspendBoundary(stmt);
@@ -368,64 +461,8 @@ export function BuildStateMachine(stmts: Stmt[]) {
 				const id = reserve();
 				define(id, [], { ...boundary, type: 'suspend', resumeId: flush() });
 				cont = id;
-
-			} else if (containsSuspend(stmt)) {
-				switch (stmt.type) {
-					case 'block':
-						cont = recurse(stmt.body, flush());
-						break;
-
-					case 'if': {
-						const cont0 = flush();
-						cont = reserve();
-						define(cont, [], {
-							type: 'branch', test: stmt.test,
-							then: recurse(bodyStmtsOf(stmt.consequent), cont0),
-							else: stmt.alternate ? recurse(bodyStmtsOf(stmt.alternate), cont0) : cont0,
-						});
-						break;
-					}
-					case 'while': {
-						if (containsOwnBreakOrContinue(stmt.body))
-							throw new Error("'break'/'continue' inside a yield-containing loop is not yet supported");
-						const cont0 = flush();
-						cont = reserve();
-						define(cont, [], { type: 'branch', test: stmt.test, then: recurse(bodyStmtsOf(stmt.body), cont), else: cont0 });
-						break;
-					}
-					case 'do_while': {
-						if (containsOwnBreakOrContinue(stmt.body))
-							throw new Error("'break'/'continue' inside a yield-containing loop is not yet supported");
-						const cont0		= flush();
-						const testId	= reserve();
-						cont = recurse(bodyStmtsOf(stmt.body), testId);
-						define(testId, [], { type: 'branch', test: stmt.test, then: cont, else: cont0 });
-						break;
-					}
-					case 'for': {
-						if (containsOwnBreakOrContinue(stmt.body))
-							throw new Error("'break'/'continue' inside a yield-containing loop is not yet supported");
-						const cont0		= flush();
-						cont = reserve();
-						const updateId	= reserve();
-						const bodyEntry = recurse(bodyStmtsOf(stmt.body), updateId);
-						switch (stmt.kind) {
-							case 'normal':
-								define(updateId, stmt.update ? [{ type: 'expression', expression: stmt.update } as Stmt] : [], { type: 'goto', target: cont });
-								define(cont, [], stmt.test ? { type: 'branch', test: stmt.test, then: bodyEntry, else: cont0 } : { type: 'goto', target: bodyEntry });
-								break;
-						}
-						if (stmt.init) {
-							const cont2 = reserve();
-							define(cont2, [stmt.init.type === 'var_decl' ? stmt.init : { type: 'expression', expression: stmt.init } as Stmt], { type: 'goto', target: cont });
-							cont = cont2;
-						}
-						break;
-					}
-					default:
-						throw new Error("a yield/await here is not yet supported (only a bare 'yield x;'/'await x;' statement, 'const v = yield x;', or one of those nested in a plain 'if'/'while'/'do..while'/'for' -- not embedded in a larger expression, and not inside a 'switch'/'try')");
-				}
-
+			} else if (containsSuspend(stmt) || jumpsOut(stmt)) {
+				flatten(stmt);
 			} else {
 				trailing.push(stmt);
 			}

@@ -5694,6 +5694,21 @@ async function main() {
 		['an argument', 'an operand read before it', '&&', '??', 'a conditional arm', 'a member base', 'an assignment and a compound one', 'a spread argument',
 			'a test and a nested operand', 'a for...of iterable', 'a lone statement under if'].forEach((name, i) =>
 			check(`await inside ${name}`, liftedAwaits.at(i), [7, 5, 4, 16, 9, 3, 37, 33, 12, 6, 9][i]));
+		// `break`/`continue` in a loop that suspends: the loop is flattened into states, and each jump goes to its exit or next iteration's state.
+		const asyncJumps = await compile(`
+			const val = (n: number) => Promise.resolve(n);
+			async function cont(): Promise<number> { let t = 0; for (const x of [1, 2, 3, 4]) { const v = await val(x); if (v % 2) continue; t += v; } return t; }
+			async function brk(): Promise<number> { let t = 0; for (const x of [1, 2, 3, 4]) { if (x === 3) break; t += await val(x); } return t; }
+			async function whileJ(): Promise<number> { let i = 0, t = 0; while (i < 10) { i++; if (i === 2) continue; if (i > 4) break; t += await val(i); } return t; }
+			async function labeled(): Promise<number> { let t = 0; outer: for (const a of [1, 2, 3]) { for (const b of [10, 20, 30]) { if (b === 30) continue outer; if (a === 3) break outer; t += await val(a * b); } } return t; }
+			async function doJ(): Promise<number> { let i = 0, t = 0; do { i++; if (i === 1) continue; t += await val(i); } while (i < 3); return t; }
+			const got = [0, 0, 0, 0, 0];
+			export function run(): number { [cont, brk, whileJ, labeled, doJ].forEach((f, i) => f().then(v => { got[i] = v; })); return 0; }
+			export function at(i: number): number { return got[i]; }
+		`);
+		asyncJumps.run();
+		['continue in for...of', 'break in for...of', 'both in while', 'labeled across nested loops', 'continue in do...while'].forEach((name, i) =>
+			check(`async loop: ${name}`, asyncJumps.at(i), [6, 3, 8, 90, 5][i]));
 		const { forwardConst } = await compile(`
 			function f(): number { const early = () => h(1); const base = 100; return early(); function h(n: number): number { return base + n; } }
 			export function forwardConst(): number { return f(); }
@@ -9517,18 +9532,33 @@ async function main() {
 		`);
 		check('generator: yield inside a for loop, counter hoisted across suspends', loopGen(), 99210);
 
-		await checkThrows("generator: 'break'/'continue' inside a yield-containing loop is rejected (deferred)", () => compile(`
+		const { breakGen } = await compile(`
 			function* gen(): Generator<number, void, number> {
 				while (true) {
 					yield 1;
 					break;
 				}
 			}
-			export function f(): number {
+			export function breakGen(): number {
 				const g = gen();
-				return g.next(0).done ? 1 : 0;
+				const a = g.next(0), b = g.next(0);
+				return (a.done ? 10 : 0) + (b.done ? 1 : 0);
 			}
-		`), /not yet supported/);
+		`);
+		check("generator: 'break' out of a yield-containing loop", breakGen(), 1);
+
+		// A yield inside a larger expression is lifted to its own statement; the value sent back stands in its place.
+		const { embeddedYield } = await compile(`
+			function* gen(): Generator<number, number, number> {
+				const x = (yield 1) + 1;
+				return x * 10;
+			}
+			export function embeddedYield(): number {
+				const g = gen();
+				return g.next(0).value + g.next(4).value;
+			}
+		`);
+		check('generator: a yield embedded in a larger expression', embeddedYield(), 51);
 
 		// 'if'/'else' each containing a yield -- only the taken branch's arm should ever fire, and both
 		// the with-alternate and without-alternate shapes need their own coverage (different merge wiring).
