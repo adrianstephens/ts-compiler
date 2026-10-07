@@ -5735,6 +5735,32 @@ async function main() {
 			check(`async try: ${name}`, asyncTry.at(i), [12, 423, 5, 7, 9, 3004, 41][i]));
 		check('async try: each finally ran once', asyncTry.logged(), 130);
 		check('generator: catch and finally across yields', asyncTry.genTry(), 1066);
+		// An async or generator method is resumable as such a function is, its receiver (or a static method's class) in the frame; an optional or
+		// defaulted parameter is bound by the call, like a plain function's.
+		const asyncMethods = await compile(`
+			const val = (n: number) => Promise.resolve(n);
+			class Loader {
+				base = 10;
+				cache = new Map<string, number>();
+				static made = 0;
+				async get(key: string, extra?: number): Promise<number> {
+					const hit = this.cache.get(key);
+					if (hit !== undefined)
+						return hit;
+					const v = this.base + await val(key.length) + (extra ?? 0);
+					this.cache.set(key, v);
+					return v;
+				}
+				static async make(base = 5): Promise<Loader> { const l = new Loader(); l.base = await val(base); this.made++; return l; }
+				*keys(): Generator<string, void, unknown> { for (const k of this.cache.keys()) yield k; }
+			}
+			async function useIt(): Promise<number> { const l = await Loader.make(); const a = await l.get('abc'); const b = await l.get('abc', 100); const c = await l.get('xy', 1000); return a * 10000 + b + c + [...l.keys()].length * 100000 + Loader.made * 1000000; }
+			let got = 0;
+			export function run(): number { useIt().then(v => { got = v; }); return 0; }
+			export function at(): number { return got; }
+		`);
+		asyncMethods.run();
+		check('async, static async and generator methods', asyncMethods.at(), 1281015);
 		const { forwardConst } = await compile(`
 			function f(): number { const early = () => h(1); const base = 100; return early(); function h(n: number): number { return base + n; } }
 			export function forwardConst(): number { return f(); }

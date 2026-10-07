@@ -3606,7 +3606,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		// SUPERCLASS chain too: an inherited body names its own declaring class, whose INSTANTIATION is what its `$T` asm is keyed to.
 		const self = (c: ClassInfo | undefined): ClassInfo | undefined =>
 			!c ? undefined : c.decl.name === name || c.name === name ? c : self(c.superClass);
-		return builtinTypeOwner(name) ?? self(ctx.owner) ?? ensureClass(name, staticTypeArgsFor(name));
+		return builtinTypeOwner(name) ?? self(ctx.owner) ?? ensureClass(name, staticTypeArgsFor(name), ctx.scope);
 	}
 
 	// Method dispatch is the same across classes, array kinds and scalar box kinds (`ownerFor`); field access is `classOf`'s only.
@@ -7809,19 +7809,22 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 	// A resumable function's params: plain identifiers, no default, not optional, no rest.
-	function resolveResumableParams(decl: FunctionDecl): ResolvedParam[] {
-		if (decl.rest)
-			throw `rest parameter is not yet supported`;
-		return decl.params.map(p => {
-			if (typeof p.key !== 'string')
-				throw `destructured is not supported`;
-			if (p.default)
-				throw `parameter '${p.key}' cannot have a default value`;
-			if (hasMod(p, 'optional'))
-				throw `parameter '${p.key}' cannot be optional`;
-			return resolveParam(p);
-		});
+	// Bound like a plain function's, by the outer call (defaults run there, as JS runs them at the call), then copied into the frame by name.
+	function resolveResumableParams(decl: FunctionDecl, home: Scope): ResolvedParam[] {
+		if (decl.params.some(p => typeof p.key !== 'string'))
+			throw `a destructured parameter of a generator or async function is not supported`;
+		return resolveParams(decl, home);
 	}
+
+	// A resumable method's registration key and receiver (`ensureMethod`'s); absent for a function.
+	interface ResumableMethod { key: string; owner: ClassInfo; isStatic: boolean; staticThis?: ClassInfo }
+	// A context for a resumable function's code: in its class's scope for a method, else its module's.
+	const resumableContext = (name: string, homeModule: string, onReturn: ReturnHandler, method?: ResumableMethod) => Object.assign(
+		new FunctionContext(name, new Scope(method ? classScope(method.owner) : moduleScopeOf(homeModule) ?? libGlobal), onReturn, method?.owner, homeModule),
+		{ staticThis: method?.staticThis });
+	// The frame's leading fields: a method's receiver, as `this`, then the params.
+	const withReceiver = (params: ResolvedParam[], method?: ResumableMethod): ResolvedParam[] =>
+		method && !method.isStatic ? [{ key: 'this', wtype: method.owner.thisType, tsType: method.owner.thisTsType }, ...params] : params;
 
 	// `var` is function-scoped: each is declared once, before the body, and its declarations assign it (`case 'var_decl'`).
 	// Its type is the checker's binding in the body's own scope, stamped on the first statement; a `var` redeclaring a parameter is that parameter.
@@ -7905,8 +7908,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	// The frame a resumable function keeps between calls: its state, then every local the body declares (params first), then any
 	// field the driver needs (`extra`, at `extraAt`). Hoisted locals take the type `case 'var_decl'` would give them, via the same widenings.
-	function resumableFrame(decl: FunctionDecl, params: ResolvedParam[], homeModule: string, extra: wasm.FieldType[] = [], captures: Capture[] = []) {
-		const body = resumableBody(decl.body!, new FunctionContext(decl.name ?? '<resumable>', new Scope(moduleScopeOf(homeModule) ?? libGlobal), plainReturn('void'), undefined, homeModule));
+	function resumableFrame(decl: FunctionDecl, params: ResolvedParam[], homeModule: string, extra: wasm.FieldType[] = [], captures: Capture[] = [], method?: ResumableMethod) {
+		const body = resumableBody(decl.body!, resumableContext(decl.name ?? '<resumable>', homeModule, plainReturn('void'), method));
 		const { localFields, frameFields } = buildFrameFields(body, params, captures);
 		const extraAt		= frameFields.push(...extra) - extra.length;
 		// `envBase` as supertype: the frame is stored as a closure's env, whose declared param type is `(ref $envBase)`.
@@ -8006,25 +8009,26 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 	// The function a caller calls, registered module-qualified as `compileFunc` registers, or two modules' same-named functions collide.
-	function compileResumableOuter(name: string, homeModule: string, params: ResolvedParam[], result: W.Type, build: (ctx: FunctionContext) => void): FuncInfo {
-		const { funcIndex, typeIndex } = types.func(toParams2(params), toResults(result));
-		const info: FuncInfo = { params: params.map(p => p.wtype), result, funcIndex, typeIndex, hasRest: false };
-		funcs.set(homeKey(homeModule, name), info);
+	function compileResumableOuter(name: string, decl: FunctionDecl, homeModule: string, params: ResolvedParam[], result: W.Type, build: (ctx: FunctionContext) => void, method?: ResumableMethod): FuncInfo {
+		const self = method && !method.isStatic ? method.owner.thisType : undefined;
+		const info = declareFunc(method?.key ?? homeKey(homeModule, name), decl, params, result, self);
 		worklist.push(W.withCatch(() => {
-			const ctx = new FunctionContext(name, new Scope(moduleScopeOf(homeModule) ?? libGlobal), plainReturn(result), undefined, homeModule);
+			const ctx = resumableContext(name, homeModule, plainReturn(result), method);
+			if (self)
+				ctx.declareValue('this', self, method!.owner.thisTsType);
 			ctx.declareParams(params).forEach(lowering(ctx).emit);
 			build(ctx);
-			info.body = ctx.toFuncBody(params.length, toValType);
+			info.body = ctx.toFuncBody((self ? 1 : 0) + params.length, toValType);
 		}, name, homeModule));
 		return info;
 	}
 
 	// A `function*` is two wasm functions: the named one (which runs no body, as a JS generator call runs none until `.next()`, but hands a fresh frame
 	// to `new Generator(step)`) and a resumable step shaped like a closure, whose env is the frame (`lib/generator.ts`).
-	function compileGeneratorFunc(name: string, decl: FunctionDecl, homeModule = '.'): FuncInfo {
+	function compileGeneratorFunc(name: string, decl: FunctionDecl, homeModule = '.', method?: ResumableMethod): FuncInfo {
 		if (decl.typeParams?.length)
 			throw `generic generator function '${name}' is not supported`;
-		const params = resolveResumableParams(decl);
+		const params = resolveResumableParams(decl, resumableContext(name, homeModule, plainReturn(), method).scope);
 
 		const rt = decl.returnType;
 		if (rt?.type !== 'ref' || rt.name !== 'Generator' || (rt.typeArgs?.length ?? 0) !== 3)
@@ -8046,13 +8050,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const sig			= closureSigOf(genClass.fields[genClass.fieldIndex.get('step')!].wtype);
 		const resultWtype	= sig.result;
 		const { funcTypeIndex, structTypeIndex } = ensureClosureType(sig);
-		const frame			= resumableFrame(decl, params, homeModule);
+		const frame			= resumableFrame(decl, withReceiver(params, method), homeModule, [], [], method);
 		const { funcIndex: stepFuncIndex } = types.funcAt(funcTypeIndex);
 		const stepInfo: FuncInfo = { params: sig.params, result: sig.result, hasRest: false, funcIndex: stepFuncIndex, typeIndex: funcTypeIndex };
 		closureLiterals.push(stepInfo);
 
 		worklist.push(W.withCatch(() => {
-			const fnCtx			= new FunctionContext(name, new Scope(moduleScopeOf(homeModule) ?? libGlobal), plainReturn(resultWtype), undefined, homeModule);
+			const fnCtx			= resumableContext(name, homeModule, plainReturn(resultWtype), method);
 			// Param order is `ensureClosureType`'s (env, then `sig.params`); the cast-down frame is one more local after them.
 			const envParam		= fnCtx.declareLocal('#envParam', { typeIndex: types.envBase(), nullable: false });
 			const sentParam		= fnCtx.declareLocal('#sent', sig.params[0]);
@@ -8096,21 +8100,21 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			stepInfo.body = fnCtx.toFuncBody(2, toValType);
 		}, name, homeModule));
 
-		return compileResumableOuter(name, homeModule, params, genClass.thisType, ctx => {
+		return compileResumableOuter(name, decl, homeModule, params, genClass.thisType, ctx => {
 			const genCtor = ensureCtor(genClass, [], ctx);
 			ctx.emit(I.ref.func(stepFuncIndex));
-			emitFrameInit(ctx, params, frame);
+			emitFrameInit(ctx, withReceiver(params, method), frame);
 			ctx.emit(I.struct.new(frame.typeIndex), I.i32.const(sig.params.length), ...newClosure(structTypeIndex), I.call(genCtor.funcIndex), I.return);
-		});
+		}, method);
 	}
 
 	// An `async function` shares the generator's frame and dispatch but runs at once, synchronously, up to its first `await`, which registers its resume
 	// through `then()`. A rejection resumes it throwing the reason; whatever escapes the body rejects the result.
 	// `closure`: an async arrow or function expression's captures, in its env struct; its entry is then the closure's code, building the frame.
-	function compileAsyncFunc(name: string, decl: FunctionDecl, homeModule = '.', closure?: { captures: Capture[]; envTypeIndex: number }): FuncInfo {
+	function compileAsyncFunc(name: string, decl: FunctionDecl, homeModule = '.', closure?: { captures: Capture[]; envTypeIndex: number }, method?: ResumableMethod): FuncInfo {
 		if (decl.typeParams?.length)
 			throw `generic async function '${name}' is not supported`;
-		const params = resolveResumableParams(decl);
+		const params = resolveResumableParams(decl, resumableContext(name, homeModule, plainReturn(), method).scope);
 
 		const rt = decl.returnType;
 		if (rt?.type !== 'ref' || rt.name !== 'Promise' || (rt.typeArgs?.length ?? 0) !== 1)
@@ -8126,7 +8130,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const newPromise	= (t: Type, ctx: FunctionContext) => ctx.emit(I.call(instantiateFunc('__asyncResult', LIB_DECL_MAP.get('__asyncResult') as FunctionDecl, new Map([['T', t]])).funcIndex));
 
 		// Two hidden fields after the locals: the function's own result Promise, and whether this resume delivers a rejection.
-		const frame			= resumableFrame(decl, params, homeModule, [{ type: toValType(promiseWtype), mut: true }, { type: 'i32', mut: true }], closure?.captures);
+		const frame			= resumableFrame(decl, withReceiver(params, method), homeModule, [{ type: toValType(promiseWtype), mut: true }, { type: 'i32', mut: true }], closure?.captures, method);
 		const resultPromise	= frame.extraAt, threw = frame.extraAt + 1;
 		const { funcIndex: stepFuncIndex, typeIndex: stepFuncTypeIndex } = types.func(
 			[{ type: { ref: frame.typeIndex, nullable: false }, id: 'frame' }, { type: toValType(W.REF_ANY_NULLABLE), id: 'sent' }], []);
@@ -8134,7 +8138,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		closureLiterals.push(stepInfo);
 
 		worklist.push(W.withCatch(() => {
-			const fnCtx			= new FunctionContext(name, new Scope(moduleScopeOf(homeModule) ?? libGlobal), plainReturn(), undefined, homeModule);
+			const fnCtx			= resumableContext(name, homeModule, plainReturn(), method);
 			const frameLocal	= fnCtx.declareLocal('#frame', { typeIndex: frame.typeIndex, nullable: false });
 			const sentParam		= fnCtx.declareLocal('#sent', W.REF_ANY_NULLABLE);
 			const getFrame		= (ctx: FunctionContext) => ctx.emit(I.local.get(frameLocal.index));
@@ -8260,13 +8264,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const promiseLocal = ctx.declareLocal('#resultPromise', promiseWtype);
 			newPromise(rt.typeArgs![0], ctx);
 			ctx.emit(I.local.set(promiseLocal.index));
-			emitFrameInit(ctx, params, frame, capture);
+			emitFrameInit(ctx, withReceiver(params, method), frame, capture);
 			ctx.emit(I.local.get(promiseLocal.index), I.i32.const(0), I.struct.new(frame.typeIndex));
 			// Run the body at once, up to its first suspension, as JS does; the entry segment never reads `#sent`.
 			ctx.emit(I.ref.null('any'), I.call(stepFuncIndex), I.local.get(promiseLocal.index), I.return);
 		};
 		if (!closure)
-			return compileResumableOuter(name, homeModule, params, promiseWtype, start);
+			return compileResumableOuter(name, decl, homeModule, params, promiseWtype, start, method);
 		// A closure's code: its env (the captures, as any closure's) first, then its parameters; each capture is copied into the new frame.
 		const sig: FuncSig = { params: params.map(p => p.wtype), result: promiseWtype, hasRest: false, resolvedParams: params };
 		const { funcIndex, typeIndex } = types.funcAt(ensureClosureType(sig).funcTypeIndex);
@@ -9222,8 +9226,15 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (!result)
 			throw `'${fullName}' has an unsupported return type`;
 
+		const isStatic		= !!decl.modifiers?.includes('static');
+		// An async or generator method is resumable, as such a function is, with its receiver in the frame.
+		if (!abstract && (hasMod(decl, 'async') || hasMod(decl, 'generator'))) {
+			const asFunc: FunctionDecl = { ...decl, type: 'function_decl', name: fullName };
+			return hasMod(decl, 'async')
+				? compileAsyncFunc(key, asFunc, owner.homeModule, undefined, { key, owner, isStatic, staticThis })
+				: compileGeneratorFunc(key, asFunc, owner.homeModule, { key, owner, isStatic, staticThis });
+		}
 		const params		= resolveParams(decl, owner.declScope ?? libGlobal);
-		const isStatic		= decl.modifiers?.includes('static');
 		const reassignsThis = !isStatic && !abstract && assignsToThis(decl.body!);
 		const thisWtype		= owner.thisType;
 		const info			= declareFunc(key, decl, params, result, isStatic ? undefined : thisWtype, reassignsThis);
