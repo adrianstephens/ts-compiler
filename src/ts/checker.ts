@@ -2389,7 +2389,10 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 						inference.infer(sig.thisType, T.nonNullable(calleeObjT, scope, calleeOptional));
 					// In order, as TS does: each argument's context is its parameter under what the arguments before it inferred
 					// (`mapObject(q, { ps: mapArray(p => ...) })` knows `N` from `q`, so the inner call can infer its `T`). What the result's context
-					// inferred reaches only a generic call's (`compose(filter(x => ...))`): a `const T` argument keeps its bare `T`.
+					// inferred reaches only a generic call's (`compose(filter(x => ...))`), held directly or as an array literal's element
+					// (`Call(callee, [Index(o, k)])`) where the parameter is no bare type parameter: a `const T` argument keeps its bare `T`.
+					const heldCall = (a: Expr, declared: Type | undefined) => a.type === 'call'
+						|| (a.type === 'array' && a.elements.some(x => x?.type === 'call') && !(declared?.type === 'ref' && !declared.typeArgs && sig!.typeParams?.some(p => p.name === declared.name)));
 					const soFar = (declared: Type | undefined, viaResult = false) => declared && (explicit ? T.substituteType(declared, explicit)
 						: inference ? T.substituteType(declared, new Map(sig!.typeParams!.flatMap(p => {
 							const t = viaResult ? inference.inferred(p.name) : inference.fromCandidates(p.name);
@@ -2425,7 +2428,7 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 						if (a.type === 'function' || a.type === 'arrow' || a.type === 'spread')
 							return undefined;
 						// The inner call of `new Map(xs.map(x => [a, b]))` reverse-matches its own `U` from the tuple shape (`instantiate`'s `fromExpected`).
-						const t = arg(a, argContext(a, soFar(declaredArg(i), a.type === 'call'), sig!, scope));
+						const t = arg(a, argContext(a, soFar(declaredArg(i), heldCall(a, declaredArg(i))), sig!, scope));
 						// A generic function argument waits until every other argument (and the result's context) has spoken, as TS's does.
 						if (lifting && t && isGenericFunction(t, scope))
 							return t;

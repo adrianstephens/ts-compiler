@@ -540,7 +540,19 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		const s: Ref | undefined = e?.type.type !== 'ref' ? undefined : use(e.type);
 		const u: Entry = e?.type.type === 'object' ? e : { type: { type: 'object' } };
 		if (e?.type.type === 'ref') {} else { const v: Entry = e; }`,
-		[NOT_ASSIGNABLE('Entry | undefined', 'Entry')]],
+		[NOT_ASSIGNABLE('Entry | undefined', 'Entry')]],	['a generic call inside an array-literal argument hears what the call\'s result context inferred', `
+		interface Id { type: 'id' }
+		interface Call<T> { type: 'call'; callee: E<T>; args: E<T>[]; typeArgs?: T[] }
+		interface Idx<T> { type: 'index'; object: E<T>; index: E<T> }
+		type E<T> = Id | Call<T> | Idx<T>;
+		declare function Id(): Id;
+		declare function Call<T>(callee: E<T>, args: E<T>[]): Call<T>;
+		declare function Index<T>(object: E<T>, index: E<T>): Idx<T>;
+		type Ty = { k: string };
+		declare function take(e: E<Ty>): void;
+		take(Call(Id(), [Index(Id(), Id())]));
+		take(Index(Id(), Call(Id(), [Index(Id(), Id())])));`,
+		[]],
 ];
 
 (async () => {
