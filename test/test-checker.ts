@@ -529,6 +529,18 @@ const cases: [name: string, code: string, errors: string[], nonStrict?: true][] 
 		declare function Func<T>(func: (s: number | string, v?: T) => T | Promise<T>): { get(s: string): Promise<T> };
 		const a: TT<string[]> = Func((s, v) => { if (v) return v; return ['x']; });`,
 		[]],
+	['a discriminant read through an optional chain drops the chain\'s undefined on the matching branch only', `
+		interface Ref { type: 'ref'; name: string }
+		interface Obj { type: 'object' }
+		interface Entry { type: Ref | Obj; typeParams?: string[] }
+		declare function lookup(n: string): Entry | undefined;
+		declare function use(r: Ref): Ref;
+		const e = lookup('x');
+		const r: Ref | undefined = e?.type.type === 'ref' && !e.typeParams?.length ? use(e.type) : undefined;
+		const s: Ref | undefined = e?.type.type !== 'ref' ? undefined : use(e.type);
+		const u: Entry = e?.type.type === 'object' ? e : { type: { type: 'object' } };
+		if (e?.type.type === 'ref') {} else { const v: Entry = e; }`,
+		[NOT_ASSIGNABLE('Entry | undefined', 'Entry')]],
 ];
 
 (async () => {

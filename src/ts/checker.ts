@@ -1072,6 +1072,9 @@ export function narrow(test: Expr, scope: Scope, sense: boolean): Scope {
 									}
 									return !changed ? true : parts.length ? T.combineTypes(parts) : false;
 								}
+								// A nullish member has no discriminant to equal a value: what `x?.k === 'a'` holds for short-circuited past it.
+								if (T.isNullish(r, scope))
+									return !keepMatch;
 								const pt = T.lookupMember(r, prop, scope);
 								const rp = pt && T.resolve(scope, pt);
 								if (!rp)
