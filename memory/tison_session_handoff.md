@@ -1,10 +1,10 @@
 ---
 name: tison-session-handoff
-description: LIVE cold-start state for the wasm-backend self-hosting work -- where things stand (survey at 11aa1d6, 2026-10-05; binary work to 2026-10-06), the top blockers, what the user decided and has not decided, open-not-fixed items, and the contracts to know before editing codegen. Read this before anything else.
+description: LIVE cold-start state for the wasm-backend self-hosting work -- where things stand (survey 508/514 at 7490d09, 2026-10-07; async lowering general), the top blockers, what the user decided and has not decided, open-not-fixed items, and the contracts to know before editing codegen. Read this before anything else.
 metadata:
   node_type: memory
   type: project
-  modified: 2026-10-05
+  modified: 2026-10-07
 ---
 
 **Read this first, then [[tison_towasm_self_hosting_plan]] (distilled: instruments, traps, design invariants) only for a specific
@@ -74,7 +74,26 @@ not resolve it, and a type node naming no type parameter came back from substitu
 leaking into the next. `compileMulti(..., 2)` now fails on any second compile that differs from the first.
 **Open gap found there**: two instances of a generic function returning a closure over `T[]` store it with an erased `Array<any>`
 param, so a direct call passing `number[]` fails ("cannot convert arr:f64 to ref:Array<any>"). Also transform.ts 337 SwitchCase rest (checker FP).
-Known checker leniency noted: an object rest binds `any` (TS: `Omit<T, keys>`). Re-run the survey (ask first) before trusting rows.
+Known checker leniency noted: an object rest binds `any` (TS: `Omit<T, keys>`).
+**2026-10-07 later: survey 508/514 at `7490d09` (CI run #7).** Checker false errors fixed (`83c3b68`..`2c2c9b9`). **Async lowering is
+general now** (`7d0076d`..`88826d1`):
+- Frames hold loop variables, patterns and nested functions. A closure made in a resumable step captures the FRAME as the holder of
+  each frame local (`holderField`). Frame fields carry `declared` and are read non-null.
+- `liftSuspends` lifts any await/yield inside an expression (operands held in order, `if` arms for `&&`/`||`/`??`/`?:`).
+- BuildStateMachine flattens break/continue (with labels) and try/catch (a per-segment `handler`, with a retry loop in
+  emitResumableBody). `lowerFlattenedTry` turns `finally` into a catch-all plus a completion code.
+- Async and generator METHODS (receiver as the frame's `this`). Resumable params are bound by the outer call.
+- Lib: `fs/promises`, `Dirent`, `matchAll`, iterable RegExpMatch, `replace` with a string pattern. The loader keeps one record per
+  canonical module.
+- Probes: loadLib and TStypeCheckAsync compile.
+
+Remaining survey causes: transform.ts `class_decl` in a function body (2 rows); wasm-backend "unknown field 'scope'"; tison core.ts
+Rules ("no closure type in the program takes 1 such argument(s)").
+Still unsupported in resumables: a destructured param; await in a loop test or update; await inside `switch`; await in an optional
+call's arguments; generator `.throw()`.
+Found, not fixed: an index write past an array's end traps (`a[i] = v` on `[]`); the checker types a lib string method by its
+implementation, not its ambient declaration.
+The survey runs in CI on every push ([[tison_survey_ci]]); read its MOVED/REGRESSED, not just the total.
 Known gaps found: a generic instantiation is its own class (statics per instantiation); a literal with a method into a class-typed
 slot (`object literal for 'A' has unknown property`); `unknown + unknown` accepted; method values (`obj.m`) have no identity;
 `[].values().next().value` types `number | TResult` (a leaked type parameter); wasm lib has no `localeCompare` (wasm-backend.ts:1931,
@@ -138,7 +157,7 @@ corpus A/B vs `07b036e`: ERROR +37, GAP 182 (2026-10-05). Classify new errors wi
 or the one before, with the file's own `@option`s). False positives left: reverseMappedTupleContext.ts:47, genericContextualTypes1.ts:34/36,
 typeParameterUsedAsTypeParameterConstraint4.ts:50 (all predate 2026-10-05's commits; reverseMapped: reverse-mapped inference
 through a nested homomorphic mapped type falls back to the constraint). The corpus's tsc-clean classification is stale for many
-files, hence the instrument. difftest 2232/2234. Self-check errcount: checker/type-core/codegen 0, wasm.ts 1, wasm-backend.ts 8
+files, hence the instrument. difftest 2233/2235 (2026-10-07). Self-check errcount: checker/type-core/codegen 0, wasm.ts 1, wasm-backend.ts 8
 (`self-errors.sh` also lists wasm-backend.ts:1931 `localeCompare`). **test-towasm reads `dist`: `npm run build` before it** (lib files too).
 User decisions all DONE (builder types + dynamic-object `I`; `#own:` override slots; `new Map()` contextual; class values = constructor
 closures with a per-class env tag, statics read by tag).
