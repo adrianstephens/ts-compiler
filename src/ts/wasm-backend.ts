@@ -1764,10 +1764,10 @@ function backToDeclaredMembers(narrowed: Type, base: Type, scope: Scope): Type {
 	if (r.type !== 'union')
 		return narrowed;
 	const members	= T.unionMembers(r, scope);
-	const declared	= new Set(members.map(m => T.typeKey(m)));
+	const declared	= new Set(members.map(m => T.typeId(m)));
 	const refined	= T.unionMembers(T.resolve(scope, narrowed), scope);
 	const parts		= refined.map(p => {
-		if (declared.has(T.typeKey(p)))
+		if (declared.has(T.typeId(p)))
 			return p;
 		const from = members.filter(m => !T.isAny(m) && T.isAssignable(p, m, scope));
 		return from.length === 1 ? from[0] : p;
