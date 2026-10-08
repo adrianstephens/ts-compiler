@@ -2711,8 +2711,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// An overload set as a VALUE has one function and no name to pick an implementation by: its physical signatures merge position by position,
 	// a param missing from some overload becoming optional.
 	function mergeOverloadSigs(sigs: FullSig[]): FullSig | undefined {
-		if (!sigs.length)
-			return undefined;
+		if (sigs.length <= 1)
+			return sigs[0];
 		const maxParams = Math.max(...sigs.map(s => s.params.length));
 		const params: W.Type[] = [];
 		const defaults: (Expr | undefined)[] = [];
@@ -2720,7 +2720,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const present = sigs.filter(s => s.params.length > i);
 			const distinct = new Set(present.map(s => W.typeKey(s.params[i])));
 			const shared = distinct.size === 1 ? present[0].params[i] : W.REF_ANY;
-			if (present.length < sigs.length) {
+			// Absent from some overload, or optional in every one (`offset?: number`): a caller may omit it.
+			if (present.length < sigs.length || present.every(s => !!s.defaults[i] && T.nullLiteralKind(s.defaults[i]!) === 'undefined')) {
 				params.push(types.nullable(shared));
 				defaults.push(Identifier('undefined'));
 			} else {

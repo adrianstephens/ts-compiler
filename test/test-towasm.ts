@@ -1702,6 +1702,17 @@ async function main() {
 	}
 
 	{
+		// A callable interface's optional params stay omittable (`mergeOverloadSigs` kept no default for a param present in every signature).
+		const { callableOptionalArgs } = await compile(`
+			interface Ctor { (a: any, offset?: number, length?: number): number; size: number }
+			function make(size: number): Ctor { return Object.assign((a: any, offset?: number, length?: number) => (offset ?? 1) + (length ?? 2), { size }); }
+			const c = make(4);
+			export function callableOptionalArgs(): number { return c('x') * 100 + c('x', 5) * 10 + c.size; }
+		`);
+		check('callableOptionalArgs() (optional params of a callable interface)', callableOptionalArgs(), 374);
+	}
+
+	{
 		// `Object.values` of a struct is built as the checker types it: `{ a: 1, b: 2 }` infers `number[]` from its properties.
 		const { structValues } = await compile(`
 			export function structValues(): number { const o = { a: 1, b: 2 }; const v = Object.values(o); return v.length * 100 + v[0] + v[1] * 10 + Object.keys(o).length * 1000 + Object.entries(o).length * 10000; }
