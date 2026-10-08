@@ -5679,6 +5679,23 @@ async function main() {
 		`);
 		asyncClosure();
 		check('an async closure capturing its enclosing function', result(), 28);
+		// binary's `after`: a `Promise<void> | void` value, narrowed to `void`, passed to a callback's `void` param (a non-null `any` slot,
+		// which takes it as the placeholder an `undefined` literal is); and `Promise.resolve()` with no value.
+		const { afterSync, afterAsync, afterResult } = await compile(`
+			let hits = 0;
+			function after<V, R>(v: V, then: (value: Awaited<V>) => R): V extends Promise<any> ? Promise<Awaited<R>> : R {
+				if (!(v instanceof Promise))
+					return then(v as Awaited<V>) as any;
+				return v.then(then) as any;
+			}
+			function work(sync: boolean): Promise<void> | void { return sync ? undefined : Promise.resolve(); }
+			export function afterSync(): number { const r = after(work(true), () => { hits++; }); return hits * 10 + (r === undefined ? 1 : 0); }
+			export function afterAsync(): number { after(work(false), () => { hits += 100; }); return hits; }
+			export function afterResult(): number { return hits; }
+		`);
+		check('after() on a void value runs the callback at once', afterSync(), 11);
+		check('after() on a Promise<void> waits for it', afterAsync(), 1);
+		check('...and runs it when the promise settles', afterResult(), 101);
 		// An async body's locals live in its frame: a loop variable, a destructured name, and a loop that suspends (lowered to a plain loop first).
 		const asyncLoops = await compile(`
 			async function plain(): Promise<number> { const base = await Promise.resolve(10); let t = base; for (const x of [1, 2, 3]) t += x; return t; }

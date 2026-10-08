@@ -560,7 +560,7 @@ export class FunctionContext {
 			this.emit(I.ref.null(heapTypeOf(vt)));
 			return;
 		} else if (vt.ref === 'any') {
-			// A non-nullable `any` slot has no `null`, so a placeholder box fills it (a type param at `any` for an unrepresentable `void`); nothing reads it.
+			// A non-nullable `any` slot has no `null`, so a placeholder box fills it (an erased type parameter's); nothing reads it.
 			this.emit(I.f64.const(0), I.struct.new(types.box('f64')));
 			return;
 		}

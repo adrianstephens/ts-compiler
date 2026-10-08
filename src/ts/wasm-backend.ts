@@ -941,6 +941,8 @@ function accessorKey(kind: 'get' | 'set', name: string): string {
 
 // Call signatures alone are a plain closure; with fields beside them, a callable object (`ClassInfo.callable`).
 const onlyCalls = (members: readonly TS.TypeMember[]) => members.length > 0 && members.every(m => m.type === 'call');
+// A `void` param, field or element has no wasm value of its own: a nullable `any`, whose only value is `undefined`.
+const voidSlot = (w: W.Type): W.Type => w === 'void' ? W.REF_ANY_NULLABLE : w;
 const isStructLayout = (members: readonly TS.TypeMember[]) => !onlyCalls(members) && members.every(m => m.type === 'property' || m.type === 'method' || m.type === 'call');
 
 // A structural shape's expando identity: its member names. A named shape and its anonymous twin share it, so they get
@@ -2665,9 +2667,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const defaults = defaultsWithImplicitUndefined(func.params);
 		const omittable = (i: number) => !!defaults[i] && T.nullLiteralKind(defaults[i]!) === 'undefined';
 		const params = func.params.map((p, i) => {
-			// `void` is valid TS in a param position but has no wasm value: boxed as `any`.
 			const wt = p.typeAnnotation && typeOf(p.typeAnnotation);
-			const boxed = wt === 'void' ? W.REF_ANY : wt;
+			const boxed = wt && voidSlot(wt);
 			if (!boxed)
 				throw `function type parameter '${describeBinding(p.key)}': '${p.typeAnnotation ? T.showType(p.typeAnnotation) : '<no annotation>'}' has no representation, in '${sigText()}'`;
 			// A slot a caller may fill with `undefined` (a bare `p?: T`, or a default only the callee can apply) is nullable;
@@ -2691,7 +2692,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const element = arrayPartOf(func.rest.typeAnnotation, global)?.element;
 			const ewt = element && typeOf(element);
 			if (element && ewt)
-				restElem = { key: func.rest.key, wtype: ewt === 'void' ? W.REF_ANY : ewt, tsType: element };
+				restElem = { key: func.rest.key, wtype: voidSlot(ewt), tsType: element };
 		}
 		let result = resultTypeOf(func.returnType);
 		// A function TYPE's return annotation is a declared-type position: an inline `{value: T; consumed: number}` still needs a representation.
@@ -4018,11 +4019,11 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// `adoptErased`: a caller that stores what it gets (an unannotated local) takes a value read through an erased instantiation as it
 	// was built (`erasedTwin`), there being no conversion to `want`'s precise layout. Returns what it left on the stack.
 	function emitAs(e: Expr, ctx: FunctionContext, want: W.Type, adoptErased = false): W.Type {
-		// `null`/`undefined` alone (or asserted, `undefined as R`) is legal only into a nullable slot, or a non-nullable `any`: what a `void` param,
-		// field or local is boxed to.
+		// `null`/`undefined` alone (or asserted, `undefined as R`) is legal only into a nullable slot, or a non-nullable `any` (an erased type parameter's),
+		// which takes a placeholder.
 		if (T.isNullLiteral(unwrapAs(e))) {
 			if (W.isAny(want) && !want.nullable)
-				ctx.emit(I.f64.const(0), I.struct.new(types.box('f64')));
+				ctx.emitDefaultValue(want, types, toValType);
 			else if (!W.isNullable(want))
 				throw "'null'/'undefined' is only supported where a nullable object type (class/array/string) is expected";
 			else
@@ -5646,9 +5647,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			// names types from the SIGNATURE's module, which need not resolve here: the wanted signature is the physical truth.
 			const annotated = p.typeAnnotation && typeOf(openedAs(p, p.typeAnnotation));
 			const ctx = annotated ? undefined : wantParam(i);
-			// A wasm-unrepresentable `void` is boxed as `any`.
 			const wt = annotated || ctx?.wtype;
-			const boxed = wt === 'void' ? W.REF_ANY : wt;
+			const boxed = wt && voidSlot(wt);
 			if (!boxed) {
 				if (process.env.SHOWPARAM)
 					console.error(`PARAM '${describeBinding(p.key)}' of ${e.name ?? '<anon>'}: want=${want ? W.typeKey(want) : '-'} wantSig=${!!wantSig} fromWantTs=${ctx ? T.typeKey(ctx.tsType).slice(0, 100) : '-'} ann=${p.typeAnnotation ? T.typeKey(p.typeAnnotation).slice(0, 100) : '-'}`);
@@ -7695,8 +7695,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const rawWtype = T.isRef(T.resolveOwn(tsType, scope), 'never') ? 'void' : typeOf(tsType);
 		if (!rawWtype)
 			throw `'param '${describeBinding(p.key)}' needs an explicit type`;
-		// A wasm-unrepresentable `void` is boxed as `any`.
-		const boxed = rawWtype === 'void' ? W.REF_ANY : rawWtype;
+		const boxed = voidSlot(rawWtype);
 		// A bare `p?: T` widens to `T | undefined` with a nullable slot, as a function TYPE's optional param does, so an omitted or explicit
 		// `undefined` arrives; `tsType` widens too, or `b === undefined` on `b?: number` reads as a plain scalar.
 		if (calleeSide && T.unionMembers(tsType, scope).some(m => { const r = T.resolveOwn(m, scope); return r.type === 'literal' ? r.value === null : r.type === 'ref' && r.name === 'null'; }))
@@ -8511,9 +8510,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 
 	function addField(info: ClassInfo, key: string, typeAnnotation?: Type, optional = false) {
-		// A wasm-unrepresentable `void` is boxed as `any`.
 		const rawWt = typeAnnotation && typeOf(typeAnnotation);
-		let wt	= rawWt === 'void' ? W.REF_ANY : rawWt;
+		let wt	= rawWt && voidSlot(rawWt);
 		if (!wt) {
 			if (process.env.DBG)
 				console.error(`addField FAIL info=${info.name} key=${key} ann=${typeAnnotation ? typeAnnotation.type + ' ' + T.typeKey(typeAnnotation).replace(/\s+/g,' ').slice(0,120) : 'undefined'} resolved=${typeAnnotation ? T.typeKey(T.resolve(global, typeAnnotation)).replace(/\s+/g,' ').slice(0,120) : '-'}`);
