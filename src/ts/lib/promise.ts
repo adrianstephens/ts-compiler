@@ -126,8 +126,11 @@ export class Promise<T> {
 		});
 	}
 
-	static resolve<U>(value: U | PromiseLike<U>): Promise<U> {
-		return value instanceof Promise ? value : new Promise<U>(resolve => resolve(value));
+	// `value` is absent only through the first overload, where `U` is `void`.
+	static resolve(): Promise<void>;
+	static resolve<U>(value: U | PromiseLike<U>): Promise<U>;
+	static resolve<U>(value?: U | PromiseLike<U>): Promise<U> {
+		return value instanceof Promise ? value : new Promise<U>(resolve => resolve(value as U));
 	}
 
 	static reject<U = never>(reason?: any): Promise<U> {
