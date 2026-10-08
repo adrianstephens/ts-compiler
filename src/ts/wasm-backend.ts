@@ -3837,13 +3837,16 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const paramFits		= (p: W.Type, i: number) => (w => W.typeEq(p, w) || (typeof p !== 'string' && typeof w !== 'string')
 				|| (typeof p === 'string' && W.isAny(w)) || (typeof w === 'string' && W.isAny(p))
 				|| scalarInto(w, p) || (box => !!box && scalarInto(w, box.kind))(W.unboxedPrimitive(p)))(wantSig.params[i]);
+			// A variadic callback in a fixed slot takes the slot's params past its own fixed ones as its rest (`emitPackedRest`).
+			const packs		= !!gotSig.hasRest && !wantSig.hasRest;
+			const gotFixed	= packs ? gotSig.params.slice(0, -1) : gotSig.params;
 			// MORE params than the slot offers fits when the wrapper can supply each extra one: a defaulted or optional parameter (`(m, depth = 6)`).
-			if ((gotSig.params.length <= wantSig.params.length || gotSig.params.slice(wantSig.params.length).every((p, i) => {
+			if ((gotFixed.length <= wantSig.params.length || gotFixed.slice(wantSig.params.length).every((p, i) => {
 				const d = gotSig.defaults?.[wantSig.params.length + i];
 				return (!!d && isReemittableDefault(d)) || W.isNullable(p);
 			// A callback with no rest ignores a rest the slot passes (`() => {}` as a tagged-template function), reading only fixed positions.
-			})) && (!!gotSig.hasRest === !!wantSig.hasRest || (!gotSig.hasRest && gotSig.params.length < wantSig.params.length))
-				&& gotSig.params.slice(0, wantSig.params.length).every(paramFits)) {
+			})) && (packs || !!gotSig.hasRest === !!wantSig.hasRest || (!gotSig.hasRest && gotSig.params.length < wantSig.params.length))
+				&& gotFixed.slice(0, wantSig.params.length).every(paramFits)) {
 				const orig = ctx.temp(`$origClosure$${ctx.tempCounter++}`, got);
 				ctx.emit(I.local.set(orig));
 				const { info, wantStructTypeIndex, envTypeIndex } = ensureClosureCoercionWrapper(gotSig, wantSig);
@@ -6187,20 +6190,26 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const env		= wctx.declareLocal('#env', { typeIndex: envTypeIndex, nullable: false });
 			wctx.emit(I.local.get(envParam.index), I.ref.cast(envTypeIndex), I.local.set(env.index));
 			wctx.emit(I.local.get(env.index), I.struct.get(envTypeIndex, 0));
+			const packs		= !!gotSig.hasRest && !wantSig.hasRest;
+			const fixed		= packs ? gotSig.params.length - 1 : gotSig.params.length;
 			emitClosureCall({ closure: gotSig }, () => {
 				// Each argument coerced from what the CALLER passes to what the callback declared (the `paramFits` guard): a `ref.cast`, or nothing.
-				argLocals.slice(0, gotSig.params.length).forEach((l, i) => {
+				argLocals.slice(0, fixed).forEach((l, i) => {
 					wctx.emit(I.local.get(l.index));
 					coerceTop(wantSig.params[i], wctx, gotSig.params[i]);
 				});
 				// Params the caller never passes get the callback's own defaults, exactly as a call site omitting them would.
-				gotSig.params.slice(argLocals.length).forEach((p, i) => {
+				gotSig.params.slice(argLocals.length, fixed).forEach((p, i) => {
 					const d = gotSig.defaults?.[argLocals.length + i];
 					if (d)
 						emitAs(d, wctx, p);
 					else
 						wctx.emitDefaultValue(p, types, toValType);
 				});
+				if (packs) {
+					const omittable = wantSig.params.map((p, i) => W.isNullable(p) && !!wantSig.defaults?.[i] && T.nullLiteralKind(wantSig.defaults[i]!) === 'undefined');
+					emitPackedRest(argLocals.slice(fixed), omittable.slice(fixed), gotSig.params[fixed], gotSig.restElem?.tsType ?? T.ANY, wctx);
+				}
 			}, wctx);
 			// A `void` callback in a value-returning slot (`reject` as an `onrejected`) gives `undefined`, as calling it does in JS; a `void` slot
 			// discards what its callback returns.
@@ -6213,6 +6222,34 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			info.body = wctx.toFuncBody(1 + argLocals.length, toValType);
 		});
 		return result;
+	}
+
+	// The rest array a variadic callback gets from a fixed slot's trailing params, less trailing omittable ones left `undefined` (the user's choice,
+	// 2026-10-08: a caller cannot pass a count, so an explicit trailing `undefined` reads as omitted). An `Array<T>` rest boxes the storage.
+	function emitPackedRest(args: { index: number; wtype: W.Type }[], omittable: boolean[], restWtype: W.Type, element: Type, ctx: FunctionContext): void {
+		const cls	= storageKindOf(restWtype) === undefined ? ensureClass('Array', [element]) : undefined;
+		const kind	= storageKindOf(restWtype) ?? storageKindOf(cls?.thisType);
+		if (!kind)
+			throw `internal: a rest parameter '${W.typeKey(restWtype)}' has no array storage`;
+		const typeIndex = types.array(kind), count = ctx.temp(`$restCount$${ctx.tempCounter++}`, 'i32'), arr = ctx.temp(`$rest$${ctx.tempCounter++}`, W.ARRAY[kind]);
+		ctx.emit(I.i32.const(args.length), I.local.set(count));
+		for (let j = args.length; j-- > 0 && omittable[j];) {
+			ctx.emit(I.local.get(count), I.i32.const(j + 1), I.i32.eq, I.local.get(args[j].index), I.ref.is_null, I.i32.and);
+			ctx.emitIf(undefined, () => ctx.emit(I.i32.const(j), I.local.set(count)));
+		}
+		ctx.emit(I.local.get(count), I.array.new_default(typeIndex), I.local.set(arr));
+		args.forEach((a, j) => {
+			ctx.emit(I.i32.const(j), I.local.get(count), I.i32.lt_u);
+			ctx.emitIf(undefined, () => {
+				ctx.emit(I.local.get(arr), I.i32.const(j), I.local.get(a.index));
+				coerceTop(a.wtype, ctx, elementValueType(kind));
+				ctx.emit(I.array.set(typeIndex));
+			});
+		});
+		ctx.emit(I.local.get(arr));
+		if (cls)
+			coerceTop(W.ARRAY[kind], ctx, cls.thisType!);
+		coerceTop(cls?.thisType ?? W.ARRAY[kind], ctx, restWtype);
 	}
 
 	// Real `ToInt32`: truncate, then keep the low 32 bits; `coerceTop`'s saturating `trunc_sat` gives `i32::MAX` for `2147483648 | 0`. Saturation stays

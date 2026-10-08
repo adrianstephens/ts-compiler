@@ -1710,6 +1710,25 @@ async function main() {
 			export function callableOptionalArgs(): number { return c('x') * 100 + c('x', 5) * 10 + c.size; }
 		`);
 		check('callableOptionalArgs() (optional params of a callable interface)', callableOptionalArgs(), 374);
+		// A variadic function in a fixed slot (binary's typed-array factory: `Object.assign(ctor, ...) as any as TypedArrayConstructor<R>`): the slot's
+		// params become its rest, less trailing omitted optionals, so `args.length` is what the caller passed.
+		const { restFromFixed1, restFromFixed3, restFromFixedScalar } = await compile(`
+			interface Made { n: number }
+			interface Ctor { new(a: any, offset?: number, length?: number): Made; size: number }
+			function make(size: number): Ctor {
+				function ctor(...args: any[]): Made { return { n: args.length * 100 + (args.length > 1 ? args[1] : 0) }; }
+				return Object.assign(ctor, { size }) as any as Ctor;
+			}
+			const C = make(4);
+			export function restFromFixed1(): number { return new C('x').n; }
+			export function restFromFixed3(): number { return new C('x', 7, 9).n; }
+			type Fixed = (a: number, b?: number) => number;
+			const vf: Fixed = (...xs: number[]) => xs.length * 10 + xs.reduce((s, x) => s + x, 0);
+			export function restFromFixedScalar(): number { return vf(3) * 100 + vf(3, 4); }
+		`);
+		check('restFromFixed1() (an omitted optional is no rest element)', restFromFixed1(), 100);
+		check('restFromFixed3() (every passed param is one)', restFromFixed3(), 307);
+		check('restFromFixedScalar() (a number rest)', restFromFixedScalar(), 1327);
 	}
 
 	{
