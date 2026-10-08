@@ -5286,9 +5286,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			// An erased receiver -- typed `any`, stored as `any` (an open shape), or narrowed to a shape its declared type lacks (`'type' in c`):
 			// the field is found at run time (`ensureAnyField`). A write also reaches one through any receiver some class has the field for.
 			const refined	= !write && ctx.stampedTypeOf(unwrapAs(target.object));
-			// So is one ASSERTED `any` (`(switches as any).default`): a key its type lacks, which reads `undefined` where absent.
+			// So is one ASSERTED `any` (`(switches as any).default`): a key its type lacks, which reads `undefined` where absent. So is a key
+			// an owner with an `#ext` map does not declare (`Object.assign(e, {checkedType})`): the run-time cascade reaches that map.
 			const dynamic	= T.isAny(T.resolveOwn(ctx.narrowedTypeOf(target.object), ctx.scope)) || physicallyAny(target.object, ctx)
-				|| assertedAny(target.object) || assertedKey(target.object, prop, ctx)
+				|| assertedAny(target.object) || assertedKey(target.object, prop, ctx) || !!cls?.fieldIndex.has('#ext')
 				|| (!!refined && !!T.lookupMember(refined, prop, ctx.scope) && !T.lookupMember(checkerTypeOf(unwrapAs(target.object), ctx.scope), prop, ctx.scope))
 				|| (write && [...classes.values()].some(c => c.fieldIndex.has(prop) && c.typeIndex !== -1));
 			if (dynamic)

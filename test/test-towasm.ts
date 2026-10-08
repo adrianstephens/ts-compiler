@@ -1687,6 +1687,21 @@ async function main() {
 	}
 
 	{
+		// A shape whose instances keep undeclared keys in `#ext` (a `defineProperty` made it dynamic) takes a write of another such key through a
+		// type parameter (checker.ts's `stampType`: `Object.assign(e, {checkedType: t})`) into that map.
+		const { extWrite } = await compile(`
+			interface Ident { type: 'identifier'; name: string }
+			interface Lit { type: 'literal'; value: number }
+			type Expr = Ident | Lit;
+			const stampType = <E extends Expr>(e: E, t: number): E => Object.assign(e, { checkedType: t });
+			const typeOf = (e: Expr): number | undefined => (e as { checkedType?: number }).checkedType;
+			function defineHidden(o: object) { Object.defineProperty(o, 'hidden', { value: 1, enumerable: false }); }
+			export function extWrite(): number { const id: Ident = { type: 'identifier', name: 'xy' }; defineHidden(id); const e = stampType(id, 7); return (typeOf(e) ?? 0) * 10 + e.name.length; }
+		`);
+		check('extWrite() (an undeclared key written into an #ext map)', extWrite(), 72);
+	}
+
+	{
 		// `Object.values` of a struct is built as the checker types it: `{ a: 1, b: 2 }` infers `number[]` from its properties.
 		const { structValues } = await compile(`
 			export function structValues(): number { const o = { a: 1, b: 2 }; const v = Object.values(o); return v.length * 100 + v[0] + v[1] * 10 + Object.keys(o).length * 1000 + Object.entries(o).length * 10000; }
