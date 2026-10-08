@@ -5659,7 +5659,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (e.type !== 'arrow' && free.has('this') && !thisHolder)
 			throw "'this' inside a function expression is not supported -- only an arrow function's lexical 'this' is";
 
-		const { capturedNames, fields, envTypeIndex, pushEnv } = captureEnv(free, ctx, thisHolder);
+		// A static method's `this` is the class it is compiled for (`staticThis`), which an arrow in it shares rather than captures.
+		const staticThis = e.type === 'arrow' ? ctx.staticThis : undefined;
+		const { capturedNames, fields, envTypeIndex, pushEnv } = captureEnv(staticThis ? [...free].filter(n => n !== 'this') : free, ctx, thisHolder);
 
 		// `struct.new` takes `[code, env]` in order.
 		const build = (funcIndex: number, structTypeIndex: number, sig: FuncSig): W.Type => {
@@ -5690,7 +5692,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 		worklist.push(W.withCatchAt(() => {
 			const home		= ctx.homeScope ?? (ctx.owner ? classScope(ctx.owner) : moduleScopeOf(ctx.homeModule) ?? libGlobal);
-			const fnCtx		= Object.assign(new FunctionContext(e.name ?? '<anonymous>', new Scope(home), plainReturn(result), undefined, ctx.homeModule), { homeScope: home });
+			const fnCtx		= Object.assign(new FunctionContext(e.name ?? '<anonymous>', new Scope(home), plainReturn(result), undefined, ctx.homeModule), { homeScope: home, staticThis });
 			// Env param first (wasm param 0), then the literal's own: `toFuncBody` takes the first `1 + params.length` locals as the params.
 			const envParam	= fnCtx.declareLocal('#envParam', { typeIndex: types.envBase(), nullable: false });
 			const pending	= fnCtx.declareParams(params);

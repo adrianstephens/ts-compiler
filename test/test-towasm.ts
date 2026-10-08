@@ -5886,6 +5886,18 @@ async function main() {
 			main:	`import { viaJson } from './strs'; export function libOwnNames(): number { return viaJson(); }`,
 		}, 'main');
 		check('a lib method and its closures resolve names in the lib', libOwnNames(), 81);
+		// An arrow in a static method shares its `this`, the class it is compiled for.
+		const { staticArrow } = await compile(`
+			class Box {
+				v: number;
+				constructor(v: number) { this.v = v; }
+				static make(xs: number[]): Box[] { return xs.map(x => new this(x * 2)); }
+				static total(xs: number[]): number { return this.make(xs).reduce((a, b) => a + b.v, 0) + [1].map(() => this.unit()).length; }
+				static unit(): number { return 1; }
+			}
+			export function staticArrow(): number { return Box.total([1, 2, 3]); }
+		`);
+		check("an arrow in a static method uses the class as 'this'", staticArrow(), 13);
 		const { forwardConst } = await compile(`
 			function f(): number { const early = () => h(1); const base = 100; return early(); function h(n: number): number { return base + n; } }
 			export function forwardConst(): number { return f(); }
