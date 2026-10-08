@@ -3356,6 +3356,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			&& (cls.fields.some(f => f.name === 'length') || !!methodSig(cls, accessorKey('get', 'length'), ctx));
 	}
 
+	// Whether `cls` has a method `name`, its own or inherited: a test that compiles nothing (a generic one is instantiated per call, by its arguments).
+	const declaresMethod = (cls: ClassInfo | undefined, name: string): boolean =>
+		!!cls && (!!cls.inlineMethods?.has(name) || cls.methodDecls.has(name) || declaresMethod(cls.superClass, name));
+
 	// `cls.name`'s own method signature -- whether inline-asm or a plain declared method.
 	function methodSig(cls: ClassInfo, name: string, ctx: FunctionContext): { params: W.Type[]; result: W.Type } | undefined {
 		const inline = cls.inlineMethods?.get(name);
@@ -3616,7 +3620,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			return undefined;
 		const owners = T.unionMembers(t, ctx.scope).filter(m => !T.isNullish(m, ctx.scope))
 			.flatMap(m => flattenOwners(m, ctx.scope) ?? [undefined]);
-		if (owners.length < 2 || !owners.every(o => o && o.typeIndex !== -1 && methodSig(o, name, ctx)))
+		if (owners.length < 2 || !owners.every(o => o && o.typeIndex !== -1 && declaresMethod(o, name)))
 			return undefined;
 		const seen = new Set<number>();
 		return (owners as ClassInfo[]).filter(o => !seen.has(o.typeIndex) && (seen.add(o.typeIndex), true));
@@ -5066,16 +5070,20 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// another's own enumerable keys one by one, each through a keyed write on `any` (a closure's `#ext`, a dynamic object, a struct's field).
 	function emitDynamicAssign(target: Expr, sources: Expr[], ctx: FunctionContext): W.Type {
 		const { temp, emit, check } = lowering(ctx);
-		const anyOf	= (name: string): Expr => ({ type: 'as', expression: Identifier(name), typeAnnotation: T.ANY });
-		const t		= temp('assign');
-		emit(JS.VarDecl('const', JS.Var(t, target)));
+		const asAny	= (e: Expr): Expr => ({ type: 'as', expression: e, typeAnnotation: T.ANY });
+		// `this` or a name is read again where used, a fresh node each time, typed where it stands (a factory class's `this` is its own class,
+		// whatever the cast it was built under says); anything else is held once.
+		const held	= target.type === 'this' || target.type === 'identifier' ? undefined : temp('assign');
+		if (held)
+			emit(JS.VarDecl('const', JS.Var(held, target)));
+		const read	= (): Expr => held ? Identifier(held) : target.type === 'identifier' ? Identifier(target.name) : { type: 'this' };
 		for (const src of sources) {
 			const s = temp('source'), k = temp('key');
 			emit(JS.VarDecl('const', JS.Var(s, src)));
-			emit({ type: 'for', kind: 'of', init: JS.VarDecl('const', JS.Var(k)), right: JS.Call(JS.Member(Identifier('Object'), 'keys'), [anyOf(s)]),
-				body: JS.ExprStmt(Assign<Expr, never>(JS.Index(anyOf(t), Identifier(k)), JS.Index(anyOf(s), Identifier(k)))) });
+			emit({ type: 'for', kind: 'of', init: JS.VarDecl('const', JS.Var(k)), right: JS.Call(JS.Member(Identifier('Object'), 'keys'), [asAny(Identifier(s))]),
+				body: JS.ExprStmt(Assign<Expr, never>(JS.Index(asAny(read()), Identifier(k)), JS.Index(asAny(Identifier(s)), Identifier(k)))) });
 		}
-		return emitExpr(check(Identifier(t)), ctx);
+		return emitExpr(check(read()), ctx);
 	}
 
 	// A function given its properties where it is made (`Object.assign(fn, {k: v})`, a literal typed as a callable object) is built as one
