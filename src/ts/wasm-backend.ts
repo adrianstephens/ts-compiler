@@ -2046,6 +2046,12 @@ function primitivePart(t: TS.IntersectionType, scope: Scope): Type | undefined {
 	return t.types.find(p => T.LITERAL_PRIMITIVES.has(T.typeofName(p, scope) ?? ''));
 }
 
+// The one class an intersection extends (`Object.assign(new C(), {k})`): the value IS that instance, its extra keys expando slots.
+function classPartOf(t: TS.IntersectionType, scope: Scope): Type | undefined {
+	const classes = t.types.filter(p => T.isClassRef(p, scope));
+	return classes.length === 1 ? classes[0] : undefined;
+}
+
 
 // A value with `[Symbol.iterator]()` iterates by the protocol, as JS iterates every iterable. An array is read by position:
 // its own `[Symbol.iterator]` is for a value known only as an `Iterable`.
@@ -2846,9 +2852,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				const arr = arrayPartOf(resolved, global);
 				if (arr)
 					return typeOf(TS.ArrayType(arr.element));
-				const prim = primitivePart(resolved, global);
-				if (prim)
-					return typeOf(prim);
+				const part = primitivePart(resolved, global) ?? classPartOf(resolved, global);
+				if (part)
+					return typeOf(part);
 				// An interface extending another (binary's `TypedArray extends ArrayBufferView`) is an intersection; its members decide as an object's do.
 				if (resolved.types.some(p => (r => r.type === 'object' && numberIndexed(r))(T.resolve(global, p))))
 					return W.REF_ANY;
@@ -10366,7 +10372,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	const isOpen	= (t: Type) => openness.get(t) ?? (open => (openness.set(t, open), open))(openShapes.has(openKey(t, global)) || unbuiltShape(t));
 	const unbuiltShape = (t: Type) => {
 		const n = T.nonNullable(t, global), r = T.resolve(global, n);
-		if (T.isClassRef(n, global) || (n.type === 'ref' && READONLY_ALIAS.has(n.name)) || (r.type !== 'object' && r.type !== 'intersection') || (r.type === 'intersection' && (arrayPartOf(r, global) || primitivePart(r, global))))
+		if (T.isClassRef(n, global) || (n.type === 'ref' && READONLY_ALIAS.has(n.name)) || (r.type !== 'object' && r.type !== 'intersection') || (r.type === 'intersection' && (arrayPartOf(r, global) || primitivePart(r, global) || classPartOf(r, global))))
 			return false;
 		const s = resolvedShape(n, global);
 		// Built only by a literal that may flow to it: one sharing its member names alone (`{f64: F}` for `{f64: F & G}`) is laid out apart.

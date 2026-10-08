@@ -12755,6 +12755,21 @@ async function main() {
 	}
 
 	{
+		// A class instance carrying extra keys (`Object.assign(new C(), {k})`) is the instance, its extras expando slots.
+		const { classAndPassed, classAndAbsent, classAndLocal } = await compile(`
+			class Ctx { constructor(public name: string) {} greet() { return this.name.length; } }
+			const make = (name: string, extra?: number) => Object.assign(new Ctx(name), { extra });
+			const run = (f: (n: string) => Ctx & { extra: number | undefined }) => { const c = f('abcd'); return c.greet() + (c.extra ?? 100); };
+			export function classAndPassed(): number { return run(n => make(n, 5)); }
+			export function classAndAbsent(): number { return run(n => make(n)); }
+			export function classAndLocal(): number { const c = make('xy', 7); return c.greet() * 10 + c.extra!; }
+		`);
+		check('classAndPassed() (a closure returning `Ctx & {extra}`)', classAndPassed(), 9);
+		check('classAndAbsent() (its extra key undefined)', classAndAbsent(), 104);
+		check('classAndLocal() (a local holding one)', classAndLocal(), 27);
+	}
+
+	{
 		// TStoWasm assumes `ast` already went through TStypeCheck (which stamps `ast.scope`) -- calling it
 		// on a freshly parsed, never-checked program should fail loudly instead of silently doing the wrong thing.
 		try {
