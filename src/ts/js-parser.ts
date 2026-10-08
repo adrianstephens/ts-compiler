@@ -422,14 +422,11 @@ const object_pattern_property = Rules<ObjectPatternProperty>(
 	Rule(['[', fwd_assignment_expression, ']', ':', binding_target, '=', fwd_assignment_expression],	$ => ({ key: { computed: $[1] }, value: $[4], default: $[6] } as const)),
 );
 const object_pattern_property_list = List(object_pattern_property, ',', true);
-// KNOWN GAP: `({...x})` (a lone spread) fails to parse anywhere, ambiguous with this rule's own `'{' '...' IDENT
-// '}'` rest-binding. Unlike the analogous empty-`{}` case below, `ForceFork` doesn't fix it: the resulting GLR
-// merge can't tell "becomes a pattern" from "just a value" without seeing `=>`, and picking a side broke the more
-// common `({...x}) => ...` destructuring param. Workaround: `({...x, y: 1})` (another property) parses fine.
 export const object_pattern = Rules(
 	Rule(['{', '}'], 													_ => ObjectPattern([])),
 	Rule(['{', object_pattern_property_list, '}'], 						$ => ObjectPattern($[1])),
-	Rule(['{', '...', IDENT, '}'], 										$ => ObjectPattern([], $[2])),
+	// `forceFork`: shifting `}` here would drop `({...x})`'s literal reduce of `x`; only a later `=>` or `:` picks the pattern.
+	ForceFork(Rule(['{', '...', IDENT, '}'], 							$ => ObjectPattern([], $[2]))),
 	Rule(['{', object_pattern_property_list, ',', '...', IDENT, '}'], 	$ => ObjectPattern($[1], $[4])),
 );
 

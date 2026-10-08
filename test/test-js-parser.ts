@@ -245,6 +245,15 @@ var b = ({x, y = 1}) => x + y;
 var c = ([x, y]) => x + y;
 var d = ([x, ...rest]) => rest;
 var e = ({a: {b}}) => b;
+var f = ({...rest}) => rest;
+`);
+
+// A lone spread in parens is an object literal until a `=>` makes it a rest pattern.
+test('parenthesized lone spread', `
+var a = ({...o});
+var b = () => ({...o});
+f(({...o}));
+({...o} = p);
 `);
 
 // `=> {}` is always an empty block, never an empty object literal --
