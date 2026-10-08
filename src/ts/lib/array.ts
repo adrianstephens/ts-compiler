@@ -313,6 +313,17 @@ export class Array<T> extends ArrayBase {
 		}
 		return -1;
 	}
+	findLast(callback: (value: T, index: number, array: this) => unknown, thisArg?: any): T | undefined {
+		const i = this.findLastIndex(callback);
+		return i < 0 ? undefined : this[i];
+	}
+	findLastIndex(callback: (value: T, index: number, array: this) => unknown, thisArg?: any): number {
+		for (let i = this.length - 1; i >= 0; i--) {
+			if (callback(this[i], i, this))
+				return i;
+		}
+		return -1;
+	}
 	// TS's `this: A` is unconstrained; bounding it by `readonly T[]` (which every receiver is) lets the body read `this` as one.
 	flat<A extends readonly T[], D extends number = 1>(this: A, depth?: D): FlatArray<A, D>[] {
 		const out: FlatArray<A, D>[] = [];

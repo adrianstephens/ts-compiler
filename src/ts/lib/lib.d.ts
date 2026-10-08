@@ -377,6 +377,9 @@ interface Array<T> {
 	find<S extends T>(predicate: (value: T, index: number, obj: T[]) => value is S, thisArg?: any): S | undefined;
 	find(predicate: (value: T, index: number, obj: T[]) => unknown, thisArg?: any): T | undefined;
 	findIndex(predicate: (value: T, index: number, obj: T[]) => unknown, thisArg?: any): number;
+	findLast<S extends T>(predicate: (value: T, index: number, array: T[]) => value is S, thisArg?: any): S | undefined;
+	findLast(predicate: (value: T, index: number, array: T[]) => unknown, thisArg?: any): T | undefined;
+	findLastIndex(predicate: (value: T, index: number, array: T[]) => unknown, thisArg?: any): number;
 	reduce(callbackfn: (previousValue: T, currentValue: T, currentIndex: number, array: T[]) => T): T;
 	reduce(callbackfn: (previousValue: T, currentValue: T, currentIndex: number, array: T[]) => T, initialValue: T): T;
 	reduce<U>(callbackfn: (previousValue: U, currentValue: T, currentIndex: number, array: T[]) => U, initialValue: U): U;
@@ -445,6 +448,9 @@ interface ReadonlyArray<T> {
 	find<S extends T>(predicate: (value: T, index: number, obj: readonly T[]) => value is S, thisArg?: any): S | undefined;
 	find(predicate: (value: T, index: number, obj: readonly T[]) => unknown, thisArg?: any): T | undefined;
 	findIndex(predicate: (value: T, index: number, obj: readonly T[]) => unknown, thisArg?: any): number;
+	findLast<S extends T>(predicate: (value: T, index: number, array: readonly T[]) => value is S, thisArg?: any): S | undefined;
+	findLast(predicate: (value: T, index: number, array: readonly T[]) => unknown, thisArg?: any): T | undefined;
+	findLastIndex(predicate: (value: T, index: number, array: readonly T[]) => unknown, thisArg?: any): number;
 	reduce(callbackfn: (previousValue: T, currentValue: T, currentIndex: number, array: readonly T[]) => T): T;
 	reduce(callbackfn: (previousValue: T, currentValue: T, currentIndex: number, array: readonly T[]) => T, initialValue: T): T;
 	reduce<U>(callbackfn: (previousValue: U, currentValue: T, currentIndex: number, array: readonly T[]) => U, initialValue: U): U;
@@ -533,6 +539,8 @@ interface TypedArray<T extends number | bigint> {
 	filter(predicate: (value: T, index: number, array: this) => any, thisArg?: any): TypedArray<T>;
 	find(predicate: (value: T, index: number, obj: this) => boolean, thisArg?: any): T | undefined;
 	findIndex(predicate: (value: T, index: number, obj: this) => boolean, thisArg?: any): number;
+	findLast(predicate: (value: T, index: number, obj: this) => boolean, thisArg?: any): T | undefined;
+	findLastIndex(predicate: (value: T, index: number, obj: this) => boolean, thisArg?: any): number;
 	forEach(callbackfn: (value: T, index: number, array: this) => void, thisArg?: any): void;
 	indexOf(searchElement: T, fromIndex?: number): number;
 	join(separator?: string): string;

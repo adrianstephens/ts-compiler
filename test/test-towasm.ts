@@ -5855,6 +5855,14 @@ async function main() {
 		`);
 		check('a derived class whose base constructor uses this early', derivedEarly.top(), 213);
 		check('a local class extending Map, capturing its scope', derivedEarly.local(), 652);
+		const findLast = await compile(`
+			export function arr(): number { const a = [1, 4, 2, 8, 3]; return a.findLastIndex(x => x > 3) * 100 + (a.findLast(x => x < 3) ?? 0) * 10 + a.findLastIndex(x => x > 9) + 1; }
+			export function typed(): number { const t = new Uint8Array([5, 1, 7, 2]); return t.findLastIndex(x => x > 4) * 10 + (t.findLast(x => x < 2) ?? 9); }
+			export function narrowed(): number { const xs: (number | string)[] = [1, 'ab', 2, 'cde']; const s = xs.findLast((x): x is string => typeof x === 'string'); return s ? s.length : 0; }
+		`);
+		check('Array findLast/findLastIndex', findLast.arr(), 320);
+		check('TypedArray findLast/findLastIndex', findLast.typed(), 21);
+		check('findLast with a type predicate', findLast.narrowed(), 3);
 		const { forwardConst } = await compile(`
 			function f(): number { const early = () => h(1); const base = 100; return early(); function h(n: number): number { return base + n; } }
 			export function forwardConst(): number { return f(); }

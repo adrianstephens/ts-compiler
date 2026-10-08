@@ -328,6 +328,17 @@ export class TypedArray<T extends number | bigint> {
 		}
 		return undefined;
 	}
+	findLast(callback: (value: T, index: number, obj: this) => boolean, thisArg?: any): T | undefined {
+		const i = this.findLastIndex(callback);
+		return i < 0 ? undefined : this[i];
+	}
+	findLastIndex(callback: (value: T, index: number, obj: this) => boolean, thisArg?: any): number {
+		for (let i = this.length - 1; i >= 0; i--) {
+			if (callback(this[i], i, this))
+				return i;
+		}
+		return -1;
+	}
 	findIndex(callback: (value: T, index: number, obj: this) => boolean, thisArg?: any): number {
 		for (let i = 0; i < this.length; i++) {
 			if (callback(this[i], i, this))
