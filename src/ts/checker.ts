@@ -1349,7 +1349,8 @@ const asRange = (t: Type, scope: Scope) => {
 function arithmetic(op: JS.binaryOps, lt: Type, rt: Type, scope: Scope): Type {
 	if (op === '+' && (T.isStringLike(lt, scope) || T.isStringLike(rt, scope)))
 		return T.STRING;
-	if (T.isAny(T.resolveOwn(lt, scope)) || T.isAny(T.resolveOwn(rt, scope)))
+	// Only `+` may concatenate: any other operator on `any` is a number, or a bigint beside one, as tsc gives.
+	if (op === '+' && (T.isAny(T.resolveOwn(lt, scope)) || T.isAny(T.resolveOwn(rt, scope))))
 		return T.ANY;
 	const lr = T.toRange(T.resolveOwn(lt, scope)), rr = T.toRange(T.resolveOwn(rt, scope));
 	const nr = lr && rr && T.rangeBinOp(op, lr, rr);
@@ -2614,7 +2615,7 @@ export function typeOf(e: Expr, scope: Scope, widen = true, expected?: Type, yie
 					return stepped;
 				const r = T.resolveOwn(argT, scope);
 				if (T.isAny(r))
-					return T.ANY;
+					return T.NUMBER;
 				const nr = numericSlot(argT, scope);
 				if (nr)
 					return T.rangeToType(T.rangeUnOp(e.operator, nr)!);
