@@ -94,6 +94,21 @@ call's arguments; generator `.throw()`.
 Found, not fixed: an index write past an array's end traps (`a[i] = v` on `[]`); the checker types a lib string method by its
 implementation, not its ambient declaration.
 The survey runs in CI on every push ([[tison_survey_ci]]); read its MOVED/REGRESSED, not just the total.
+**2026-10-07 end: CI run #12 at `88826d1` gave 510/514.** Since then (`f5b2ed2`..`517b4e0`), probes compile: transform.ts resolveTypes and
+TStoDecl, tison core.ts Rules. TStoWasm now gets past ensureForwardHolder, JSON.stringify, the factory constructor and its arrows,
+stopping in the lib's `TypedArray<number>` ("cannot convert (ref any)=>any to a 3-param closure").
+- Local classes: `LocalClass` marks the node; the declaration captures an env (captureEnv, shared with closures) into a binding of its
+  name, and instances hold it in `#env`.
+- Derived constructors build `this` early (`ctorEarlyThis`).
+- Any-calls reach closures with fewer params. An asserted key is read by name (`assertedKey`). Lib classes resolve in `libRoot`, and
+  closures in their enclosing method's home scope (`homeScope`). Arrows share a static method's `this`.
+- `declaresMethod` is the existence test for union owners. A pure Object.assign target is not held.
+Found, not fixed:
+- Entry-module functions and lib functions share one bare-name `funcs` namespace (an entry `const String` is called from lib code).
+- A factory class's re-check stamps `any` where the template narrowed.
+- A union-receiver call of an overloaded generic method has no checker resolution.
+- A small factory repro (named class expression, mapped cast, `Object.assign(this, s)`) fails at run time, "illegal cast".
+- A local class used as a value, or one extending another local class, throws (unsupported).
 Known gaps found: a generic instantiation is its own class (statics per instantiation); a literal with a method into a class-typed
 slot (`object literal for 'A' has unknown property`); `unknown + unknown` accepted; method values (`obj.m`) have no identity;
 `[].values().next().value` types `number | TResult` (a leaked type parameter); wasm lib has no `localeCompare` (wasm-backend.ts:1931,
