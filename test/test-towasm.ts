@@ -1751,6 +1751,23 @@ async function main() {
 	}
 
 	{
+		// A rest parameter of tuple type is that many fixed ones, as TS reads `(...args: [number, string?]) => R`.
+		const { restTuple } = await compile(`
+			type F = (...args: [number, string?]) => number;
+			const f: F = (n, s) => n + (s?.length ?? 0);
+			export function restTuple(): number { return f(1) * 10 + f(2, 'abc'); }
+		`);
+		check('restTuple() (a tuple rest as fixed params)', restTuple(), 15);
+		// An intrinsic static (`static abs = __asm<[number], number>(...)`) as a value: the function applying it, typed `(a0: number) => number`.
+		const { asmValue, asmMapped } = await compile(`
+			export function asmValue(): number { const f = Math.abs; return f(-3); }
+			export function asmMapped(): number { return [-1, 2, -3].map(Math.abs).reduce((a, b) => a + b, 0); }
+		`);
+		check('asmValue() (Math.abs held in a const)', asmValue(), 3);
+		check('asmMapped() (Math.abs passed as a callback)', asmMapped(), 6);
+	}
+
+	{
 		// `Object.values` of a struct is built as the checker types it: `{ a: 1, b: 2 }` infers `number[]` from its properties.
 		const { structValues } = await compile(`
 			export function structValues(): number { const o = { a: 1, b: 2 }; const v = Object.values(o); return v.length * 100 + v[0] + v[1] * 10 + Object.keys(o).length * 1000 + Object.entries(o).length * 10000; }

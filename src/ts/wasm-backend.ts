@@ -496,6 +496,27 @@ function isAsm(e?: Expr): e is JS.Call<Type> {
 	return e?.type === 'call' && e.callee.type === 'identifier' && e.callee.name === '__asm';
 }
 
+// A rest parameter of TUPLE type is that many fixed ones, as TS reads it: `(...args: [number, string?]) => R` is `(args_0: number, args_1?: string) => R`.
+function fixedRest<S extends JS.CallSig<Type>>(sig: S, scope: Scope): S {
+	const t = sig.rest?.typeAnnotation && T.resolveOwn(sig.rest.typeAnnotation, scope);
+	if (t?.type !== 'tuple' || !t.elements.every((e): e is Exclude<TS.TupleElement, { type: 'spread' }> => e.type !== 'spread'))
+		return sig;
+	const name = typeof sig.rest!.key === 'string' ? sig.rest!.key : 'args';
+	return { ...sig, rest: undefined, params: [...sig.params, ...t.elements.map((e, i): JS.Param<Type> => e.type === 'optional' || e.type === 'labeled'
+		? { key: `${name}_${i}`, typeAnnotation: e.element, modifiers: e.type === 'optional' || e.optional ? ['optional'] : undefined }
+		: { key: `${name}_${i}`, typeAnnotation: e })] };
+}
+
+// An intrinsic as a VALUE (`Math.abs` read, `arr.map(Math.abs)`): it stores nothing, so it is the function applying it, a parameter per element of `P`.
+function asmFunction(asm: JS.Call<Type>, scope: Scope): { value: JS.Arrow<Type>; type: TS.FunctionType } | undefined {
+	const [args, returnType] = asm.typeArgs ?? [];
+	if (args?.type !== 'tuple' || !returnType)
+		return undefined;
+	const types		= T.elementTypes(args, scope), names = types.map((_, i) => `a${i}`);
+	const params	= types.map((t, i): JS.Param<Type> => ({ key: names[i], typeAnnotation: t }));
+	return { value: JS.Arrow({ params, returnType }, JS.Call(asm, names.map(n => Identifier(n)))), type: TS.FunctionType({ params, returnType }) };
+}
+
 function isAsmMethod(m: JS.Method<Type>): JS.Call<Type> | undefined {
 	if (m.body?.[0]?.type === 'return') {
 		const outer = m.body[0].argument;
@@ -2241,7 +2262,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	// The entry's scope comes from its own `Program`, an imported module's from `makeScope` (see `compileFunc`);
 	// `homeModule` is optional on a `ClassInfo`, and "no module" or "no scope yet" both mean: use your own.
 	function moduleScopeOf(homeModule: string | undefined): Scope | undefined {
-		return homeModule === undefined ? undefined : homeModule === '.' ? global : moduleBodies.get(homeModule)?.scope as Scope | undefined;
+		return homeModule === undefined ? undefined : homeModule === '.' ? global : homeModule === LIB_MODULE ? libGlobal : moduleBodies.get(homeModule)?.scope as Scope | undefined;
 	}
 
 	function moduleFilename(homeModule: string): string | undefined {
@@ -2590,8 +2611,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	function staticGlobal(owner: ClassInfo, f: JS.Field<Type>) {
 		const key		= String(f.key), name = `${owner.name}.${key}`, home = owner.homeModule ?? LIB_MODULE;
 		const scope		= classScope(owner);
-		const declared	= f.typeAnnotation ?? (f.value && T.widenLiterals(checkerTypeOf(f.value, scope)));
-		const wrapper	= ensureLazyGlobal(name, home, JS.Var(key, f.value, declared), scope, owner, declared);
+		const asm		= isAsm(f.value) ? asmFunction(f.value, scope) : undefined;
+		const declared	= asm?.type ?? f.typeAnnotation ?? (f.value && T.widenLiterals(checkerTypeOf(f.value, scope)));
+		const wrapper	= ensureLazyGlobal(name, home, JS.Var(key, asm?.value ?? f.value, declared), scope, owner, declared);
 		const slot		= lazyGlobalSlots.get(homeKey(home, name));
 		if (!wrapper || !slot)
 			throw `static field '${name}' has no representation`;
@@ -2664,7 +2686,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 	function closureSigParts(sig: TS.CallSig): FullSig | undefined {
 		// A bounded type parameter is free here, at its bound (as in `emitClosureLiteral`).
-		const func = T.baseSignature(sig, T.ANY);
+		const func = fixedRest(T.baseSignature(sig, T.ANY), global);
 		// The whole signature, not just the parameter: it reaches a caller from some enclosing declaration's type.
 		const sigText = () => T.showType({ type: 'function', ...sig } as Type);
 		const defaults = defaultsWithImplicitUndefined(func.params);
