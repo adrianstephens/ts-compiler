@@ -5863,6 +5863,12 @@ async function main() {
 		check('Array findLast/findLastIndex', findLast.arr(), 320);
 		check('TypedArray findLast/findLastIndex', findLast.typed(), 21);
 		check('findLast with a type predicate', findLast.narrowed(), 3);
+		// A call through `any` reaches a closure taking fewer parameters than it passes: JS ignores the extra arguments.
+		const { fewerParams } = await compile(`
+			function callIt(f: any): number { return f(10, 20); }
+			export function fewerParams(): number { return callIt(() => 7) + callIt((a: number) => a); }
+		`);
+		check('a call through any to a closure with fewer parameters', fewerParams(), 17);
 		const { forwardConst } = await compile(`
 			function f(): number { const early = () => h(1); const base = 100; return early(); function h(n: number): number { return base + n; } }
 			export function forwardConst(): number { return f(); }

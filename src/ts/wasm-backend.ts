@@ -10064,8 +10064,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			&& argWtypes.slice(0, fixedCount(c.sig)).every((w, i) => fits(w, c.sig.params[i])));
 	}
 	const fixedCount = (sig: W.ClosureSig) => sig.hasRest ? sig.params.length - 1 : sig.params.length;
-	// A parameter no argument fills receives `undefined`, which only a nullable or `any` slot holds.
-	const takesArgCount = (sig: W.ClosureSig, n: number) => (sig.hasRest ? anyRest(sig) : sig.params.length >= n)
+	// A parameter no argument fills receives `undefined`, which only a nullable or `any` slot holds; an argument past the last parameter is
+	// dropped, as JS ignores it (`dispatchArm` pushes one per parameter).
+	const takesArgCount = (sig: W.ClosureSig, n: number) => (!sig.hasRest || anyRest(sig))
 		&& sig.params.slice(n, fixedCount(sig)).every(p => W.isNullable(p) || W.isAny(p));
 	const anyRest = (sig: W.ClosureSig) => storageKindOf(sig.params[sig.params.length - 1]) === 'ref';
 	// The arguments held in `args`, into a rest signature's fixed parameters and then its `any`-element rest storage.
