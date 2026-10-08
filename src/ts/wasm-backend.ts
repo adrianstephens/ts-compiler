@@ -1924,7 +1924,7 @@ function layoutArgKey(t: Type, scope: Scope): string {
 }
 // One struct per LAYOUT (`ownsLayout`): `Box<number>`'s `T[]` is a real `number[]`, while every reference argument
 // erases to its constraint -- wasm fields are invariant, so separate `R<C>`/`R<{x}>` could never convert.
-// Erased only while that keeps the member NAMES: `Omit<C, 'k'>`'s come from its arguments, so it keeps them.
+// Not erased where that makes a fixed layout with other member names (`Omit<C, 'k'>` as `Omit<any, keyof any>` has none); a dynamic one holds any key.
 function layoutArgs(ref: TS.RefType, typeParams: readonly TS.TypeParam[] | undefined, scope: Scope): Type[] {
 	const chosen = new Map<string, Type>();
 	const full = (typeParams ?? []).map((p, i) => {
@@ -1933,8 +1933,9 @@ function layoutArgs(ref: TS.RefType, typeParams: readonly TS.TypeParam[] | undef
 		return arg;
 	});
 	const erased	= full.map((a, i) => ownsLayout(a, scope) ? a : typeParams![i].constraint ?? T.ANY);
-	const names		= (args: Type[]) => (o => o && shapeKey(o.members))(T.resolveObjectType({ ...ref, typeArgs: args }, scope));
-	return erased.every((a, i) => a === full[i]) || names(erased) === names(full) ? erased : full;
+	const shape		= (args: Type[]) => T.resolveObjectType({ ...ref, typeArgs: args }, scope);
+	const lossy		= () => (e => !!e && isStructLayout(e.members) && shapeKey(e.members) !== (f => f && shapeKey(f.members))(shape(full)))(shape(erased));
+	return erased.every((a, i) => a === full[i]) || !lossy() ? erased : full;
 }
 function layoutKey(name: string, args: readonly Type[], scope: Scope): string {
 	return args.length ? `${name}<${args.map(a => layoutArgKey(a, scope)).join(',')}>` : name;
