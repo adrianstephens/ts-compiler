@@ -1666,6 +1666,27 @@ async function main() {
 	}
 
 	{
+		// A receiver ASSERTED `any` deletes as one typed `any` does (binary's `popObj`: `delete (obj as any).obj`), on a struct's expando or a dynamic object.
+		const { delAsserted, delAssertedDynamic } = await compile(`
+			class Stack {
+				obj: any = undefined;
+				push<T extends object>(o: T) { (o as any).obj = this.obj; this.obj = o; }
+				popObj<T extends object>(obj: T = this.obj) { this.obj = (obj as any).obj; delete (obj as any).obj; return obj; }
+			}
+			interface P { x: number }
+			export function delAsserted(): number {
+				const s = new Stack(), a: P = { x: 1 }, b: P = { x: 2 };
+				s.push(a); s.push(b);
+				const top = s.popObj<P>();
+				return top.x * 10 + (s.obj === a ? 1 : 0) + ((top as any).obj === undefined ? 100 : 0);
+			}
+			export function delAssertedDynamic(): number { const r: Record<string, number> = { p: 1, q: 2 }; const o: object = r; delete (o as any).p; return Object.keys(r).length; }
+		`);
+		check('delAsserted() (delete through an asserted any on a struct)', delAsserted(), 121);
+		check('delAssertedDynamic() (and on a dynamic object)', delAssertedDynamic(), 1);
+	}
+
+	{
 		// `Object.values` of a struct is built as the checker types it: `{ a: 1, b: 2 }` infers `number[]` from its properties.
 		const { structValues } = await compile(`
 			export function structValues(): number { const o = { a: 1, b: 2 }; const v = Object.values(o); return v.length * 100 + v[0] + v[1] * 10 + Object.keys(o).length * 1000 + Object.entries(o).length * 10000; }

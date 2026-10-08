@@ -3433,6 +3433,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 	// An object ASSERTED `any` (`(switches as any).default`) is read as one: a key its type lacks reads `undefined` where absent.
 	const assertedAny = (e: Expr) => e.type === 'as' && T.isAny(e.typeAnnotation);
+	const readsAsAny = (e: Expr, ctx: FunctionContext) => T.isAny(ctx.narrowedTypeOf(e)) || assertedAny(e);
 	// A key an assertion declares that the value's own layout lacks (`(node as { scope?: Scope }).scope`, an expando the checker adds): by name.
 	const assertedKey = (e: Expr, key: string, ctx: FunctionContext): boolean =>
 		e.type === 'as' && (!!T.lookupMember(T.nonNullable(ctx.typeAt(e), ctx.scope), key, ctx.scope) || assertedKey(e.expression, key, ctx));
@@ -5381,7 +5382,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 			// A key on an erased receiver -- typed `any`, or a union of differing structs boxed as one: each class's arm is picked
 			// by `ref.test` at run time, as JS reads `x[k]`.
-			if (T.isAny(ctx.narrowedTypeOf(target.object)) || physicallyAny(target.object, ctx) || assertedAny(target.object)) {
+			if (readsAsAny(target.object, ctx) || physicallyAny(target.object, ctx)) {
 				if (stringKey)
 					return { wtype: W.REF_ANY_NULLABLE, operands: [expr(target.object, W.REF_ANY), expr(target.index, keyWtype)],
 						load:	() => ctx.emit(I.call(ensureAnyKey('get').funcIndex)),
@@ -6629,7 +6630,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 						emitAs(object, ctx, cls.thisWtype!);
 						return emitMethodCall(cls, 'delete', [key], ctx);
 					}
-					if (T.isAny(ctx.narrowedTypeOf(object))) {
+					if (readsAsAny(object, ctx)) {
 						emitAs(object, ctx, W.REF_ANY);
 						emitAs(T.isNumberLike(ctx.narrowedTypeOf(key), ctx.scope) ? JS.Call(Identifier('String'), [key]) : key, ctx, typeOf(T.STRING)!);
 						ctx.emit(I.call(ensureAnyKey('delete').funcIndex));
