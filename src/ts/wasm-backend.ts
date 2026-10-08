@@ -305,6 +305,9 @@ class FunctionContext extends W.FunctionContext {
 	initializing?:		JS.Var<Type>[];
 	// A static method's `this`: the class it was called on, one compile per such class where the body reads `this` (`ensureMethod`).
 	staticThis?:		ClassInfo;
+	// A closure's: the scope its enclosing method's or function's free names resolve in (a class's own, the lib's for a lib class), which a nested
+	// closure inherits; a function's is its module's.
+	homeScope?:			Scope;
 
 
 	constructor(name: string, public scope: Scope, public onReturn: ReturnHandler, public owner?: ClassInfo, public homeModule = '.') {
@@ -5686,7 +5689,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			: undefined;
 
 		worklist.push(W.withCatchAt(() => {
-			const fnCtx		= new FunctionContext(e.name ?? '<anonymous>', new Scope(moduleScopeOf(ctx.homeModule) ?? libGlobal), plainReturn(result), undefined, ctx.homeModule);
+			const home		= ctx.homeScope ?? (ctx.owner ? classScope(ctx.owner) : moduleScopeOf(ctx.homeModule) ?? libGlobal);
+			const fnCtx		= Object.assign(new FunctionContext(e.name ?? '<anonymous>', new Scope(home), plainReturn(result), undefined, ctx.homeModule), { homeScope: home });
 			// Env param first (wasm param 0), then the literal's own: `toFuncBody` takes the first `1 + params.length` locals as the params.
 			const envParam	= fnCtx.declareLocal('#envParam', { typeIndex: types.envBase(), nullable: false });
 			const pending	= fnCtx.declareParams(params);
@@ -8807,6 +8811,8 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const local			= localClassOf(decl);
 			const homeModule	= stmtHomeModule.get(decl) ?? local?.home;
 			const localScope	= local && (decl as { scope?: Scope }).scope;
+			// A lib class resolves its names in the lib, whatever module first named it (binary's `types` declares its own `String`).
+			const libScope		= LIB_DECL_MAP.get(name) === decl ? libRoot : undefined;
 			const generic		= !!decl.typeParams?.length;
 			if (decl.typeParams?.length) {
 				const got = typeArgs?.length ?? 0;
@@ -8818,7 +8824,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				decl = substituteClassTypeParam(decl, new Map(decl.typeParams.map((p, i) => [p.name, i < got ? typeArgs![i] : p.default!])));
 			}
 			// `thisTsType` names the class and its type arguments, not the composite key, or `this.length` cannot resolve.
-			const home			= localScope ?? moduleScopeOf(homeModule);
+			const home			= localScope ?? moduleScopeOf(homeModule) ?? libScope;
 			const thisTsType	= { ...TS.RefType(name, typeArgs), declScope: home ?? declScope };
 			// Re-checked, as a generic function's instance is: its stamps must be this instantiation's, not the erased template's.
 			if (generic) {

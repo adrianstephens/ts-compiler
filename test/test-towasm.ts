@@ -5878,6 +5878,14 @@ async function main() {
 			export function absent(): number { const n: N = { type: 'n', v: 1 }; return read(n); }
 		`);
 		check('a key only an assertion declares, absent', assertedKeys.absent(), -1);
+		// A lib class resolves its names in the lib, and a closure in one of its methods does too, whichever module first names the class:
+		// a module's own `String` is not the lib's (binary's `types` declares one).
+		const { libOwnNames } = await compileMulti({
+			strs:	`export const String = (x: unknown): string => 'shadowed';
+				export function viaJson(): number { const s = JSON.stringify({ a: 1, b: 2 }, ['a'])!; return (s === '{"a":1}' ? 1 : 0) + String(1).length * 10; }`,
+			main:	`import { viaJson } from './strs'; export function libOwnNames(): number { return viaJson(); }`,
+		}, 'main');
+		check('a lib method and its closures resolve names in the lib', libOwnNames(), 81);
 		const { forwardConst } = await compile(`
 			function f(): number { const early = () => h(1); const base = 100; return early(); function h(n: number): number { return base + n; } }
 			export function forwardConst(): number { return f(); }
