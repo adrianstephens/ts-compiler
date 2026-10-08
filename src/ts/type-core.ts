@@ -2904,8 +2904,8 @@ export function isAssignable(src: Type, dst: Type, scope: Scope, dstScope: Scope
 				const boxedSrc = scope.semantics.boxed(src.name);
 				if (boxedSrc && (isClassRef(dst, dstScope) || dst.name === 'Array' || dst.name === 'ReadonlyArray'))
 					return boxedSrc === dst.name;
-				// Under strict null checks (else answered above) `undefined`/`null` are assignable to no class: `undefined extends T[]` is false.
-				if (isNullOrUndefined(src))
+				// Under strict null checks (else answered above) `undefined`/`null` are assignable to no class: `undefined extends T[]` is false. Nor is `void`, in either mode.
+				if (isNullOrUndefined(src) || src.name === 'void')
 					return false;
 				return !(INTRINSIC_TYPES.has(src.name) && INTRINSIC_TYPES.has(dst.name));	// distinct primitives: no; unresolved names: lenient
 			}
