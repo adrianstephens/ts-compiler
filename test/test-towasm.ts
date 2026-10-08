@@ -2175,6 +2175,21 @@ async function main() {
 		check('Omit: the omitted property really is gone',
 			typeErrors(`type To = { field?: number; other: string }; type F = Omit<To, "field">; declare const f: F; const bad = f.field;`)
 				.some(x => /Property 'field' does not exist/.test(x)), true);
+		// Its arguments decide its member names, so its struct is built from them, not from their erasure (`Omit<any, keyof any>` has none).
+		const { omitLocal, omitArray, omitMap } = await compile(`
+			interface Cap { name: string; index: number; extra?: number }
+			export function omitLocal(): number { const x: Omit<Cap, 'name'> = { index: 3 }; return x.index; }
+			export function omitArray(): number { const a: Omit<Cap, 'name'>[] = []; a.push({ index: 4 }); return a[0].index; }
+			export function omitMap(): number {
+				const m = new Map<string, Omit<Cap, 'name'>>();
+				m.set('a', { index: 3, extra: 4 });
+				m.set('b', { index: 5 });
+				return m.get('a')!.index * 10 + m.get('b')!.index + (m.get('a')!.extra ?? 0) * 100;
+			}
+		`);
+		check('omitLocal() (a literal into an Omit slot)', omitLocal(), 3);
+		check('omitArray() (an Omit element)', omitArray(), 4);
+		check('omitMap() (an Omit value type argument)', omitMap(), 435);
 		check('Omit: a non-matching key removes nothing',
 			typeErrors(`type To = { field?: number; other: string }; type F = Omit<To, "nope">; declare const f: F; const ok: string = f.other;`).length, 0);
 		// The deferral half: an unbound type parameter leaves the conditional undecidable, and guessing
