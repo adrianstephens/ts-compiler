@@ -4512,7 +4512,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		| { kind: 'union'; owners: ClassInfo[]; name: string; recv: CallRecv }
 		| { kind: 'dynamic'; name: string; recv: CallRecv }
 		| { kind: 'closure'; wtype: W.ClosureType; optional: boolean }
-		| { kind: 'anyValue' }
+		| { kind: 'anyValue'; optional: boolean }
 		| { kind: 'unreached'; recv: Expr };
 
 	function classifyCall(e: CallNode, ctx: FunctionContext, want?: W.Type): Callee {
@@ -4601,7 +4601,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		if (closure)
 			return { kind: 'closure', wtype: closure, optional: !!e.optional };
 		if ((T.isAny(ctx.narrowedTypeOf(callee)) || physicallyAny(callee, ctx)) && !e.arguments.some(a => a.type === 'spread'))
-			return { kind: 'anyValue' };
+			return { kind: 'anyValue', optional: !!e.optional };
 		throw 'only direct calls to named functions, methods, or Math intrinsics are supported';
 	}
 
@@ -4701,10 +4701,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			case 'unreached':
 				return emitGuardedCall(c.recv, W.REF_ANY, W.REF_ANY, want, () => (ctx.emit(I.unreachable), W.REF_ANY), ctx);
 			case 'anyValue': {
-				emitAs(e.callee, ctx, W.REF_ANY);
-				const info = ensureAnyCallDispatch(emitDynamicArgs(e.arguments, ctx), want ?? W.REF_ANY);
-				ctx.emit(I.call(info.funcIndex));
-				return info.result;
+				const call = (result: W.Type) => (info => (ctx.emit(I.call(info.funcIndex)), info.result))(ensureAnyCallDispatch(emitDynamicArgs(e.arguments, ctx), result));
+				if (!c.optional) {
+					emitAs(e.callee, ctx, W.REF_ANY);
+					return call(want ?? W.REF_ANY);
+				}
+				return emitGuardedCall(e.callee, W.REF_ANY, W.REF_ANY, want, push => (push(W.REF_ANY), call(want === 'void' ? 'void' : W.REF_ANY)), ctx);
 			}
 		}
 	}

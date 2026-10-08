@@ -6807,6 +6807,19 @@ async function main() {
 	}
 
 	{
+		// `f?.()` where the callee is `any` or a generic keyed read (walker.ts's `fields[k]?.(node[k])`): an absent one short-circuits too.
+		const { optionalAnyCall, optionalKeyedCall } = await compile(`
+			export function optionalAnyCall(): number { const fs: any[] = [(x: number) => x + 1, undefined]; return (fs[0]?.(4) ?? -1) * 10 + (fs[1]?.(4) ?? -1); }
+			type Mappers<N> = Partial<{[K in keyof N]: (x: N[K]) => N[K]}>;
+			function apply<N extends Record<string, any>>(node: N, fields: Mappers<N>, key: keyof N): number { return fields[key]?.(node[key]) === undefined ? 0 : 1; }
+			interface Block { kind: string; body: number[] }
+			export function optionalKeyedCall(): number { const b: Block = { kind: 'b', body: [1] }; const m = { body: (x: number[]) => x }; return apply(b, m, 'body') * 10 + apply(b, m, 'kind'); }
+		`);
+		check('optionalAnyCall()', optionalAnyCall(), 49);
+		check('optionalKeyedCall()', optionalKeyedCall(), 10);
+	}
+
+	{
 		// A resumable function registers under its MODULE-qualified name, as an ordinary one does: two modules declaring the same
 		// generator (or async function) otherwise overwrote each other, leaving a reserved funcIndex with no body -- a malformed
 		// module. Its body also resolves in its own module's scope, so a module-local name it calls is found there.
