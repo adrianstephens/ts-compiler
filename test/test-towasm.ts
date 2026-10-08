@@ -1738,6 +1738,16 @@ async function main() {
 			export function uninitField(): number { const h = new Holder<number[]>(); const before = h.last === undefined ? 1 : 0; h.put([4, 5]); return before * 100 + h.count * 10 + h.last![1]; }
 		`);
 		check('uninitField() (an uninitialized T | undefined field)', uninitField(), 115);
+		// A call through `any` reaches no candidate whose parameter cannot hold its argument's kind (a struct for a number), a method's as a held closure's.
+		const { anyDispatchKinds } = await compile(`
+			class Mod { n = 1 }
+			class Holder<T> { last: T | undefined; put(s: any, v: T) { this.last = v; return 1; } }
+			class Num { total = 0; put(s: any, v: number) { this.total += v; return 2; } }
+			const h = new Holder<Mod>();
+			h.put(0, new Mod());
+			export function anyDispatchKinds(): number { const n = new Num(); const a: any = n; const r = a.put(0, 5); return r * 10 + n.total; }
+		`);
+		check('anyDispatchKinds() (a number argument skips a struct-taking put)', anyDispatchKinds(), 25);
 	}
 
 	{

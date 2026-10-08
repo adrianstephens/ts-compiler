@@ -10187,8 +10187,12 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		return synthesize(`<any dispatch>.${name}(${argWtypes.map(W.typeKey).join(',')})=>${W.typeKey(want)}`, () => ({
 			params: [param('recv'), ...argWtypes.map((wtype, i) => param(`arg${i}`, wtype))], result: want,
 		}), (dctx, [recv, ...args]) => {
+			// No argument of a kind its parameter cannot hold (a struct for a number): a reference is cast at run time, a scalar boxed or unboxed.
+			const scalar	= (x: W.Type) => typeof x === 'string' || !!W.unboxedPrimitive(x);
+			const takes		= (params: W.Type[], hasRest?: boolean) => argWtypes.every((w, i) => i >= (hasRest ? params.length - 1 : params.length)
+				|| W.isAny(w) || W.isAny(params[i]) || scalar(w) === scalar(params[i]));
 			// A candidate whose result cannot become what the call wants is never the one a correct program calls.
-			const methods = findAnyDispatchCandidates(name, argTs, ctx).filter(c => want === 'void' || fits(c.funcInfo.result, want));
+			const methods = findAnyDispatchCandidates(name, argTs, ctx).filter(c => (want === 'void' || fits(c.funcInfo.result, want)) && takes(c.funcInfo.params, c.funcInfo.hasRest));
 			// A method written in an object literal (or a class's arrow field) is a closure held in a field of that name.
 			const held = [...classes.values()].flatMap(cls => {
 				const idx	= cls.fieldIndex.get(name);
@@ -10196,11 +10200,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 				if (!wt)
 					return [];
 				const sig	= closureSigOf(wt);
-				// No argument of a kind its parameter cannot hold (a struct for a number): a reference is cast at run time, a scalar boxed or unboxed.
-				const fixed	= sig.hasRest ? sig.params.length - 1 : sig.params.length;
-				const scalar	= (x: W.Type) => typeof x === 'string' || !!W.unboxedPrimitive(x);
-				const takes	= argWtypes.every((w, i) => i >= fixed || W.isAny(w) || W.isAny(sig.params[i]) || scalar(w) === scalar(sig.params[i]));
-				return takesArgCount(sig, argTs.length) && takes && (want === 'void' || fits(sig.result, want)) ? [{ cls, idx: idx!, wt }] : [];
+				return takesArgCount(sig, argTs.length) && takes(sig.params, sig.hasRest) && (want === 'void' || fits(sig.result, want)) ? [{ cls, idx: idx!, wt }] : [];
 			});
 			// An entry looked up by `name` at run time -- a dynamic object's, a closure's `#ext` -- is called through `any`.
 			const callEntry = (got: W.Type) => {
