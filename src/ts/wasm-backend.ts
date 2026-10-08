@@ -770,6 +770,17 @@ function describeBinding(t: BindingTarget): string {
 
 // `this` is a real object only once every required field has a value (`ensureCtor`'s `materializeThis`); until then a direct `this.f` reads `f`'s local.
 // What needs the OBJECT early: a nested function mentioning `this`, a method or accessor called on it, or `this` as a value. Walked in `emitCtorStatements`' order.
+// A slot `emitDefaultValue` can fill: a scalar, a nullable reference, or `any`.
+const hasDefault = (w: W.Type) => typeof w === 'string' || W.isNullable(w) || W.isAny(w);
+
+// Whether a constructor statement needs the object itself, beyond reading fields it has collected (`ctorFields`).
+function needsThis(st: Stmt, collected: ReadonlyMap<string, unknown>): boolean {
+	return walkerB(
+		(s, process) => s.type === 'return' || process(s),
+		(x, process) => x.type === 'member' && x.object.type === 'this' && collected.has(x.property) ? false : x.type === 'this' || process(x)
+	).statement(st);
+}
+
 function ctorNeedsEarlyThis(decl: TS.Class): boolean {
 	const mentionsThis	= (x: Expr) => walkerB(undefined, (y, process) => y.type === 'this' || process(y)).expression(x);
 	const fields		= decl.body.filter((m): m is JS.Field<Type> => m.type === 'field' && !m.modifiers?.includes('static'));
@@ -7053,7 +7064,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		const wtype = typeOf(tsType);
 		if (!wtype || wtype === 'void')
 			throw `local '${name}' has an unsupported type`;
-		const defaultable = typeof wtype === 'string' || W.isNullable(wtype) || W.isAny(wtype);
+		const defaultable = hasDefault(wtype);
 		const hoisted = ctx.closureEnv?.frame ? ctx.closureEnv.fields.get(name) : undefined;
 		if (hoisted) {
 			if (defaultable) {
@@ -9093,6 +9104,10 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			if (st.type === 'expression' && st.expression.type === 'assign' && !st.expression.operator && st.expression.target.type === 'member' && st.expression.target.object.type === 'this' && cls.fieldIndex.has(st.expression.target.property)) {
 				setField(st.expression.target.property, st.expression.value);
 			} else {
+				// One needing the object before every field has a value (a base constructor's `this.set(...)` runs before a derived class's own
+				// initializers, as in JS): the rest start at their defaults here, at the constructor's own level, where it dominates what follows.
+				if (ctx.ctorFields && needsThis(st, ctx.ctorFields))
+					ctx.ctorEarlyThis?.();
 				emitStmt(st, ctx);
 			}
 		}
@@ -9222,7 +9237,22 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					ctx.ctorThis = thisLocal;
 					ctx.onReturn = ctorOnReturn;
 					ctx.ctorFields = undefined;
+					ctx.ctorEarlyThis = undefined;
 					ctx.emit(I.local.set(thisLocal.index));
+				};
+				ctx.ctorEarlyThis = () => {
+					const missing = cls.fields.filter(f => !values.has(f.name));
+					if (missing.some(f => !hasDefault(f.wtype)))
+						return false;
+					for (const f of missing) {
+						const local = ctx.declareLocal(`$field$${f.name}`, f.wtype, true);
+						ctx.emitDefaultValue(f.wtype, types, toValType);
+						ctx.emit(I.local.set(local.index));
+						values.set(f.name, local);
+					}
+					remaining.clear();
+					materializeThis();
+					return true;
 				};
 				// Every field optional, or none: nothing will empty `remaining`, so `this` exists before the body runs.
 				if (!remaining.size)
@@ -10261,7 +10291,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 
 
 	// Each class a function body declares, at any depth, marked local afresh for this compile (`LocalClass`).
-	let localClasses = 0;
+	const localClassDecls: TS.Class[] = [];
 	const markLocalClasses = (body: Stmt[], home: string) => {
 		let depth = 0;
 		const inFunction = (process: () => boolean) => {
@@ -10273,7 +10303,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		walkerB(
 			(st, process) => {
 				if (st.type === 'class_decl' && depth)
-					Object.assign(st, { localClass: { id: localClasses++, home } });
+					Object.assign(st, { localClass: { id: localClassDecls.push(st) - 1, home } });
 				return st.type === 'function_decl' ? inFunction(() => process(st)) : process(st);
 			},
 			(e, process) => e.type === 'arrow' || e.type === 'function' ? inFunction(() => process(e)) : process(e),
@@ -10427,12 +10457,13 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 		...[...LIB_DECL_MAP.values()].filter(d => d.type === 'class_decl'),
 		...userGenericClassDecls.values(),
 		...[...classes.values()].map(c => c.decl),
+		...localClassDecls,
 	]) {
 		const superRef = superClassRef(d.superClass);
 		if (superRef) {
 			everExtended.add(superRef.name.slice(superRef.name.lastIndexOf('.') + 1));
 			// By identity, not name: `class Base extends W.Base` is not its own subclass.
-			const superId	= classIdentity(stmtHomeModule, superRef, moduleScopeOf(stmtHomeModule.get(d)) ?? global);
+			const superId	= classIdentity(stmtHomeModule, superRef, moduleScopeOf(stmtHomeModule.get(d) ?? localClassOf(d)?.home) ?? global);
 			const list		= directSubclasses.get(superId);
 			if (list)
 				list.push(d);

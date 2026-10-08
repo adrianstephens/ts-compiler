@@ -286,6 +286,8 @@ export class FunctionContext {
 	// Set while a collecting constructor (`ensureCtor`) gathers field values ahead of `struct.new`: `this.field` reads a collected field's local
 	// before a real `this` exists. Cleared once `ctorThis` is set.
 	ctorFields?: Map<string, Local>;
+	// Builds `this` early, the uncollected fields at their defaults; false when one of them has none.
+	ctorEarlyThis?: () => boolean;
 
 	depth = 0;
 	breakTargets:		number[] = [];

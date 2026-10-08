@@ -5829,6 +5829,32 @@ async function main() {
 		check('a local class', localClasses.p(), 1);
 		check('a local class capturing its scope, from a nested closure too', localClasses.c(), 222);
 		check('a local class per loop iteration', localClasses.l(), 44);
+		// A derived class whose base constructor uses `this` (Map's `this.set(...)`) before the derived class's own fields are initialized, as JS
+		// orders it: the object is built there, its own fields at their defaults until their initializers run. Top level and local.
+		const derivedEarly = await compile(`
+			const reachable = new Set<string>();
+			class Owners extends Map<string, number[]> {
+				exported = false;
+				add(name: string, v: number) {
+					this.set(name, [...(this.get(name) ?? []), v]);
+					if (this.exported)
+						reachable.add(name);
+				}
+			}
+			export function top(): number { const o = new Owners([['z', [9]]]); o.add('a', 1); o.exported = true; o.add('b', 2); o.add('b', 3); return o.get('b')!.length * 100 + reachable.size * 10 + o.size; }
+			export function local(): number {
+				class Tally extends Map<string, number> {
+					step = 1;
+					bump(k: string) { this.set(k, (this.get(k) ?? 0) + this.step); seen.add(k); }
+				}
+				const t = new Tally();
+				const seen = new Set<string>();
+				t.bump('x'); t.step = 5; t.bump('x'); t.bump('y');
+				return t.get('x')! * 100 + t.get('y')! * 10 + seen.size;
+			}
+		`);
+		check('a derived class whose base constructor uses this early', derivedEarly.top(), 213);
+		check('a local class extending Map, capturing its scope', derivedEarly.local(), 652);
 		const { forwardConst } = await compile(`
 			function f(): number { const early = () => h(1); const base = 100; return early(); function h(n: number): number { return base + n; } }
 			export function forwardConst(): number { return f(); }
