@@ -1732,6 +1732,15 @@ async function main() {
 	}
 
 	{
+		// A field whose type admits `undefined` may be left uninitialized: it starts `undefined`, as in JS.
+		const { uninitField } = await compile(`
+			class Holder<T> { last: T | undefined; count = 0; put(v: T) { this.last = v; this.count++; } }
+			export function uninitField(): number { const h = new Holder<number[]>(); const before = h.last === undefined ? 1 : 0; h.put([4, 5]); return before * 100 + h.count * 10 + h.last![1]; }
+		`);
+		check('uninitField() (an uninitialized T | undefined field)', uninitField(), 115);
+	}
+
+	{
 		// `Object.values` of a struct is built as the checker types it: `{ a: 1, b: 2 }` infers `number[]` from its properties.
 		const { structValues } = await compile(`
 			export function structValues(): number { const o = { a: 1, b: 2 }; const v = Object.values(o); return v.length * 100 + v[0] + v[1] * 10 + Object.keys(o).length * 1000 + Object.entries(o).length * 10000; }

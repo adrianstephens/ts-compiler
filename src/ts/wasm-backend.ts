@@ -942,6 +942,9 @@ function accessorKey(kind: 'get' | 'set', name: string): string {
 // Call signatures alone are a plain closure; with fields beside them, a callable object (`ClassInfo.callable`).
 const onlyCalls = (members: readonly TS.TypeMember[]) => members.length > 0 && members.every(m => m.type === 'call');
 // A `void` param, field or element has no wasm value of its own: a nullable `any`, whose only value is `undefined`.
+// Whether `undefined` is a value of `t` as written, whatever `strictNullChecks` says: `any`, `unknown`, or a union with `undefined`/`void`.
+const admitsUndefined = (t: Type, scope: Scope) => T.isAny(t) || T.isRef(T.resolveOwn(t, scope), 'unknown')
+	|| T.unionMembers(t, scope).some(m => (r => T.isRef(r, 'undefined') || T.isRef(r, 'void'))(T.resolveOwn(m, scope)));
 const voidSlot = (w: W.Type): W.Type => w === 'void' ? W.REF_ANY_NULLABLE : w;
 const isStructLayout = (members: readonly TS.TypeMember[]) => !onlyCalls(members) && members.every(m => m.type === 'property' || m.type === 'method' || m.type === 'call');
 
@@ -8990,7 +8993,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 					// A `declare` over an INHERITED field only re-narrows its type (`declare superClass?: ClassInfo`); the slot is the base's.
 					else if (!m.modifiers?.includes('static') && !(hasMod(m, 'declare') && info.superClass?.fieldIndex.has(String(m.key))))
 						// Neither an annotation nor an initializer (`opts;`): the constructor's `this.opts = ...` types it, which the checker's `classShapes` infers.
-						addField(info, String(m.key), (t => t && openedAs(m, t))(m.typeAnnotation ?? (m.value ? checkerTypeOf(m.value, homeScope) : T.lookupMember(info.thisTsType, String(m.key), homeScope))), !m.value && (hasMod(m, 'optional') || hasMod(m, 'declare')));
+						// One with no initializer starts `undefined`, which a type admitting it (`last: T | undefined`) lets the constructor leave.
+						addField(info, String(m.key), (t => t && openedAs(m, t))(m.typeAnnotation ?? (m.value ? checkerTypeOf(m.value, homeScope) : T.lookupMember(info.thisTsType, String(m.key), homeScope))),
+							!m.value && (hasMod(m, 'optional') || hasMod(m, 'declare') || (!!m.typeAnnotation && admitsUndefined(m.typeAnnotation, homeScope))));
 
 				} else if (m.type === 'method') {
 					// A computed name with a static spelling (`[Symbol.iterator]`) is registered under it, which the iteration protocol calls.
