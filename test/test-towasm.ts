@@ -5869,6 +5869,15 @@ async function main() {
 			export function fewerParams(): number { return callIt(() => 7) + callIt((a: number) => a); }
 		`);
 		check('a call through any to a closure with fewer parameters', fewerParams(), 17);
+		// A key only an assertion declares (`(node as { scope?: S }).scope`, as the compiler reads the checker's stamps) is looked up by name, absent
+		// or written through `any`.
+		const assertedKeys = await compile(`
+			interface N { type: 'n'; v: number }
+			class Sc { n = 4; }
+			const read = (n: N): number => (n as { scope?: Sc }).scope?.n ?? -1;
+			export function absent(): number { const n: N = { type: 'n', v: 1 }; return read(n); }
+		`);
+		check('a key only an assertion declares, absent', assertedKeys.absent(), -1);
 		const { forwardConst } = await compile(`
 			function f(): number { const early = () => h(1); const base = 100; return early(); function h(n: number): number { return base + n; } }
 			export function forwardConst(): number { return f(); }

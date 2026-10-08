@@ -3415,6 +3415,9 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 	}
 	// An object ASSERTED `any` (`(switches as any).default`) is read as one: a key its type lacks reads `undefined` where absent.
 	const assertedAny = (e: Expr) => e.type === 'as' && T.isAny(e.typeAnnotation);
+	// A key an assertion declares that the value's own layout lacks (`(node as { scope?: Scope }).scope`, an expando the checker adds): by name.
+	const assertedKey = (e: Expr, key: string, ctx: FunctionContext): boolean =>
+		e.type === 'as' && (!!T.lookupMember(T.nonNullable(ctx.typeAt(e), ctx.scope), key, ctx.scope) || assertedKey(e.expression, key, ctx));
 
 	// Each argument of a call dispatched at run time, as its own representation: a bare `null`/`undefined` has none, so it goes as a null `any`.
 	function emitDynamicArgs(args: Expr[], ctx: FunctionContext): W.Type[] {
@@ -5259,7 +5262,7 @@ export function TStoWasm(ast: Module, modules?: Map<string, Module>, onTopLevelE
 			const refined	= !write && ctx.stampedTypeOf(unwrapAs(target.object));
 			// So is one ASSERTED `any` (`(switches as any).default`): a key its type lacks, which reads `undefined` where absent.
 			const dynamic	= T.isAny(T.resolveOwn(ctx.narrowedTypeOf(target.object), ctx.scope)) || physicallyAny(target.object, ctx)
-				|| assertedAny(target.object)
+				|| assertedAny(target.object) || assertedKey(target.object, prop, ctx)
 				|| (!!refined && !!T.lookupMember(refined, prop, ctx.scope) && !T.lookupMember(checkerTypeOf(unwrapAs(target.object), ctx.scope), prop, ctx.scope))
 				|| (write && [...classes.values()].some(c => c.fieldIndex.has(prop) && c.typeIndex !== -1));
 			if (dynamic)
