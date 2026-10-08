@@ -94,6 +94,7 @@ precedence resolution, debugging technique, cloud-agent deps — are in `../tiso
 - [towasm capabilities](tison_towasm_capabilities.md) — index of closed feature work + the checker fixes whose blast radius exceeded their bug report
 - [difftest cross-module cases](tison_difftest_cross_module.md) — `addModule`/`addCross` + `--only`; the only instrument that sees cross-module bugs
 - [SELF-HOSTING PLAN](tison_towasm_self_hosting_plan.md) — goal: wasm-backend compiles its OWN source unmodified (never adapt a surveyed file). Distilled: instruments (`selfhost-survey.sh` reads MOVED/REGRESSED not the total, `probe-decl.ts`, `difftest.sh`, `corpus-ab.sh`) and their traps, the codegen/checker design invariants, user decisions, recorded-open items. Live numbers are in the handoff
+- [instrumenting the self-compile](instrument_self_compile_trap.md) — a debug line in wasm-backend.ts is compiled by its own probe too; probe a scratch snapshot (`SURVEY_SNAPSHOT=…/probe-snap`)
 - [checker perf debugging](tison_checker_perf_debugging.md) — `sample <pid>`, or `assistant/inspect-profile.mjs` when JIT frames are `???`; count resolve depth bails first
 - [interface inheritance](tison_interface_inheritance.md) — `extends` IS an intersection; last part = most concrete, and all four consumers must read it backwards
 - [closure-param causes](tison_closure_param_causes.md) — the survey's `closure parameter 'X'` rows are THREE unrelated blockers, not one; read before working that row

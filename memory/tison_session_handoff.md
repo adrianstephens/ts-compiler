@@ -1,10 +1,10 @@
 ---
 name: tison-session-handoff
-description: LIVE cold-start state for the wasm-backend self-hosting work -- where things stand (survey 508/514 at 7490d09, 2026-10-07; async lowering general), the top blockers, what the user decided and has not decided, open-not-fixed items, and the contracts to know before editing codegen. Read this before anything else.
+description: LIVE cold-start state for the wasm-backend self-hosting work -- where things stand (TStoWasm probe blocked on a variadic->fixed closure adaptation awaiting the user, 2026-10-08; survey 510/514 at 88826d1), the top blockers, what the user decided and has not decided, open-not-fixed items, and the contracts to know before editing codegen. Read this before anything else.
 metadata:
   node_type: memory
   type: project
-  modified: 2026-10-07
+  modified: 2026-10-08
 ---
 
 **Read this first, then [[tison_towasm_self_hosting_plan]] (distilled: instruments, traps, design invariants) only for a specific
@@ -20,6 +20,33 @@ launched without `SURVEY_HEAP_MB=6144` OOMed every wasm-backend.ts and binary-li
 after GC, half of it the imports' checks). A crashed worker's log line now carries V8's FATAL message. **6144 x the default 8 workers swapped this
 16 GB Mac to a halt (2026-10-01)**: the scheduler now costs every job at >= half the heap cap (V8's garbage ceiling), so 6144
 runs ~2 workers here -- slower, but the machine stays usable. Ask before a full run; `SURVEY_JOBS` caps it further.
+
+## 2026-10-08 session (latest -- read first)
+
+The TStoWasm probe (`probe-decl.ts compiler/src/ts/wasm-backend.ts TStoWasm`, ~2.5 min) advanced through ten fixes, `98a5852`..`2251fef`
+(each commit message has root cause + mechanism): parser `({...x})` as a literal until `=>` (forceFork; corpus gate 838 -> 833);
+`C & {k}` is C's instance (`classPartOf`); generic-shape erasure kept unless the erased shape is a FIXED layout with other member
+names (`layoutArgs` -- `Omit<C,'k'>` keeps its args, `NodeMap<X>` still erases to a dynamic object; the first version regressed
+walker.ts, caught by probing the `walker` decl); `?.()` through `any` guarded; `delete (x as any).k` via `readsAsAny`; checker:
+`void` assignable to no class (`void extends Promise<any>` was true); lib `Promise.resolve()`; `void` slots are NULLABLE `any`
+(`voidSlot`; the non-null placeholder stays for erased type params); an owner with `#ext` takes undeclared-key writes at run time.
+Gates at `2251fef`: towasm/checker/cpp green, difftest 2233/2235, corpus A/B 0 delta, lib-decls 5 = baseline. Survey NOT re-run.
+
+**WAITING ON THE USER -- the probe's current stop.** binary's `TypedArray<R>` factory (binary/src/utilities/typedArray.ts ~:96) returns
+`Object.assign(ctor, {...}) as any as TypedArrayConstructor<R>`; `ctor(...args: any[])` branches on `args.length`, the slot is the
+merged construct signature `(a, byteOffset?, length?)`. coerceTop refuses rest->fixed. A wrapper packing the fixed params into the rest
+array would make `new X(5)` arrive with `args.length === 3` (omitted optionals are filled with `undefined`), taking the buffer branch.
+Options put to the user: (a) pack, trimming trailing omitted-optional `undefined`s (miscounts an explicit trailing `undefined`);
+(b) carry a real argument count through fixed-arity closure calls (general, larger); (c) something else.
+
+Found, not fixed (2026-10-08): `for (k in obj)` over a struct enumerates absent optional fields (`Partial` mappers count 3 keys, not 1);
+an undeclared key written onto a LIB class instance traps (lib classes keep their layout); `object` into a class with members is
+accepted (missed error); walker.ts's literal into an UN-erased `NodeMap<{type:'static_block'...}>` struct finds no owner (unreached
+now); a field `v: V | undefined` with no initializer and no constructor write is rejected ("never assigns field(s) v"; TS allows it);
+a generic function returning a closure over `T[]` erases to `Array<any>` (`cannot convert Array<any> to Array<number>`, repro: a
+`mapArrayA<T>` over `number[]`). Self-check (`self-errors.sh`) at HEAD: type-core 4, checker 4, codegen 1, compiler walker.ts 4 --
+checker false positives (filter predicates, `(Type|undefined)[]`), present before this session's checker change; not investigated.
+Instrumenting wasm-backend.ts while probing it: see [[instrument_self_compile_trap]].
 
 ## State at 2026-10-05 (session end)
 
