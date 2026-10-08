@@ -1,6 +1,6 @@
 ---
 name: tison-session-handoff
-description: LIVE cold-start state for the wasm-backend self-hosting work -- where things stand (TStoWasm probe blocked on a variadic->fixed closure adaptation awaiting the user, 2026-10-08; survey 510/514 at 88826d1), the top blockers, what the user decided and has not decided, open-not-fixed items, and the contracts to know before editing codegen. Read this before anything else.
+description: LIVE cold-start state for the wasm-backend self-hosting work -- where things stand (TStoWasm COMPILES WHOLE 2026-10-08, 11677 funcs; survey 510/514 at 88826d1, not re-run since), the top blockers, what the user decided and has not decided, open-not-fixed items, and the contracts to know before editing codegen. Read this before anything else.
 metadata:
   node_type: memory
   type: project
@@ -32,17 +32,20 @@ walker.ts, caught by probing the `walker` decl); `?.()` through `any` guarded; `
 (`voidSlot`; the non-null placeholder stays for erased type params); an owner with `#ext` takes undeclared-key writes at run time.
 Gates at `2251fef`: towasm/checker/cpp green, difftest 2233/2235, corpus A/B 0 delta, lib-decls 5 = baseline. Survey NOT re-run.
 
-**WAITING ON THE USER -- the probe's current stop.** binary's `TypedArray<R>` factory (binary/src/utilities/typedArray.ts ~:96) returns
-`Object.assign(ctor, {...}) as any as TypedArrayConstructor<R>`; `ctor(...args: any[])` branches on `args.length`, the slot is the
-merged construct signature `(a, byteOffset?, length?)`. coerceTop refuses rest->fixed. A wrapper packing the fixed params into the rest
-array would make `new X(5)` arrive with `args.length === 3` (omitted optionals are filled with `undefined`), taking the buffer branch.
-Options put to the user: (a) pack, trimming trailing omitted-optional `undefined`s (miscounts an explicit trailing `undefined`);
-(b) carry a real argument count through fixed-arity closure calls (general, larger); (c) something else.
+**MILESTONE (2026-10-08, later): `probe-decl.ts compiler/src/ts/wasm-backend.ts TStoWasm` COMPILES -- 11677 funcs.** Needs
+`NODE_OPTIONS=--max-old-space-size=6144` (the default 4 GB OOMs now that it gets this far). Commits after the user's choice of option (a)
+for variadic->fixed adaptation (`emitPackedRest`: an explicit trailing `undefined` reads as omitted -- the recorded, accepted
+limitation): callable types keep optional params (`mergeOverloadSigs`); checker types arithmetic on `any` as number/bigint (only `+`
+stays `any`; corpus ERROR +1 is a true error tsc now reports); fields admitting `undefined` may stay uninitialized (`admitsUndefined`);
+any-dispatch filters METHOD candidates by argument kind (`takes`); intrinsic statics are function values (`asmFunction`), a tuple rest
+is fixed params (`fixedRest`), `LIB_MODULE` resolves lib globals. NOT yet done: running what it compiles (validate/instantiate the
+module, then use it), and the survey (last 510/514 at 88826d1; CI runs it on push -- these commits are NOT pushed).
+Also found: a method call on a class held as `any` (`(Math as any).abs(-4)`) has no arm for a class value's statics.
 
 Found, not fixed (2026-10-08): `for (k in obj)` over a struct enumerates absent optional fields (`Partial` mappers count 3 keys, not 1);
 an undeclared key written onto a LIB class instance traps (lib classes keep their layout); `object` into a class with members is
 accepted (missed error); walker.ts's literal into an UN-erased `NodeMap<{type:'static_block'...}>` struct finds no owner (unreached
-now); a field `v: V | undefined` with no initializer and no constructor write is rejected ("never assigns field(s) v"; TS allows it);
+now);
 a generic function returning a closure over `T[]` erases to `Array<any>` (`cannot convert Array<any> to Array<number>`, repro: a
 `mapArrayA<T>` over `number[]`). Self-check (`self-errors.sh`) at HEAD: type-core 4, checker 4, codegen 1, compiler walker.ts 4 --
 checker false positives (filter predicates, `(Type|undefined)[]`), present before this session's checker change; not investigated.
